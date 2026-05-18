@@ -1,22 +1,33 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Shubham Motors AI Voice Agent API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: leads
+    description: Lead management
+  - name: calls
+    description: Call management
+  - name: knowledge
+    description: Knowledge base management
+  - name: followups
+    description: Follow-up scheduling
+  - name: analytics
+    description: Analytics and reporting
+  - name: webhooks
+    description: Webhook handlers for Exotel and external services
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +35,923 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  # ── LEADS ──────────────────────────────────────────────────────────────────
+  /leads:
+    get:
+      operationId: listLeads
+      tags: [leads]
+      summary: List all leads
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: score
+          in: query
+          schema:
+            type: string
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of leads
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Lead"
+    post:
+      operationId: createLead
+      tags: [leads]
+      summary: Create a single lead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeadInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lead"
+
+  /leads/import:
+    post:
+      operationId: importLeads
+      tags: [leads]
+      summary: Bulk import leads from CSV/JSON
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeadImport"
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportResult"
+
+  /leads/{id}:
+    get:
+      operationId: getLead
+      tags: [leads]
+      summary: Get a lead by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Lead
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lead"
+        "404":
+          description: Not found
+    patch:
+      operationId: updateLead
+      tags: [leads]
+      summary: Update a lead
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LeadUpdate"
+      responses:
+        "200":
+          description: Updated lead
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Lead"
+    delete:
+      operationId: deleteLead
+      tags: [leads]
+      summary: Delete a lead
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /leads/{id}/call:
+    post:
+      operationId: triggerOutboundCall
+      tags: [leads]
+      summary: Trigger an outbound call to a lead
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Call initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallInitiated"
+
+  # ── CALLS ──────────────────────────────────────────────────────────────────
+  /calls:
+    get:
+      operationId: listCalls
+      tags: [calls]
+      summary: List call logs
+      parameters:
+        - name: leadId
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of calls
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CallLog"
+
+  /calls/{id}:
+    get:
+      operationId: getCall
+      tags: [calls]
+      summary: Get call details with transcript
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Call log with transcript
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallLog"
+        "404":
+          description: Not found
+
+  /calls/{id}/transfer:
+    post:
+      operationId: transferCall
+      tags: [calls]
+      summary: Transfer a hot lead call to a salesperson
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallTransfer"
+      responses:
+        "200":
+          description: Transfer initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallInitiated"
+
+  # ── WEBHOOKS ───────────────────────────────────────────────────────────────
+  /webhooks/exotel/inbound:
+    post:
+      operationId: exotelInboundWebhook
+      tags: [webhooks]
+      summary: Handle inbound call from Exotel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExotelWebhookPayload"
+      responses:
+        "200":
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAck"
+
+  /webhooks/exotel/status:
+    post:
+      operationId: exotelStatusWebhook
+      tags: [webhooks]
+      summary: Handle call status updates from Exotel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExotelWebhookPayload"
+      responses:
+        "200":
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookAck"
+
+  /webhooks/voice/stream:
+    post:
+      operationId: voiceStreamWebhook
+      tags: [webhooks]
+      summary: Handle real-time voice audio stream (Sarvam STT)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VoiceStreamPayload"
+      responses:
+        "200":
+          description: TTS audio response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoiceStreamResponse"
+
+  # ── KNOWLEDGE BASE ─────────────────────────────────────────────────────────
+  /knowledge:
+    get:
+      operationId: listKnowledgeItems
+      tags: [knowledge]
+      summary: List knowledge base items
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Knowledge items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeItem"
+    post:
+      operationId: createKnowledgeItem
+      tags: [knowledge]
+      summary: Add knowledge base item (model, price, offer, brochure)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeItemInput"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeItem"
+
+  /knowledge/{id}:
+    patch:
+      operationId: updateKnowledgeItem
+      tags: [knowledge]
+      summary: Update a knowledge base item
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeItemUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeItem"
+    delete:
+      operationId: deleteKnowledgeItem
+      tags: [knowledge]
+      summary: Delete a knowledge base item
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  # ── FOLLOW-UPS ─────────────────────────────────────────────────────────────
+  /followups:
+    get:
+      operationId: listFollowups
+      tags: [followups]
+      summary: List scheduled follow-ups
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: dueToday
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: Follow-ups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Followup"
+    post:
+      operationId: createFollowup
+      tags: [followups]
+      summary: Schedule a follow-up
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowupInput"
+      responses:
+        "201":
+          description: Scheduled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Followup"
+
+  /followups/{id}:
+    patch:
+      operationId: updateFollowup
+      tags: [followups]
+      summary: Update a follow-up
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowupUpdate"
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Followup"
+    delete:
+      operationId: deleteFollowup
+      tags: [followups]
+      summary: Delete a follow-up
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /followups/{id}/execute:
+    post:
+      operationId: executeFollowup
+      tags: [followups]
+      summary: Manually execute a follow-up call now
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Executed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallInitiated"
+
+  # ── ANALYTICS ──────────────────────────────────────────────────────────────
+  /analytics/dashboard:
+    get:
+      operationId: getDashboardStats
+      tags: [analytics]
+      summary: Get dashboard summary statistics
+      responses:
+        "200":
+          description: Dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
+  /analytics/lead-funnel:
+    get:
+      operationId: getLeadFunnel
+      tags: [analytics]
+      summary: Get lead conversion funnel breakdown
+      responses:
+        "200":
+          description: Funnel data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FunnelStage"
+
+  /analytics/call-performance:
+    get:
+      operationId: getCallPerformance
+      tags: [analytics]
+      summary: Get call performance over time
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Performance data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CallPerformanceDay"
+
+  /analytics/hot-leads:
+    get:
+      operationId: getHotLeads
+      tags: [analytics]
+      summary: Get top hot leads ready to buy
+      responses:
+        "200":
+          description: Hot leads
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Lead"
+
+  /analytics/recent-activity:
+    get:
+      operationId: getRecentActivity
+      tags: [analytics]
+      summary: Get recent call and follow-up activity feed
+      responses:
+        "200":
+          description: Recent activity
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityItem"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    # ── LEAD ────────────────────────────────────────────────────────────────
+    Lead:
+      type: object
+      required: [id, name, phone, status, score, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: ["string", "null"]
+        status:
+          type: string
+          enum: [new, contacted, interested, hot, converted, lost, followup]
+        score:
+          type: integer
+          description: Lead score 0-100
+        interestedModel:
+          type: ["string", "null"]
+        language:
+          type: ["string", "null"]
+        notes:
+          type: ["string", "null"]
+        source:
+          type: ["string", "null"]
+        lastCallId:
+          type: ["integer", "null"]
+        nextFollowupAt:
+          type: ["string", "null"]
+        intentSummary:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    LeadInput:
+      type: object
+      required: [name, phone]
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        interestedModel:
+          type: string
+        source:
+          type: string
+        notes:
+          type: string
+
+    LeadUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+        status:
+          type: string
+        score:
+          type: integer
+        interestedModel:
+          type: string
+        language:
+          type: string
+        notes:
+          type: string
+        nextFollowupAt:
+          type: string
+        intentSummary:
+          type: string
+
+    LeadImport:
+      type: object
+      required: [leads]
+      properties:
+        leads:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeadInput"
+
+    ImportResult:
+      type: object
+      required: [imported, failed, total]
+      properties:
+        imported:
+          type: integer
+        failed:
+          type: integer
+        total:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+
+    # ── CALL ────────────────────────────────────────────────────────────────
+    CallLog:
+      type: object
+      required: [id, leadId, direction, status, createdAt]
+      properties:
+        id:
+          type: integer
+        leadId:
+          type: integer
+        leadName:
+          type: ["string", "null"]
+        leadPhone:
+          type: ["string", "null"]
+        direction:
+          type: string
+          enum: [inbound, outbound]
+        status:
+          type: string
+          enum: [initiated, ringing, in_progress, completed, failed, missed, transferred]
+        duration:
+          type: ["integer", "null"]
+        transcript:
+          type: ["string", "null"]
+        summary:
+          type: ["string", "null"]
+        intentDetected:
+          type: ["string", "null"]
+        scoreAfterCall:
+          type: ["integer", "null"]
+        languageDetected:
+          type: ["string", "null"]
+        whatsappSent:
+          type: boolean
+        transferredTo:
+          type: ["string", "null"]
+        exotelCallSid:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    CallInitiated:
+      type: object
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        callSid:
+          type: ["string", "null"]
+
+    CallTransfer:
+      type: object
+      required: [salesPersonNumber]
+      properties:
+        salesPersonNumber:
+          type: string
+
+    ExotelWebhookPayload:
+      type: object
+      properties:
+        CallSid:
+          type: string
+        From:
+          type: string
+        To:
+          type: string
+        Status:
+          type: string
+        RecordingUrl:
+          type: ["string", "null"]
+        Duration:
+          type: ["string", "null"]
+        Direction:
+          type: ["string", "null"]
+
+    VoiceStreamPayload:
+      type: object
+      required: [callSid, audioData, language]
+      properties:
+        callSid:
+          type: string
+        audioData:
+          type: string
+          description: Base64 encoded audio
+        language:
+          type: string
+
+    VoiceStreamResponse:
+      type: object
+      required: [text, audioData]
+      properties:
+        text:
+          type: string
+        audioData:
+          type: string
+          description: Base64 encoded TTS audio
+        shouldTransfer:
+          type: boolean
+        transferNumber:
+          type: ["string", "null"]
+
+    WebhookAck:
+      type: object
+      required: [received]
+      properties:
+        received:
+          type: boolean
+
+    # ── KNOWLEDGE ────────────────────────────────────────────────────────────
+    KnowledgeItem:
+      type: object
+      required: [id, title, category, content, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        category:
+          type: string
+          enum: [model, price, offer, brochure, faq, policy, general]
+        content:
+          type: string
+        modelName:
+          type: ["string", "null"]
+        fileUrl:
+          type: ["string", "null"]
+        isActive:
+          type: boolean
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    KnowledgeItemInput:
+      type: object
+      required: [title, category, content]
+      properties:
+        title:
+          type: string
+        category:
+          type: string
+        content:
+          type: string
+        modelName:
+          type: string
+        fileUrl:
+          type: string
+
+    KnowledgeItemUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+        category:
+          type: string
+        content:
+          type: string
+        modelName:
+          type: string
+        fileUrl:
+          type: string
+        isActive:
+          type: boolean
+
+    # ── FOLLOW-UP ─────────────────────────────────────────────────────────────
+    Followup:
+      type: object
+      required: [id, leadId, scheduledAt, status, reason, createdAt]
+      properties:
+        id:
+          type: integer
+        leadId:
+          type: integer
+        leadName:
+          type: ["string", "null"]
+        leadPhone:
+          type: ["string", "null"]
+        scheduledAt:
+          type: string
+        status:
+          type: string
+          enum: [pending, completed, cancelled, failed]
+        reason:
+          type: string
+          description: Why this follow-up was scheduled (e.g. 'will visit after Diwali')
+        intentLabel:
+          type: ["string", "null"]
+        callId:
+          type: ["integer", "null"]
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+
+    FollowupInput:
+      type: object
+      required: [leadId, scheduledAt, reason]
+      properties:
+        leadId:
+          type: integer
+        scheduledAt:
+          type: string
+        reason:
+          type: string
+        intentLabel:
+          type: string
+
+    FollowupUpdate:
+      type: object
+      properties:
+        scheduledAt:
+          type: string
+        status:
+          type: string
+        reason:
+          type: string
+
+    # ── ANALYTICS ─────────────────────────────────────────────────────────────
+    DashboardStats:
+      type: object
+      required: [totalLeads, hotLeads, callsToday, conversionRate, followupsDue, avgLeadScore, totalCalls, whatsappSent]
+      properties:
+        totalLeads:
+          type: integer
+        hotLeads:
+          type: integer
+        callsToday:
+          type: integer
+        conversionRate:
+          type: number
+        followupsDue:
+          type: integer
+        avgLeadScore:
+          type: number
+        totalCalls:
+          type: integer
+        whatsappSent:
+          type: integer
+
+    FunnelStage:
+      type: object
+      required: [stage, count, percentage]
+      properties:
+        stage:
+          type: string
+        count:
+          type: integer
+        percentage:
+          type: number
+
+    CallPerformanceDay:
+      type: object
+      required: [date, totalCalls, completed, transferred, avgDuration]
+      properties:
+        date:
+          type: string
+        totalCalls:
+          type: integer
+        completed:
+          type: integer
+        transferred:
+          type: integer
+        avgDuration:
+          type: number
+
+    ActivityItem:
+      type: object
+      required: [id, type, description, createdAt]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [call_completed, call_missed, followup_scheduled, lead_scored_hot, whatsapp_sent, call_transferred]
+        description:
+          type: string
+        leadName:
+          type: ["string", "null"]
+        createdAt:
+          type: string

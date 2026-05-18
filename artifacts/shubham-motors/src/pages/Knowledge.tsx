@@ -1,0 +1,167 @@
+import { useState } from "react";
+import { Plus, Edit2, Trash2, Check, X, BookOpen } from "lucide-react";
+import {
+  useListKnowledgeItems, getListKnowledgeItemsQueryKey,
+  useCreateKnowledgeItem, useUpdateKnowledgeItem, useDeleteKnowledgeItem
+} from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+
+const CATEGORIES = ["model", "price", "offer", "brochure", "faq", "policy", "general"];
+const CAT_COLORS: Record<string, string> = {
+  model: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  price: "bg-green-500/20 text-green-400 border-green-500/30",
+  offer: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
+  brochure: "bg-purple-500/20 text-purple-400 border-purple-500/30",
+  faq: "bg-orange-500/20 text-orange-400 border-orange-500/30",
+  policy: "bg-red-500/20 text-red-400 border-red-500/30",
+  general: "bg-muted text-muted-foreground border-border",
+};
+
+const emptyForm = { title: "", category: "general", content: "", modelName: "", fileUrl: "" };
+
+export default function Knowledge() {
+  const [catFilter, setCatFilter] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [editId, setEditId] = useState<number | null>(null);
+  const [form, setForm] = useState({ ...emptyForm });
+  const qc = useQueryClient();
+
+  const { data: items, isLoading } = useListKnowledgeItems(
+    { category: catFilter || undefined },
+    { query: { queryKey: getListKnowledgeItemsQueryKey({ category: catFilter || undefined }) } }
+  );
+  const create = useCreateKnowledgeItem();
+  const update = useUpdateKnowledgeItem();
+  const remove = useDeleteKnowledgeItem();
+
+  function invalidate() {
+    qc.invalidateQueries({ queryKey: getListKnowledgeItemsQueryKey() });
+  }
+
+  function handleCreate() {
+    if (!form.title || !form.content) { toast.error("Title and content required"); return; }
+    create.mutate({ data: form }, {
+      onSuccess: () => { toast.success("Added to knowledge base"); setAddOpen(false); setForm({ ...emptyForm }); invalidate(); },
+      onError: () => toast.error("Failed"),
+    });
+  }
+
+  function startEdit(item: NonNullable<typeof items>[0]) {
+    setEditId(item.id);
+    setForm({ title: item.title, category: item.category, content: item.content, modelName: item.modelName ?? "", fileUrl: item.fileUrl ?? "" });
+  }
+
+  function saveEdit() {
+    if (!editId) return;
+    update.mutate({ id: editId, data: form }, {
+      onSuccess: () => { toast.success("Updated"); setEditId(null); invalidate(); },
+    });
+  }
+
+  function handleDelete(id: number) {
+    if (!confirm("Delete this knowledge item?")) return;
+    remove.mutate({ id }, { onSuccess: () => { toast.success("Deleted"); invalidate(); } });
+  }
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold">Knowledge Base</h1>
+          <p className="text-xs text-muted-foreground mt-0.5">The AI agent's brain — models, prices, offers, FAQs</p>
+        </div>
+        <Dialog open={addOpen} onOpenChange={setAddOpen}>
+          <DialogTrigger asChild>
+            <Button size="sm" className="gap-2 text-xs" data-testid="add-knowledge-button"><Plus size={13} />Add Item</Button>
+          </DialogTrigger>
+          <DialogContent className="bg-card border-card-border max-w-lg">
+            <DialogHeader><DialogTitle>Add Knowledge Item</DialogTitle></DialogHeader>
+            <div className="space-y-3 pt-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div><Label className="text-xs mb-1 block">Title *</Label><Input placeholder="e.g. Splendor Plus Price" value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))} data-testid="input-knowledge-title" /></div>
+                <div>
+                  <Label className="text-xs mb-1 block">Category</Label>
+                  <Select value={form.category} onValueChange={(v) => setForm(f => ({ ...f, category: v }))}>
+                    <SelectTrigger className="text-sm h-9"><SelectValue /></SelectTrigger>
+                    <SelectContent>{CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div><Label className="text-xs mb-1 block">Content *</Label><textarea className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring min-h-[100px] resize-none" placeholder="Full description, pricing details, specs..." value={form.content} onChange={(e) => setForm(f => ({ ...f, content: e.target.value }))} data-testid="input-knowledge-content" /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><Label className="text-xs mb-1 block">Model Name</Label><Input placeholder="e.g. Splendor Plus" value={form.modelName} onChange={(e) => setForm(f => ({ ...f, modelName: e.target.value }))} /></div>
+                <div><Label className="text-xs mb-1 block">File/Brochure URL</Label><Input placeholder="https://..." value={form.fileUrl} onChange={(e) => setForm(f => ({ ...f, fileUrl: e.target.value }))} /></div>
+              </div>
+              <Button className="w-full text-xs" onClick={handleCreate} disabled={create.isPending}>Add to Knowledge Base</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      </div>
+
+      {/* Category filter */}
+      <div className="flex gap-2 flex-wrap">
+        <button onClick={() => setCatFilter("")} className={`text-xs px-3 py-1.5 rounded-md border transition-colors ${!catFilter ? "bg-primary text-primary-foreground border-primary" : "border-border hover:bg-muted"}`}>All</button>
+        {CATEGORIES.map((c) => (
+          <button key={c} onClick={() => setCatFilter(c)} className={`text-xs px-3 py-1.5 rounded-md border transition-colors capitalize ${catFilter === c ? "bg-primary text-primary-foreground border-primary" : "border-border hover:bg-muted"}`} data-testid={`filter-cat-${c}`}>{c}</button>
+        ))}
+      </div>
+
+      {/* Items grid */}
+      {isLoading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-32 bg-card border border-card-border rounded-lg animate-pulse" />)}
+        </div>
+      ) : items && items.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {items.map((item) => (
+            <div key={item.id} data-testid={`knowledge-item-${item.id}`} className="bg-card border border-card-border rounded-lg p-4 space-y-2 hover:border-border/80 transition-colors">
+              {editId === item.id ? (
+                <div className="space-y-2">
+                  <Input value={form.title} onChange={(e) => setForm(f => ({ ...f, title: e.target.value }))} className="text-sm h-8" />
+                  <textarea className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring min-h-[60px] resize-none" value={form.content} onChange={(e) => setForm(f => ({ ...f, content: e.target.value }))} />
+                  <Input placeholder="File URL" value={form.fileUrl} onChange={(e) => setForm(f => ({ ...f, fileUrl: e.target.value }))} className="text-sm h-8" />
+                  <div className="flex gap-2">
+                    <button onClick={saveEdit} className="p-1.5 rounded hover:bg-green-500/20 hover:text-green-400 transition-colors"><Check size={13} /></button>
+                    <button onClick={() => setEditId(null)} className="p-1.5 rounded hover:bg-muted transition-colors"><X size={13} /></button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`text-[10px] px-2 py-0.5 rounded border font-medium capitalize shrink-0 ${CAT_COLORS[item.category] ?? CAT_COLORS.general}`}>{item.category}</span>
+                      <h3 className="text-sm font-medium truncate">{item.title}</h3>
+                    </div>
+                    <div className="flex gap-1 shrink-0">
+                      <button onClick={() => startEdit(item)} className="p-1 rounded hover:bg-muted transition-colors" data-testid={`edit-knowledge-${item.id}`}><Edit2 size={12} /></button>
+                      <button onClick={() => handleDelete(item.id)} className="p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-colors" data-testid={`delete-knowledge-${item.id}`}><Trash2 size={12} /></button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed line-clamp-3">{item.content}</p>
+                  {item.modelName && <div className="text-[10px] text-muted-foreground/70">Model: {item.modelName}</div>}
+                  {item.fileUrl && <div className="text-[10px] text-blue-400 truncate"><a href={item.fileUrl} target="_blank" rel="noopener noreferrer">{item.fileUrl}</a></div>}
+                  <div className={`flex items-center gap-1 text-[10px] ${item.isActive ? "text-green-400" : "text-muted-foreground"}`}>
+                    <div className={`w-1 h-1 rounded-full ${item.isActive ? "bg-green-400" : "bg-muted-foreground"}`} />
+                    {item.isActive ? "Active" : "Inactive"}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bg-card border border-card-border rounded-lg py-20 text-center">
+          <BookOpen size={32} className="text-muted-foreground/50 mx-auto mb-3" />
+          <div className="text-sm text-muted-foreground">No knowledge items yet.</div>
+          <div className="text-xs text-muted-foreground/70 mt-1">Add models, prices, offers, and FAQs to train your AI agent.</div>
+        </div>
+      )}
+    </div>
+  );
+}
