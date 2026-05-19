@@ -1,60 +1,81 @@
 import axios from "axios";
 import { logger } from "./logger";
 
-const EXOTEL_SID = process.env.EXOTEL_SID;
-const EXOTEL_API_KEY = process.env.EXOTEL_API_KEY;
-const EXOTEL_API_TOKEN = process.env.EXOTEL_API_TOKEN;
-const EXOTEL_VIRTUAL_NUMBER = process.env.EXOTEL_VIRTUAL_NUMBER;
+// Read at call time so any secret update + restart picks up fresh values
+function creds() {
+  return {
+    sid: process.env.EXOTEL_SID ?? "",
+    apiKey: process.env.EXOTEL_API_KEY ?? "",
+    apiToken: process.env.EXOTEL_API_TOKEN ?? "",
+    virtualNumber: process.env.EXOTEL_VIRTUAL_NUMBER ?? "",
+    base: `https://api.exotel.com/v1/Accounts/${process.env.EXOTEL_SID}`,
+  };
+}
 
-const EXOTEL_BASE = `https://api.exotel.com/v1/Accounts/${EXOTEL_SID}`;
+/**
+ * Place an outbound call via Exotel Connect API.
+ *
+ * Exotel parameter meanings:
+ *   From       = ExoPhone (your virtual landline shown as caller ID)
+ *   To         = Customer's phone number (who you want to call)
+ *   CallerId   = ExoPhone (caller ID shown to customer)
+ *   Url        = Webhook URL that returns ExoML when the call connects
+ *   StatusCallback = Webhook URL called when call status changes
+ */
+export async function makeOutboundCall(
+  toNumber: string,
+  webhookBaseUrl: string
+): Promise<string | null> {
+  const { sid, apiKey, apiToken, virtualNumber, base } = creds();
 
-export async function makeOutboundCall(toNumber: string, callbackUrl: string): Promise<string | null> {
+  // Normalise to 10-digit mobile number (no leading 0 for mobile)
+  const digits = toNumber.replace(/\D/g, "").slice(-10);
+  const inboundUrl = `${webhookBaseUrl}/api/webhooks/exotel/inbound`;
+  const statusUrl = `${webhookBaseUrl}/api/webhooks/exotel/status`;
+
+  logger.info({ sid, From: virtualNumber, To: digits, inboundUrl }, "Placing outbound call");
+
+  const params = new URLSearchParams({
+    From: virtualNumber,
+    To: digits,
+    CallerId: virtualNumber,
+    Url: inboundUrl,
+    StatusCallback: statusUrl,
+    Record: "true",
+  });
+
   try {
-    const params = new URLSearchParams({
-      From: EXOTEL_VIRTUAL_NUMBER ?? "",
-      To: toNumber,
-      CallerId: EXOTEL_VIRTUAL_NUMBER ?? "",
-      Url: callbackUrl,
-      StatusCallback: `${callbackUrl.replace("/connect", "/status")}`,
-      Record: "true",
-    });
-
     const response = await axios.post(
-      `${EXOTEL_BASE}/Calls/connect.json`,
+      `${base}/Calls/connect.json`,
       params.toString(),
       {
-        auth: {
-          username: EXOTEL_API_KEY ?? "",
-          password: EXOTEL_API_TOKEN ?? "",
-        },
+        auth: { username: apiKey, password: apiToken },
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        timeout: 10000,
+        timeout: 15000,
       }
     );
-
-    const callSid = response.data?.Call?.Sid;
-    logger.info({ toNumber, callSid }, "Outbound call initiated");
-    return callSid ?? null;
-  } catch (err) {
-    logger.error({ err, toNumber }, "Failed to initiate outbound call");
+    const call = response.data?.Call;
+    logger.info({ callSid: call?.Sid, status: call?.Status, to: digits }, "Outbound call placed");
+    return call?.Sid ?? null;
+  } catch (err: unknown) {
+    const ae = err as { response?: { status?: number; data?: unknown } };
+    logger.error(
+      { httpStatus: ae.response?.status, body: ae.response?.data, to: digits },
+      "Outbound call API error"
+    );
     return null;
   }
 }
 
 export async function transferCallToAgent(callSid: string, agentNumber: string): Promise<boolean> {
+  const { apiKey, apiToken, base } = creds();
   try {
-    const params = new URLSearchParams({
-      Url: `<?xml version="1.0" encoding="UTF-8"?><Response><Dial>${agentNumber}</Dial></Response>`,
-    });
-
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial>${agentNumber}</Dial></Response>`;
     await axios.post(
-      `${EXOTEL_BASE}/Calls/${callSid}.json`,
-      params.toString(),
+      `${base}/Calls/${callSid}.json`,
+      new URLSearchParams({ Url: xml }).toString(),
       {
-        auth: {
-          username: EXOTEL_API_KEY ?? "",
-          password: EXOTEL_API_TOKEN ?? "",
-        },
+        auth: { username: apiKey, password: apiToken },
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         timeout: 10000,
       }

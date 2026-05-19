@@ -160,9 +160,9 @@ router.post("/leads/:id/call", async (req, res): Promise<void> => {
 
   const host = process.env.REPLIT_DEV_DOMAIN
     ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-    : "http://localhost:5000";
+    : (process.env.REPLIT_DOMAINS?.split(",")[0] ? `https://${process.env.REPLIT_DOMAINS?.split(",")[0]}` : "http://localhost:5000");
 
-  const callSid = await makeOutboundCall(lead.phone, `${host}/api/webhooks/exotel/inbound`);
+  const callSid = await makeOutboundCall(lead.phone, host);
   if (callSid) {
     const { callsTable } = await import("@workspace/db");
     await db.insert(callsTable).values({
