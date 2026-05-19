@@ -1,45 +1,87 @@
-import { Router, type IRouter } from "express";
+import { Router, type IRouter, type Request } from "express";
 import { eq, desc, and, gte } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, campaignRecipientsTable, campaignsTable } from "@workspace/db";
 import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "../lib/openai";
-import { speechToText, textToSpeech, detectLanguage } from "../lib/sarvam";
+import { speechToText, detectLanguage } from "../lib/sarvam";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "../lib/whatsapp";
 import { knowledgeTable } from "@workspace/db";
 import { logger } from "../lib/logger";
+import axios from "axios";
+import { sql } from "drizzle-orm";
 
 const router: IRouter = Router();
 
-// In-memory conversation state (per callSid)
+// ── Helper: Exotel sends params as either query string (GET) or form body (POST)
+function exoParams(req: Request): Record<string, string> {
+  return { ...(req.query as Record<string, string>), ...(req.body ?? {}) };
+}
+
+// ── Helper: build ExoML XML response
+function exoml(content: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response>${content}</Response>`;
+}
+
+// ── Helper: Say tag (Hindi by default, falls back to English)
+function sayTag(text: string, language = "hi"): string {
+  return `<Say voice="woman" language="${language}">${escapeXml(text)}</Say>`;
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// ── Helper: Record tag that calls back our recording endpoint
+function recordTag(callSid: string, host: string, maxLength = 20): string {
+  const action = `${host}/api/webhooks/exotel/recording?callSid=${encodeURIComponent(callSid)}`;
+  return `<Record action="${action}" method="POST" maxLength="${maxLength}" finishOnKey="#" playBeep="true" />`;
+}
+
+// ── In-memory conversation state (per callSid)
 const conversations = new Map<string, {
   leadId: number;
   leadName: string;
+  callRecordId: number | null;
   language: string;
   history: Array<{ role: "user" | "assistant"; content: string }>;
   transcript: string[];
+  turn: number;
 }>();
 
-router.post("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
-  const { CallSid, From, To, Direction } = req.body;
-  req.log.info({ CallSid, From }, "Inbound call received");
+// ── Helpers to get the public host
+function getHost(req: Request): string {
+  if (process.env.REPLIT_DEV_DOMAIN) return `https://${process.env.REPLIT_DEV_DOMAIN}`;
+  const domains = process.env.REPLIT_DOMAINS?.split(",")[0];
+  if (domains) return `https://${domains}`;
+  return `${req.protocol}://${req.get("host")}`;
+}
+
+// ── INBOUND / OUTBOUND CONNECT webhook ───────────────────────────────────────
+// Exotel POSTs (or GETs) here when the call connects.
+// Must return ExoML XML so Exotel knows what to play/record.
+router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
+  const params = exoParams(req);
+  const { CallSid, From, To, Direction } = params;
+
+  req.log.info({ CallSid, From }, "Call connected — serving ExoML");
 
   if (!CallSid) {
-    res.status(400).json({ error: "Missing CallSid" });
+    res.set("Content-Type", "text/xml").send(exoml(sayTag("क्षमा करें, एक त्रुटि हुई। कृपया बाद में कॉल करें।")));
     return;
   }
 
   // Find or create lead
   let lead = null;
-  if (From) {
-    const digits = From.replace(/\D/g, "");
-    const phoneVariants = [digits, `+91${digits.slice(-10)}`, digits.slice(-10)];
-    for (const phone of phoneVariants) {
+  const fromPhone = From?.replace(/\D/g, "") ?? "";
+  if (fromPhone) {
+    const variants = [fromPhone, `+91${fromPhone.slice(-10)}`, fromPhone.slice(-10)];
+    for (const phone of variants) {
       const [found] = await db.select().from(leadsTable).where(eq(leadsTable.phone, phone));
       if (found) { lead = found; break; }
     }
     if (!lead) {
       [lead] = await db.insert(leadsTable).values({
-        name: From,
-        phone: digits.slice(-10),
+        name: fromPhone,
+        phone: fromPhone.slice(-10),
         status: "new",
         score: 0,
         source: "inbound_call",
@@ -47,28 +89,149 @@ router.post("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     }
   }
 
-  // Create call log
-  await db.insert(callsTable).values({
-    leadId: lead?.id ?? 1,
-    direction: Direction === "outbound" ? "outbound" : "inbound",
-    status: "in_progress",
-    exotelCallSid: CallSid,
-  });
+  // Create or update call log
+  let callRecordId: number | null = null;
+  const existing = conversations.get(CallSid);
+  if (existing) {
+    callRecordId = existing.callRecordId;
+  } else {
+    const direction = Direction === "outbound" ? "outbound" : "inbound";
+    // Check if there's already a call record from triggerOutbound
+    const [existingCall] = await db.select().from(callsTable)
+      .where(eq(callsTable.exotelCallSid, CallSid));
+    if (existingCall) {
+      callRecordId = existingCall.id;
+      await db.update(callsTable).set({ status: "in_progress" }).where(eq(callsTable.id, existingCall.id));
+    } else {
+      const [newCall] = await db.insert(callsTable).values({
+        leadId: lead?.id ?? 0,
+        direction,
+        status: "in_progress",
+        exotelCallSid: CallSid,
+      }).returning();
+      callRecordId = newCall.id;
+    }
+  }
 
-  // Initialize conversation state
+  // Greeting message
+  const leadName = lead?.name ?? "आप";
+  const greeting = `नमस्ते ${leadName} जी! मैं शुभम मोटर्स का AI असिस्टेंट बोल रहा हूं। हम Hero MotoCorp के अधिकृत डीलर हैं। आप किस Hero बाइक में रुचि रखते हैं? कृपया अपनी बात # दबाकर समाप्त करें।`;
+
+  // Init conversation state
   conversations.set(CallSid, {
     leadId: lead?.id ?? 0,
-    leadName: lead?.name ?? "Customer",
+    leadName: leadName,
+    callRecordId,
     language: lead?.language ?? "hi-IN",
     history: [],
     transcript: [],
+    turn: 0,
   });
 
-  res.json({ received: true });
+  const host = getHost(req);
+  const xml = exoml(sayTag(greeting) + recordTag(CallSid, host, 25));
+  res.set("Content-Type", "text/xml").send(xml);
 });
 
-router.post("/webhooks/exotel/status", async (req, res): Promise<void> => {
-  const { CallSid, Status, RecordingUrl, Duration } = req.body;
+// ── RECORDING webhook — customer has spoken, we process and respond ──────────
+router.all("/webhooks/exotel/recording", async (req, res): Promise<void> => {
+  const params = exoParams(req);
+  const callSid = (params.callSid ?? params.CallSid ?? "").toString();
+  const recordingUrl = params.RecordingUrl ?? params.recordingUrl ?? "";
+  const digits = params.Digits ?? "";
+
+  req.log.info({ callSid, recordingUrl }, "Recording received");
+
+  const convo = conversations.get(callSid);
+  const host = getHost(req);
+
+  // Customer hung up or too many turns
+  if (!convo || convo.turn >= 6) {
+    const bye = "धन्यवाद! हम जल्द ही आपसे संपर्क करेंगे। शुभम मोटर्स में कॉल के लिए शुक्रिया।";
+    res.set("Content-Type", "text/xml").send(exoml(sayTag(bye)));
+    return;
+  }
+
+  convo.turn++;
+
+  try {
+    let customerText = "";
+
+    if (recordingUrl) {
+      // Download the recording from Exotel
+      try {
+        const audioResp = await axios.get(recordingUrl, {
+          responseType: "arraybuffer",
+          auth: {
+            username: process.env.EXOTEL_API_KEY ?? "",
+            password: process.env.EXOTEL_API_TOKEN ?? "",
+          },
+          timeout: 10000,
+        });
+        const audioBase64 = Buffer.from(audioResp.data).toString("base64");
+
+        // Transcribe with Sarvam
+        customerText = await speechToText(audioBase64, convo.language);
+        req.log.info({ callSid, customerText }, "STT result");
+      } catch (sttErr) {
+        req.log.warn({ sttErr }, "STT failed, using silence fallback");
+        customerText = "";
+      }
+    }
+
+    if (!customerText.trim()) {
+      // No speech detected — prompt again
+      const prompt = "मैंने आपकी आवाज़ नहीं सुनी। क्या आप फिर से बोल सकते हैं? # दबाकर समाप्त करें।";
+      res.set("Content-Type", "text/xml").send(exoml(sayTag(prompt) + recordTag(callSid, host)));
+      return;
+    }
+
+    convo.transcript.push(`Customer: ${customerText}`);
+
+    // Detect language on first turn
+    if (convo.turn === 1) {
+      try {
+        const detected = await detectLanguage(customerText);
+        convo.language = detected;
+      } catch { /* keep default */ }
+    }
+
+    // Generate AI response (English/Hindi fallback)
+    const agentText = await generateAgentReply(customerText, convo.history, convo.leadName, convo.language);
+
+    convo.history.push({ role: "user", content: customerText });
+    convo.history.push({ role: "assistant", content: agentText });
+    convo.transcript.push(`Agent: ${agentText}`);
+
+    // Check for hot signal → early wrap-up
+    const lower = customerText.toLowerCase();
+    const hotSignals = ["buy", "book", "purchase", "lena hai", "chahiye", "confirm", "ready"];
+    const isHot = hotSignals.some(s => lower.includes(s));
+
+    if (isHot) {
+      await db.update(leadsTable).set({ status: "hot", score: 90 }).where(eq(leadsTable.id, convo.leadId));
+    }
+
+    // Decide whether to continue or wrap up
+    const isFinalTurn = convo.turn >= 5 || isHot;
+    const xmlContent = isFinalTurn
+      ? sayTag(agentText) + sayTag("धन्यवाद! हम जल्द ही आपसे संपर्क करेंगे। नमस्ते!")
+      : sayTag(agentText) + recordTag(callSid, host);
+
+    res.set("Content-Type", "text/xml").send(exoml(xmlContent));
+
+  } catch (err) {
+    req.log.error({ err, callSid }, "Recording processing error");
+    const sorry = "क्षमा करें, एक तकनीकी समस्या आई। हम आपसे जल्द संपर्क करेंगे।";
+    res.set("Content-Type", "text/xml").send(exoml(sayTag(sorry)));
+  }
+});
+
+// ── STATUS webhook — call ended, run full analysis ───────────────────────────
+router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
+  const params = exoParams(req);
+  const { CallSid, Status, Duration } = params;
+
   req.log.info({ CallSid, Status }, "Call status update");
 
   if (!CallSid) {
@@ -77,16 +240,16 @@ router.post("/webhooks/exotel/status", async (req, res): Promise<void> => {
   }
 
   const convo = conversations.get(CallSid);
-
-  // Update call record
   const [callRecord] = await db.select().from(callsTable).where(eq(callsTable.exotelCallSid, CallSid));
+
   if (!callRecord) {
+    conversations.delete(CallSid);
     res.json({ received: true });
     return;
   }
 
-  const dbStatus = mapExotelStatus(Status);
-  const fullTranscript = convo?.transcript.join("\n") ?? "";
+  const dbStatus = mapExotelStatus(Status ?? "");
+  const fullTranscript = convo?.transcript?.join("\n") ?? "";
 
   if (dbStatus === "completed" && fullTranscript) {
     try {
@@ -104,7 +267,6 @@ router.post("/webhooks/exotel/status", async (req, res): Promise<void> => {
         })
         .where(eq(callsTable.exotelCallSid, CallSid));
 
-      // Update lead score, status and language
       const newStatus = analysis.score >= 80 ? "hot" : analysis.score >= 50 ? "interested" : "contacted";
       await db.update(leadsTable)
         .set({
@@ -116,7 +278,6 @@ router.post("/webhooks/exotel/status", async (req, res): Promise<void> => {
         })
         .where(eq(leadsTable.id, callRecord.leadId));
 
-      // Schedule follow-up if intent suggests future date
       if (analysis.followupDate && analysis.followupReason) {
         await db.insert(followupsTable).values({
           leadId: callRecord.leadId,
@@ -131,31 +292,24 @@ router.post("/webhooks/exotel/status", async (req, res): Promise<void> => {
           .where(eq(leadsTable.id, callRecord.leadId));
       }
 
-      // Send WhatsApp summary
       const [lead] = await db.select().from(leadsTable).where(eq(leadsTable.id, callRecord.leadId));
       if (lead) {
         const sent = await sendCallSummaryWhatsApp(lead.phone, lead.name, analysis.summary, lead.interestedModel);
         if (sent) {
-          await db.update(callsTable)
-            .set({ whatsappSent: true })
-            .where(eq(callsTable.id, callRecord.id));
+          await db.update(callsTable).set({ whatsappSent: true }).where(eq(callsTable.id, callRecord.id));
         }
-
-        // Send brochure if model known
         if (lead.interestedModel) {
-          const [brochure] = await db.select().from(knowledgeTable)
-            .where(eq(knowledgeTable.category, "brochure"));
+          const [brochure] = await db.select().from(knowledgeTable).where(eq(knowledgeTable.category, "brochure"));
           if (brochure?.fileUrl) {
             await sendBrochureWhatsApp(lead.phone, lead.name, lead.interestedModel, brochure.fileUrl);
           }
         }
       }
 
-      // Self-learn from transcript
       await learnFromTranscript(fullTranscript, analysis.summary);
 
     } catch (err) {
-      logger.error({ err, CallSid }, "Error processing call completion");
+      req.log.error({ err, CallSid }, "Error processing call completion");
       await db.update(callsTable)
         .set({ status: dbStatus, duration: Duration ? parseInt(Duration) : null })
         .where(eq(callsTable.exotelCallSid, CallSid));
@@ -171,30 +325,19 @@ router.post("/webhooks/exotel/status", async (req, res): Promise<void> => {
 });
 
 // ── BotSpace WhatsApp inbound reply webhook ───────────────────────────────────
-// BotSpace POSTs inbound replies here. Configure this URL in BotSpace dashboard:
-// https://<your-domain>/api/webhooks/whatsapp/inbound
 router.post("/webhooks/whatsapp/inbound", async (req, res): Promise<void> => {
-  // BotSpace sends: { from, message, type, timestamp, ... }
-  // Support both BotSpace and generic WhatsApp Cloud API formats
   const body = req.body;
-
-  // Extract phone and message text from various possible payload shapes
   let fromPhone: string | null = null;
   let messageText: string | null = null;
 
-  // BotSpace format
   if (body.from && body.message) {
     fromPhone = String(body.from).replace(/\D/g, "").slice(-10);
     messageText = typeof body.message === "string" ? body.message : body.message?.text ?? null;
-  }
-  // WhatsApp Cloud API format
-  else if (body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+  } else if (body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
     const msg = body.entry[0].changes[0].value.messages[0];
     fromPhone = String(msg.from ?? "").replace(/\D/g, "").slice(-10);
     messageText = msg.text?.body ?? msg.type ?? "";
-  }
-  // Generic fallback
-  else if (body.phone || body.mobile) {
+  } else if (body.phone || body.mobile) {
     fromPhone = String(body.phone ?? body.mobile).replace(/\D/g, "").slice(-10);
     messageText = body.text ?? body.body ?? body.message ?? "";
   }
@@ -207,65 +350,36 @@ router.post("/webhooks/whatsapp/inbound", async (req, res): Promise<void> => {
   }
 
   try {
-    // Find the lead by phone
     const phoneVariants = [fromPhone, `+91${fromPhone}`, `91${fromPhone}`];
     let lead = null;
     for (const phone of phoneVariants) {
       const [found] = await db.select().from(leadsTable).where(eq(leadsTable.phone, phone));
       if (found) { lead = found; break; }
     }
+    if (!lead) { res.json({ received: true }); return; }
 
-    if (!lead) {
-      res.json({ received: true });
-      return;
-    }
-
-    // Find the most recent campaign recipient row for this lead (within 7 days)
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const [recipient] = await db
       .select()
       .from(campaignRecipientsTable)
-      .where(
-        and(
-          eq(campaignRecipientsTable.leadId, lead.id),
-          eq(campaignRecipientsTable.replied, false),
-          gte(campaignRecipientsTable.sentAt, sevenDaysAgo)
-        )
-      )
+      .where(and(
+        eq(campaignRecipientsTable.leadId, lead.id),
+        eq(campaignRecipientsTable.replied, false),
+        gte(campaignRecipientsTable.sentAt, sevenDaysAgo)
+      ))
       .orderBy(desc(campaignRecipientsTable.sentAt))
       .limit(1);
 
     if (recipient) {
-      // Mark as replied with current lead state
       await db.update(campaignRecipientsTable)
-        .set({
-          replied: true,
-          repliedAt: new Date(),
-          leadStatusAfter: lead.status,
-          leadScoreAfter: lead.score,
-        })
+        .set({ replied: true, repliedAt: new Date(), leadStatusAfter: lead.status, leadScoreAfter: lead.score })
         .where(eq(campaignRecipientsTable.id, recipient.id));
 
-      // Increment campaign replied count
-      await db
-        .update(campaignsTable)
-        .set({ repliedCount: db.$count(campaignRecipientsTable, and(
-          eq(campaignRecipientsTable.campaignId, recipient.campaignId),
-          eq(campaignRecipientsTable.replied, true)
-        )) as unknown as number })
-        .where(eq(campaignsTable.id, recipient.campaignId));
-
-      // Simpler: just do a raw increment
-      await db.execute(
-        sql`UPDATE campaigns SET replied_count = replied_count + 1 WHERE id = ${recipient.campaignId}`
-      );
-
-      // Also undo the +1 from the $count attempt above to avoid double-count
       await db.execute(
         sql`UPDATE campaigns SET replied_count = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ${recipient.campaignId} AND replied = true) WHERE id = ${recipient.campaignId}`
       );
 
-      logger.info({ leadId: lead.id, campaignId: recipient.campaignId, messageText }, "Campaign reply recorded");
+      logger.info({ leadId: lead.id, campaignId: recipient.campaignId }, "Campaign reply recorded");
     }
   } catch (err) {
     logger.error({ err, fromPhone }, "Error processing WhatsApp inbound");
@@ -274,72 +388,40 @@ router.post("/webhooks/whatsapp/inbound", async (req, res): Promise<void> => {
   res.json({ received: true });
 });
 
+// ── VOICE STREAM (legacy real-time endpoint) ──────────────────────────────────
 router.post("/webhooks/voice/stream", async (req, res): Promise<void> => {
-  const { callSid, audioData, language } = req.body;
-
+  const { callSid, audioData, language } = req.body ?? {};
   if (!callSid || !audioData) {
     res.status(400).json({ error: "callSid and audioData required" });
     return;
   }
-
   const convo = conversations.get(callSid);
   if (!convo) {
     res.status(404).json({ error: "No active conversation for this callSid" });
     return;
   }
-
   try {
-    // STT: convert audio to text
     const customerText = await speechToText(audioData, language || convo.language);
     if (!customerText) {
       res.json({ text: "", audioData: "", shouldTransfer: false, transferNumber: null });
       return;
     }
-
-    // Detect language if first turn
     if (convo.history.length === 0) {
-      const detectedLang = await detectLanguage(customerText);
-      convo.language = detectedLang;
+      const detected = await detectLanguage(customerText);
+      convo.language = detected;
     }
-
     convo.transcript.push(`Customer: ${customerText}`);
-
-    // Generate AI response
-    const agentText = await generateAgentReply(
-      customerText,
-      convo.history,
-      convo.leadName,
-      convo.language
-    );
-
+    const agentText = await generateAgentReply(customerText, convo.history, convo.leadName, convo.language);
     convo.history.push({ role: "user", content: customerText });
     convo.history.push({ role: "assistant", content: agentText });
     convo.transcript.push(`Agent: ${agentText}`);
-
-    // TTS: convert response to audio
-    const audioResponse = await textToSpeech(agentText, convo.language);
-
-    // Check if hot lead needs transfer
-    const recentText = customerText.toLowerCase();
+    const lower = customerText.toLowerCase();
     const hotSignals = ["buy now", "abhi lena", "ready", "confirm", "book karo", "de do", "finalise"];
-    const shouldTransfer = hotSignals.some((s) => recentText.includes(s));
-
-    const [callRecord] = await db.select().from(callsTable).where(eq(callsTable.exotelCallSid, callSid));
-    let salesNumber: string | null = null;
-    if (shouldTransfer && callRecord) {
-      // Mark as hot
-      await db.update(leadsTable)
-        .set({ status: "hot", score: 90 })
-        .where(eq(leadsTable.id, convo.leadId));
+    const shouldTransfer = hotSignals.some((s) => lower.includes(s));
+    if (shouldTransfer) {
+      await db.update(leadsTable).set({ status: "hot", score: 90 }).where(eq(leadsTable.id, convo.leadId));
     }
-
-    res.json({
-      text: agentText,
-      audioData: audioResponse,
-      shouldTransfer,
-      transferNumber: salesNumber,
-    });
-
+    res.json({ text: agentText, audioData: "", shouldTransfer, transferNumber: null });
   } catch (err) {
     logger.error({ err, callSid }, "Voice stream error");
     res.status(500).json({ error: "Processing failed" });
