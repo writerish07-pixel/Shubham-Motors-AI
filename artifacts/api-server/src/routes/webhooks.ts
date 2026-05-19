@@ -168,10 +168,9 @@ router.all("/webhooks/exotel/recording", async (req, res): Promise<void> => {
           },
           timeout: 10000,
         });
-        const audioBase64 = Buffer.from(audioResp.data).toString("base64");
-
-        // Transcribe with Sarvam
-        customerText = await speechToText(audioBase64, convo.language);
+        // Pass raw Buffer — Sarvam requires multipart/form-data
+        const audioBuf = Buffer.from(audioResp.data);
+        customerText = await speechToText(audioBuf, convo.language);
         req.log.info({ callSid, customerText }, "STT result");
       } catch (sttErr) {
         req.log.warn({ sttErr }, "STT failed, using silence fallback");
@@ -401,7 +400,8 @@ router.post("/webhooks/voice/stream", async (req, res): Promise<void> => {
     return;
   }
   try {
-    const customerText = await speechToText(audioData, language || convo.language);
+    const audioBuf = Buffer.isBuffer(audioData) ? audioData : Buffer.from(audioData, "base64");
+    const customerText = await speechToText(audioBuf, language || convo.language);
     if (!customerText) {
       res.json({ text: "", audioData: "", shouldTransfer: false, transferNumber: null });
       return;

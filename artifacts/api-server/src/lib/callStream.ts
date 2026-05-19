@@ -283,10 +283,9 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const pcm8k = mulawToS16(mulaw);
   const pcm16k = resample(pcm8k, EXOTEL_SAMPLE_RATE, STT_SAMPLE_RATE);
   const wavBuf = buildWav(pcm16k, STT_SAMPLE_RATE);
-  const wavB64 = wavBuf.toString("base64");
 
-  // STT
-  let customerText = await speechToText(wavB64, session.language);
+  // STT — pass raw Buffer (multipart/form-data)
+  let customerText = await speechToText(wavBuf, session.language);
   if (!customerText?.trim()) return; // silence / noise, skip
 
   logger.info({ callSid: session.callSid, customerText }, "STT result");

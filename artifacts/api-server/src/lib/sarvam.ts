@@ -1,56 +1,94 @@
 import axios from "axios";
 import { logger } from "./logger";
 
-const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 const SARVAM_BASE = "https://api.sarvam.ai";
 
-export async function speechToText(audioBase64: string, language: string = "hi-IN"): Promise<string> {
+function key() {
+  return process.env.SARVAM_API_KEY ?? "";
+}
+
+function normalizeLangCode(lang: string): string {
+  if (lang.includes("-")) return lang;
+  const map: Record<string, string> = {
+    hi: "hi-IN", en: "en-IN", mr: "mr-IN",
+    ta: "ta-IN", te: "te-IN", kn: "kn-IN",
+    gu: "gu-IN", bn: "bn-IN", pa: "pa-IN", ml: "ml-IN",
+  };
+  return map[lang] ?? "hi-IN";
+}
+
+/**
+ * Speech-to-text via Sarvam saarika:v2.5
+ * Accepts a raw audio Buffer (WAV, MP3, etc.) — max 30 seconds.
+ * For longer audio, caller should chunk before calling.
+ */
+export async function speechToText(
+  audioBuf: Buffer,
+  language: string = "hi-IN"
+): Promise<string> {
   try {
+    const langCode = normalizeLangCode(language);
+
+    // Sarvam STT requires multipart/form-data with a `file` field
+    const form = new FormData();
+    form.append("model", "saarika:v2.5");
+    form.append("language_code", langCode);
+    form.append("file", new Blob([audioBuf], { type: "audio/wav" }), "audio.wav");
+
     const response = await axios.post(
       `${SARVAM_BASE}/speech-to-text`,
-      {
-        model: "saarika:v2",
-        language_code: normalizeLangCode(language),
-        audio: audioBase64,
-      },
+      form,
       {
         headers: {
-          "api-subscription-key": SARVAM_API_KEY,
-          "Content-Type": "application/json",
+          "api-subscription-key": key(),
+          // axios + FormData sets Content-Type automatically (multipart/form-data + boundary)
         },
-        timeout: 10000,
+        timeout: 30000,
       }
     );
-    return response.data?.transcript ?? "";
-  } catch (err) {
-    logger.error({ err }, "Sarvam STT error");
+
+    const transcript = response.data?.transcript ?? "";
+    logger.debug({ transcript, langCode }, "Sarvam STT result");
+    return transcript;
+  } catch (err: unknown) {
+    const ae = err as { response?: { status?: number; data?: unknown } };
+    logger.error({ status: ae.response?.status, body: ae.response?.data }, "Sarvam STT error");
     return "";
   }
 }
 
-export async function textToSpeech(text: string, language: string = "hi-IN"): Promise<string> {
+/**
+ * Text-to-speech via Sarvam bulbul:v2
+ * Returns base64-encoded WAV audio.
+ */
+export async function textToSpeech(
+  text: string,
+  language: string = "hi-IN"
+): Promise<string> {
   try {
+    const langCode = normalizeLangCode(language);
     const response = await axios.post(
       `${SARVAM_BASE}/text-to-speech`,
       {
-        inputs: [text],
-        target_language_code: normalizeLangCode(language),
+        inputs: [text.slice(0, 500)], // Sarvam TTS max ~500 chars per request
+        target_language_code: langCode,
         speaker: "meera",
-        model: "bulbul:v1",
+        model: "bulbul:v2",
         enable_preprocessing: true,
       },
       {
         headers: {
-          "api-subscription-key": SARVAM_API_KEY,
+          "api-subscription-key": key(),
           "Content-Type": "application/json",
         },
-        timeout: 15000,
+        timeout: 20000,
       }
     );
     const audios: string[] = response.data?.audios ?? [];
     return audios[0] ?? "";
-  } catch (err) {
-    logger.error({ err }, "Sarvam TTS error");
+  } catch (err: unknown) {
+    const ae = err as { response?: { status?: number; data?: unknown } };
+    logger.error({ status: ae.response?.status, body: ae.response?.data }, "Sarvam TTS error");
     return "";
   }
 }
@@ -62,7 +100,7 @@ export async function detectLanguage(text: string): Promise<string> {
       { input: text },
       {
         headers: {
-          "api-subscription-key": SARVAM_API_KEY,
+          "api-subscription-key": key(),
           "Content-Type": "application/json",
         },
         timeout: 5000,
@@ -72,21 +110,4 @@ export async function detectLanguage(text: string): Promise<string> {
   } catch {
     return "hi-IN";
   }
-}
-
-function normalizeLangCode(lang: string): string {
-  if (lang.includes("-")) return lang;
-  const map: Record<string, string> = {
-    hi: "hi-IN",
-    en: "en-IN",
-    mr: "mr-IN",
-    ta: "ta-IN",
-    te: "te-IN",
-    kn: "kn-IN",
-    gu: "gu-IN",
-    bn: "bn-IN",
-    pa: "pa-IN",
-    ml: "ml-IN",
-  };
-  return map[lang] ?? "hi-IN";
 }
