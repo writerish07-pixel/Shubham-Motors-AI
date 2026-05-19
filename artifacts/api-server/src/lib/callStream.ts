@@ -20,6 +20,8 @@ import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
 import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "./openai";
 import { sendCallSummaryWhatsApp } from "./whatsapp";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
+import { transferCallToAgent } from "./exotel";
+import { extractCustomerName } from "./nameExtractor";
 
 // Exotel Voicebot media_format: { encoding: "base64", sample_rate: "8000", bit_rate: "128kbps" }
 // 128 kbps ÷ 8000 Hz = 16 bits/sample → linear PCM 16-bit little-endian, mono. NOT μ-law.
@@ -38,7 +40,7 @@ import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 const SILENCE_RMS = 0.008;        // Below this → silence
-const SILENCE_CHUNKS = 30;        // 30 × 20 ms = 600 ms silence → trigger STT
+const SILENCE_CHUNKS = 18;        // 18 × 20 ms = 360 ms silence → trigger STT (was 600ms — too laggy)
 const MIN_SPEECH_CHUNKS = 8;      // 8 × 20 ms = 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 600 × 20 ms = 12 s max before forced trigger
 const STT_SAMPLE_RATE = 16000;    // Sarvam STT wants 16 kHz
@@ -196,13 +198,15 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     isClosed: false,
   };
 
-  // Send Hindi greeting after a 200 ms gap. Use "Sir/Ma'am" when name unknown.
+  // Send Hindi greeting after a 200 ms gap. If we don't know the customer's
+  // name yet, the FIRST thing we ask is their name — every subsequent reply
+  // will then address them by name (captured in runPipeline below).
   setTimeout(async () => {
     if (ws.readyState !== WebSocket.OPEN) return;
-    const salutation = session.leadName === "Sir" ? "सर" : `${session.leadName} जी`;
-    const greeting =
-      `नमस्ते ${salutation}! मैं प्रिया बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। ` +
-      `आपकी कॉल का धन्यवाद! बताइए, कौन सी Hero बाइक या स्कूटर में आपकी रुचि है?`;
+    const knowsName = session.leadName !== "Sir";
+    const greeting = knowsName
+      ? `नमस्ते ${session.leadName} जी! मैं प्रिया बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। आपकी कॉल का धन्यवाद! बताइए, कौन सी Hero बाइक या स्कूटर में आपकी रुचि है?`
+      : `नमस्ते सर! मैं प्रिया बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। आपकी कॉल का धन्यवाद! पहले आपका शुभ नाम बताइए ताकि मैं आपको सही से help कर सकूँ?`;
     session.transcript.push(`Agent: ${greeting}`);
     session.history.push({ role: "assistant", content: greeting });
     await streamTtsToWs(ws, session.streamSid, greeting, session.language, session);
@@ -353,6 +357,20 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   }
   session.turn++;
 
+  // Capture customer name ONLY on the very first customer turn — because the
+  // greeting asked for the name. Trying on later turns produces false
+  // positives ("mujhe Splendor chahiye" stored as a name).
+  if (session.turn === 1 && session.leadName === "Sir") {
+    const extracted = extractCustomerName(customerText);
+    if (extracted) {
+      session.leadName = extracted;
+      if (session.leadId) {
+        await db.update(leadsTable).set({ name: extracted }).where(eq(leadsTable.id, session.leadId));
+      }
+      logger.info({ callSid: session.callSid, name: extracted }, "Captured customer name");
+    }
+  }
+
   // Limit turns to keep costs reasonable
   if (session.turn > 10) {
     const bye = "धन्यवाद! हम जल्द आपसे संपर्क करेंगे। नमस्ते!";
@@ -368,6 +386,25 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.history.push({ role: "user", content: customerText });
   session.history.push({ role: "assistant", content: agentText });
   session.transcript.push(`Agent: ${agentText}`);
+
+  // ── TRANSFER-TO-HUMAN ────────────────────────────────────────────────────
+  // If the LLM is unsure / can't answer reliably, it emits a reply starting
+  // with `[TRANSFER]`. We say a handoff line and transfer the live call to
+  // the configured sales agent number. This prevents the AI from making up
+  // wrong prices/offers — much better to hand off than to misinform.
+  if (/^\s*\[TRANSFER\]/i.test(agentText)) {
+    const handoff = `एक मिनट ${session.leadName === "Sir" ? "सर" : session.leadName + " जी"}, मैं आपको अपने senior sales expert से connect कर रही हूँ। Line पर रहिए।`;
+    session.transcript.push(`Agent: ${handoff}`);
+    await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
+    const salesNum = process.env.SALES_TRANSFER_NUMBER;
+    if (salesNum && session.callSid) {
+      await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
+      await transferCallToAgent(session.callSid, salesNum);
+    } else {
+      logger.warn({ callSid: session.callSid }, "Transfer requested but SALES_TRANSFER_NUMBER not set");
+    }
+    return;
+  }
 
   // Hot-lead detection
   const lower = customerText.toLowerCase();

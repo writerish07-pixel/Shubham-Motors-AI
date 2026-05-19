@@ -11,6 +11,20 @@ import { sql } from "drizzle-orm";
 
 const router: IRouter = Router();
 
+// ── Dial-agent ExoML — called by Exotel during a mid-call transfer.
+// `transferCallToAgent()` modifies the live call to fetch this URL; we
+// respond with <Dial>AGENT_NUMBER</Dial> so the customer is bridged to the
+// senior salesperson.
+router.all("/webhooks/exotel/dial-agent.xml", (req, res): void => {
+  const params = { ...(req.query as Record<string, string>), ...(req.body ?? {}) };
+  const to = String(params.to ?? "").replace(/[^\d+]/g, "");
+  if (!to) {
+    res.type("application/xml").send(exoml(sayTag("Transfer failed. Please call back. धन्यवाद।", "en")));
+    return;
+  }
+  res.type("application/xml").send(exoml(`<Dial>${escapeXml(to)}</Dial>`));
+});
+
 // ── Helper: Exotel sends params as either query string (GET) or form body (POST)
 function exoParams(req: Request): Record<string, string> {
   return { ...(req.query as Record<string, string>), ...(req.body ?? {}) };

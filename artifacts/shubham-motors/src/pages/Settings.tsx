@@ -11,15 +11,19 @@ export default function Settings() {
   const [adminToken, setAdminToken] = useState("");
   const [stockBusy, setStockBusy] = useState(false);
   const [priceBusy, setPriceBusy] = useState(false);
+  const [offerBusy, setOfferBusy] = useState(false);
   const [lastStock, setLastStock] = useState<string>("");
   const [lastPrice, setLastPrice] = useState<string>("");
+  const [lastOffer, setLastOffer] = useState<string>("");
   const stockInputRef = useRef<HTMLInputElement>(null);
   const priceInputRef = useRef<HTMLInputElement>(null);
+  const offerInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setAdminToken(localStorage.getItem(ADMIN_TOKEN_KEY) ?? "");
     setLastStock(localStorage.getItem("shubham_last_stock_upload") ?? "");
     setLastPrice(localStorage.getItem("shubham_last_price_upload") ?? "");
+    setLastOffer(localStorage.getItem("shubham_last_offer_upload") ?? "");
   }, []);
 
   function saveToken() {
@@ -27,9 +31,9 @@ export default function Settings() {
     toast.success("Admin token saved on this device");
   }
 
-  async function upload(kind: "stock" | "price", file: File) {
+  async function upload(kind: "stock" | "price" | "offer-image", file: File) {
     if (!adminToken) { toast.error("Set the Admin Token first"); return; }
-    const setBusy = kind === "stock" ? setStockBusy : setPriceBusy;
+    const setBusy = kind === "stock" ? setStockBusy : kind === "price" ? setPriceBusy : setOfferBusy;
     setBusy(true);
     try {
       const fd = new FormData();
@@ -42,10 +46,16 @@ export default function Settings() {
       });
       const j = await r.json();
       if (!r.ok) { toast.error(j.error ?? `Upload failed (${r.status})`); return; }
-      toast.success(`${kind === "stock" ? "Stock" : "Price list"} updated — ${j.models} models loaded`);
-      const stamp = `${file.name} · ${new Date().toLocaleString()}`;
-      if (kind === "stock") { setLastStock(stamp); localStorage.setItem("shubham_last_stock_upload", stamp); }
-      else { setLastPrice(stamp); localStorage.setItem("shubham_last_price_upload", stamp); }
+      if (kind === "offer-image") {
+        toast.success(`Offer extracted — ${j.items?.length ?? 0} offer(s) added to knowledge base`);
+        const stamp = `${file.name} · ${j.items?.length ?? 0} offer(s) · ${new Date().toLocaleString()}`;
+        setLastOffer(stamp); localStorage.setItem("shubham_last_offer_upload", stamp);
+      } else {
+        toast.success(`${kind === "stock" ? "Stock" : "Price list"} updated — ${j.models} models loaded`);
+        const stamp = `${file.name} · ${new Date().toLocaleString()}`;
+        if (kind === "stock") { setLastStock(stamp); localStorage.setItem("shubham_last_stock_upload", stamp); }
+        else { setLastPrice(stamp); localStorage.setItem("shubham_last_price_upload", stamp); }
+      }
     } catch (err) {
       toast.error("Upload error: " + (err as Error).message);
     } finally {
@@ -149,6 +159,23 @@ export default function Settings() {
               data-testid="input-price-file" />
           </div>
           {lastPrice && <div className="text-[10px] text-green-400 flex items-center gap-1"><CheckCircle size={10} />Last: {lastPrice}</div>}
+        </div>
+
+        {/* Offer image upload — uses GPT-4o vision to read marketing flyers */}
+        <div className="pl-10 space-y-2 pt-2 border-t border-border/50">
+          <div className="flex items-center justify-between">
+            <div>
+              <Label className="text-xs font-medium">Offer / Scheme Image Upload</Label>
+              <div className="text-[10px] text-muted-foreground">Upload any offer flyer (JPG/PNG) — AI reads it, computes rupee amounts, adds to knowledge base</div>
+            </div>
+            <Button size="sm" variant="outline" disabled={offerBusy || !adminToken} onClick={() => offerInputRef.current?.click()} className="gap-1.5 text-xs">
+              <Upload size={12} />{offerBusy ? "Reading…" : "Upload Offer Image"}
+            </Button>
+            <input ref={offerInputRef} type="file" accept="image/*" className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) upload("offer-image", f); e.target.value = ""; }}
+              data-testid="input-offer-file" />
+          </div>
+          {lastOffer && <div className="text-[10px] text-green-400 flex items-center gap-1"><CheckCircle size={10} />Last: {lastOffer}</div>}
         </div>
 
         {!adminToken && (
