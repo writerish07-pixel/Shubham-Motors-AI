@@ -4,7 +4,12 @@ import { knowledgeTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "./logger";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Use Replit's managed OpenAI integration (no key required — proxied through Replit).
+// Falls back to user-provided OPENAI_API_KEY only if integration env vars are missing.
+const openai = new OpenAI({
+  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY,
+  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+});
 
 export async function buildKnowledgeContext(): Promise<string> {
   const items = await db.select().from(knowledgeTable).where(eq(knowledgeTable.isActive, true));

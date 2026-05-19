@@ -3,7 +3,7 @@ import { logger } from "./logger";
 
 const BOTSPACE_API_KEY = process.env.BOTSPACE_API_KEY;
 const BOTSPACE_PHONE_ID = process.env.BOTSPACE_PHONE_NUMBER_ID;
-const BOTSPACE_BASE = "https://api.botspace.app/api";
+const BOTSPACE_BASE = "https://api.botspace.io/api";
 
 export async function sendWhatsAppMessage(phone: string, message: string): Promise<boolean> {
   try {
