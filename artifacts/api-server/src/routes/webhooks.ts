@@ -113,11 +113,8 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     }
   }
 
-  // Greeting message
+  // Init conversation state (still useful for /recording fallback path)
   const leadName = lead?.name ?? "आप";
-  const greeting = `नमस्ते ${leadName} जी! मैं शुभम मोटर्स का AI असिस्टेंट बोल रहा हूं। हम Hero MotoCorp के अधिकृत डीलर हैं। आप किस Hero बाइक में रुचि रखते हैं? कृपया अपनी बात # दबाकर समाप्त करें।`;
-
-  // Init conversation state
   conversations.set(CallSid, {
     leadId: lead?.id ?? 0,
     leadName: leadName,
@@ -128,9 +125,23 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     turn: 0,
   });
 
-  const host = getHost(req);
-  const xml = exoml(sayTag(greeting) + recordTag(CallSid, host, 25));
-  res.set("Content-Type", "text/xml").send(xml);
+  // Build the WebSocket URL Exotel should stream audio to/from.
+  // Prefer the published HTTPS domain (REPLIT_DOMAINS) — Exotel must reach a public
+  // TLS endpoint. We convert https → wss and point at our Voicebot handler.
+  const httpsHost = getHost(req);
+  const wssUrl = httpsHost.replace(/^https?:\/\//, "wss://") + "/call/stream";
+
+  // <Stream> ExoML — hands the live media stream to our Sarvam pipeline.
+  // The custom parameters land on the `start` event so the WS knows who is calling.
+  const streamXml =
+    `<Stream url="${escapeXml(wssUrl)}">` +
+      `<Parameter name="from" value="${escapeXml(From ?? "")}"/>` +
+      `<Parameter name="call_sid" value="${escapeXml(CallSid)}"/>` +
+      `<Parameter name="lead_name" value="${escapeXml(leadName)}"/>` +
+    `</Stream>`;
+
+  req.log.info({ CallSid, wssUrl }, "Returning <Stream> ExoML — Voicebot WS will take over");
+  res.set("Content-Type", "text/xml").send(exoml(streamXml));
 });
 
 // ── RECORDING webhook — customer has spoken, we process and respond ──────────
