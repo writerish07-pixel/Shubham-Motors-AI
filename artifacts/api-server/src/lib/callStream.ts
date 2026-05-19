@@ -19,7 +19,21 @@ import { db, callsTable, leadsTable, followupsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
 import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "./openai";
 import { sendCallSummaryWhatsApp } from "./whatsapp";
-import { mulawToS16, s16ToMulaw, resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
+import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
+
+// Exotel Voicebot media_format: { encoding: "base64", sample_rate: "8000", bit_rate: "128kbps" }
+// 128 kbps ÷ 8000 Hz = 16 bits/sample → linear PCM 16-bit little-endian, mono. NOT μ-law.
+function pcm16LeToS16(buf: Buffer): Int16Array {
+  const n = buf.length >> 1;
+  const out = new Int16Array(n);
+  for (let i = 0; i < n; i++) out[i] = buf.readInt16LE(i * 2);
+  return out;
+}
+function s16ToPcm16Le(samples: Int16Array): Buffer {
+  const out = Buffer.allocUnsafe(samples.length * 2);
+  for (let i = 0; i < samples.length; i++) out.writeInt16LE(samples[i]!, i * 2);
+  return out;
+}
 import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
@@ -28,8 +42,8 @@ const SILENCE_CHUNKS = 30;        // 30 × 20 ms = 600 ms silence → trigger ST
 const MIN_SPEECH_CHUNKS = 8;      // 8 × 20 ms = 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 600 × 20 ms = 12 s max before forced trigger
 const STT_SAMPLE_RATE = 16000;    // Sarvam STT wants 16 kHz
-const EXOTEL_SAMPLE_RATE = 8000;  // Exotel sends 8 kHz mulaw
-const CHUNK_BYTES = 160;          // bytes per 20 ms mulaw chunk for sending back
+const EXOTEL_SAMPLE_RATE = 8000;  // Exotel sends 8 kHz linear PCM 16-bit
+const CHUNK_BYTES = 320;          // 20 ms @ 8 kHz × 2 bytes/sample = 320 bytes (PCM16LE)
 
 // ── Per-call session ──────────────────────────────────────────────────────────
 interface Session {
@@ -199,7 +213,7 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
   if (!payload) return;
 
   const chunk = Buffer.from(payload, "base64");
-  const pcm = mulawToS16(chunk);
+  const pcm = pcm16LeToS16(chunk);
   const energy = rmsEnergy(pcm);
 
   if (energy > SILENCE_RMS) {
@@ -286,9 +300,9 @@ async function handleStop(session: Session): Promise<void> {
 async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): Promise<void> {
   if (ws.readyState !== WebSocket.OPEN) return;
 
-  // Concatenate mulaw chunks → PCM 8 kHz → upsample to 16 kHz → WAV
-  const mulaw = Buffer.concat(chunks);
-  const pcm8k = mulawToS16(mulaw);
+  // Concatenate PCM16LE chunks → PCM 8 kHz → upsample to 16 kHz → WAV
+  const raw = Buffer.concat(chunks);
+  const pcm8k = pcm16LeToS16(raw);
   const pcm16k = resample(pcm8k, EXOTEL_SAMPLE_RATE, STT_SAMPLE_RATE);
   const wavBuf = buildWav(pcm16k, STT_SAMPLE_RATE);
 
@@ -346,12 +360,12 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     const pcm8k = sampleRate === EXOTEL_SAMPLE_RATE
       ? pcm
       : resample(pcm, sampleRate, EXOTEL_SAMPLE_RATE);
-    const mulawBuf = s16ToMulaw(pcm8k);
+    const pcmBuf = s16ToPcm16Le(pcm8k);
 
     // Pace by absolute wall-clock time so setTimeout jitter doesn't accumulate.
-    // 160 bytes = 20 ms of audio. We schedule chunk N for t0 + N*20ms.
+    // 320 bytes = 20 ms of PCM16LE audio @ 8 kHz. Schedule chunk N for t0 + N*20ms.
     // Exotel Voicebot protocol uses snake_case (stream_sid) in outbound frames.
-    const totalChunks = Math.ceil(mulawBuf.length / CHUNK_BYTES);
+    const totalChunks = Math.ceil(pcmBuf.length / CHUNK_BYTES);
     const t0 = Date.now();
     for (let n = 0; n < totalChunks; n++) {
       if (ws.readyState !== WebSocket.OPEN) break;
@@ -360,7 +374,7 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
       const wait = targetTime - now;
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       const start = n * CHUNK_BYTES;
-      const chunk = mulawBuf.subarray(start, start + CHUNK_BYTES);
+      const chunk = pcmBuf.subarray(start, start + CHUNK_BYTES);
       ws.send(
         JSON.stringify({
           event: "media",
