@@ -360,7 +360,19 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     const pcm8k = sampleRate === EXOTEL_SAMPLE_RATE
       ? pcm
       : resample(pcm, sampleRate, EXOTEL_SAMPLE_RATE);
-    const pcmBuf = s16ToPcm16Le(pcm8k);
+
+    // Apply −6 dB gain + soft limiter to prevent clipping (Sarvam output is hot).
+    // Recording analysis showed peaks hitting 32767 and audible clipping bursts.
+    const GAIN = 0.5;          // −6 dB
+    const CEIL = 28000;        // ~−1.3 dBFS soft ceiling
+    const limited = new Int16Array(pcm8k.length);
+    for (let i = 0; i < pcm8k.length; i++) {
+      let s = pcm8k[i]! * GAIN;
+      if (s > CEIL)  s = CEIL  + (s - CEIL)  * 0.15;
+      if (s < -CEIL) s = -CEIL + (s + CEIL)  * 0.15;
+      limited[i] = Math.max(-32768, Math.min(32767, Math.round(s)));
+    }
+    const pcmBuf = s16ToPcm16Le(limited);
 
     // Pace by absolute wall-clock time so setTimeout jitter doesn't accumulate.
     // 320 bytes = 20 ms of PCM16LE audio @ 8 kHz. Schedule chunk N for t0 + N*20ms.
