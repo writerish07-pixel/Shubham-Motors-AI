@@ -71,6 +71,7 @@ export function setupVoicebotWS(httpServer: Server): void {
             break;
 
           case "start":
+            logger.info({ raw: JSON.stringify(msg).slice(0, 1000) }, "Raw start event");
             session = await handleStart(ws, msg);
             break;
 
@@ -112,10 +113,17 @@ export function setupVoicebotWS(httpServer: Server): void {
 
 async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise<Session> {
   const start = (msg.start ?? {}) as Record<string, unknown>;
-  const callSid = String(start.callSid ?? msg.callSid ?? "");
-  const streamSid = String(start.streamSid ?? msg.streamSid ?? "");
-  const customParams = (start.customParameters ?? {}) as Record<string, string>;
-  const fromPhone = String(customParams.from ?? customParams.From ?? "");
+  // Exotel uses snake_case (call_sid, stream_sid); Twilio-style uses camelCase. Accept both.
+  const callSid = String(
+    start.callSid ?? start.call_sid ?? msg.callSid ?? msg.call_sid ?? ""
+  );
+  const streamSid = String(
+    start.streamSid ?? start.stream_sid ?? msg.streamSid ?? msg.stream_sid ?? ""
+  );
+  const customParams = (start.customParameters ?? start.custom_parameters ?? {}) as Record<string, string>;
+  const fromPhone = String(
+    customParams.from ?? customParams.From ?? (start.from as string) ?? ""
+  );
 
   logger.info({ callSid, streamSid }, "Call stream started");
 
@@ -342,6 +350,7 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
 
     // Pace by absolute wall-clock time so setTimeout jitter doesn't accumulate.
     // 160 bytes = 20 ms of audio. We schedule chunk N for t0 + N*20ms.
+    // Exotel Voicebot protocol uses snake_case (stream_sid) in outbound frames.
     const totalChunks = Math.ceil(mulawBuf.length / CHUNK_BYTES);
     const t0 = Date.now();
     for (let n = 0; n < totalChunks; n++) {
@@ -355,14 +364,21 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
       ws.send(
         JSON.stringify({
           event: "media",
+          stream_sid: streamSid,
           streamSid,
+          sequence_number: String(n + 1),
           media: { payload: chunk.toString("base64") },
         })
       );
     }
 
     // Mark — lets us know when playback finished
-    ws.send(JSON.stringify({ event: "mark", streamSid, mark: { name: "tts_done" } }));
+    ws.send(JSON.stringify({
+      event: "mark",
+      stream_sid: streamSid,
+      streamSid,
+      mark: { name: "tts_done" },
+    }));
   } catch (err) {
     logger.error({ err }, "TTS streaming error");
   }
