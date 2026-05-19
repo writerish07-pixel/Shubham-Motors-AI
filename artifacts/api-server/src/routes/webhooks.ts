@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { eq } from "drizzle-orm";
-import { db, callsTable, leadsTable, followupsTable } from "@workspace/db";
+import { eq, desc, and, gte } from "drizzle-orm";
+import { db, callsTable, leadsTable, followupsTable, campaignRecipientsTable, campaignsTable } from "@workspace/db";
 import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "../lib/openai";
 import { speechToText, textToSpeech, detectLanguage } from "../lib/sarvam";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "../lib/whatsapp";
@@ -167,6 +167,110 @@ router.post("/webhooks/exotel/status", async (req, res): Promise<void> => {
   }
 
   conversations.delete(CallSid);
+  res.json({ received: true });
+});
+
+// ── BotSpace WhatsApp inbound reply webhook ───────────────────────────────────
+// BotSpace POSTs inbound replies here. Configure this URL in BotSpace dashboard:
+// https://<your-domain>/api/webhooks/whatsapp/inbound
+router.post("/webhooks/whatsapp/inbound", async (req, res): Promise<void> => {
+  // BotSpace sends: { from, message, type, timestamp, ... }
+  // Support both BotSpace and generic WhatsApp Cloud API formats
+  const body = req.body;
+
+  // Extract phone and message text from various possible payload shapes
+  let fromPhone: string | null = null;
+  let messageText: string | null = null;
+
+  // BotSpace format
+  if (body.from && body.message) {
+    fromPhone = String(body.from).replace(/\D/g, "").slice(-10);
+    messageText = typeof body.message === "string" ? body.message : body.message?.text ?? null;
+  }
+  // WhatsApp Cloud API format
+  else if (body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+    const msg = body.entry[0].changes[0].value.messages[0];
+    fromPhone = String(msg.from ?? "").replace(/\D/g, "").slice(-10);
+    messageText = msg.text?.body ?? msg.type ?? "";
+  }
+  // Generic fallback
+  else if (body.phone || body.mobile) {
+    fromPhone = String(body.phone ?? body.mobile).replace(/\D/g, "").slice(-10);
+    messageText = body.text ?? body.body ?? body.message ?? "";
+  }
+
+  req.log.info({ fromPhone, messageText }, "Inbound WhatsApp message");
+
+  if (!fromPhone) {
+    res.json({ received: true });
+    return;
+  }
+
+  try {
+    // Find the lead by phone
+    const phoneVariants = [fromPhone, `+91${fromPhone}`, `91${fromPhone}`];
+    let lead = null;
+    for (const phone of phoneVariants) {
+      const [found] = await db.select().from(leadsTable).where(eq(leadsTable.phone, phone));
+      if (found) { lead = found; break; }
+    }
+
+    if (!lead) {
+      res.json({ received: true });
+      return;
+    }
+
+    // Find the most recent campaign recipient row for this lead (within 7 days)
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const [recipient] = await db
+      .select()
+      .from(campaignRecipientsTable)
+      .where(
+        and(
+          eq(campaignRecipientsTable.leadId, lead.id),
+          eq(campaignRecipientsTable.replied, false),
+          gte(campaignRecipientsTable.sentAt, sevenDaysAgo)
+        )
+      )
+      .orderBy(desc(campaignRecipientsTable.sentAt))
+      .limit(1);
+
+    if (recipient) {
+      // Mark as replied with current lead state
+      await db.update(campaignRecipientsTable)
+        .set({
+          replied: true,
+          repliedAt: new Date(),
+          leadStatusAfter: lead.status,
+          leadScoreAfter: lead.score,
+        })
+        .where(eq(campaignRecipientsTable.id, recipient.id));
+
+      // Increment campaign replied count
+      await db
+        .update(campaignsTable)
+        .set({ repliedCount: db.$count(campaignRecipientsTable, and(
+          eq(campaignRecipientsTable.campaignId, recipient.campaignId),
+          eq(campaignRecipientsTable.replied, true)
+        )) as unknown as number })
+        .where(eq(campaignsTable.id, recipient.campaignId));
+
+      // Simpler: just do a raw increment
+      await db.execute(
+        sql`UPDATE campaigns SET replied_count = replied_count + 1 WHERE id = ${recipient.campaignId}`
+      );
+
+      // Also undo the +1 from the $count attempt above to avoid double-count
+      await db.execute(
+        sql`UPDATE campaigns SET replied_count = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ${recipient.campaignId} AND replied = true) WHERE id = ${recipient.campaignId}`
+      );
+
+      logger.info({ leadId: lead.id, campaignId: recipient.campaignId, messageText }, "Campaign reply recorded");
+    }
+  } catch (err) {
+    logger.error({ err, fromPhone }, "Error processing WhatsApp inbound");
+  }
+
   res.json({ received: true });
 });
 

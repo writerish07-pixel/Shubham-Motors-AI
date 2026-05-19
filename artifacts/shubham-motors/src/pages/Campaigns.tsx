@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { Megaphone, Plus, Play, Trash2, Eye, Users, CheckCircle2, XCircle, Clock, Send } from "lucide-react";
+import {
+  Megaphone, Plus, Play, Trash2, Eye, Users, CheckCircle2,
+  XCircle, Send, BarChart3, MessageSquare, TrendingUp, ChevronDown, ChevronUp, X
+} from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -10,7 +13,7 @@ import { cn } from "@/lib/utils";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface Campaign {
   id: number;
@@ -24,9 +27,32 @@ interface Campaign {
   targetCount: number;
   sentCount: number;
   failedCount: number;
-  scheduledAt: string | null;
+  repliedCount: number;
   createdAt: string;
-  updatedAt: string;
+}
+
+interface CampaignAnalytics {
+  campaign: { id: number; name: string; status: string };
+  funnel: {
+    targeted: number;
+    sent: number;
+    failed: number;
+    replied: number;
+    becameHot: number;
+    converted: number;
+  };
+  rates: { responseRate: number; conversionRate: number; hotRate: number };
+  responders: Array<{
+    leadId: number;
+    leadName: string | null;
+    leadPhone: string | null;
+    repliedAt: string | null;
+    statusAtSend: string | null;
+    scoreAtSend: number | null;
+    currentStatus: string | null;
+    currentScore: number | null;
+  }>;
+  totalRecipients: number;
 }
 
 interface PreviewResult {
@@ -46,7 +72,7 @@ async function apiFetch(path: string, opts?: RequestInit) {
   return r.json();
 }
 
-// ── Status badge ─────────────────────────────────────────────────────────────
+// ── Status badge ──────────────────────────────────────────────────────────────
 
 const STATUS_STYLES: Record<string, string> = {
   draft: "bg-muted text-muted-foreground border-border",
@@ -55,11 +81,157 @@ const STATUS_STYLES: Record<string, string> = {
   failed: "bg-red-500/20 text-red-400 border-red-500/30",
 };
 
-function CampaignBadge({ status }: { status: string }) {
+function StatusBadge({ status }: { status: string }) {
   return (
     <span className={cn("inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border capitalize", STATUS_STYLES[status] ?? STATUS_STYLES.draft)}>
       {status}
     </span>
+  );
+}
+
+// ── Funnel bar ────────────────────────────────────────────────────────────────
+
+function FunnelBar({ label, value, max, color, icon: Icon }: {
+  label: string; value: number; max: number; color: string;
+  icon: React.ElementType;
+}) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Icon size={11} className={color} />
+          <span>{label}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={cn("text-sm font-bold", color)}>{value}</span>
+          <span className="text-[10px] text-muted-foreground/60 w-7 text-right">{pct}%</span>
+        </div>
+      </div>
+      <div className="w-full bg-muted/50 rounded-full h-1.5 overflow-hidden">
+        <div
+          className={cn("h-1.5 rounded-full transition-all duration-500", color.replace("text-", "bg-"))}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Analytics panel ───────────────────────────────────────────────────────────
+
+function AnalyticsPanel({ campaignId, onClose }: { campaignId: number; onClose: () => void }) {
+  const { data, isLoading } = useQuery<CampaignAnalytics>({
+    queryKey: ["campaign-analytics", campaignId],
+    queryFn: () => apiFetch(`/campaigns/${campaignId}/analytics`),
+    refetchInterval: 8000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="border-t border-border pt-4 space-y-3 animate-pulse">
+        <div className="h-4 bg-muted rounded w-1/3" />
+        <div className="space-y-2">
+          {[1, 2, 3, 4].map(i => <div key={i} className="h-7 bg-muted rounded" />)}
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const { funnel, rates, responders } = data;
+  const base = Math.max(funnel.targeted, 1);
+
+  return (
+    <div className="border-t border-border pt-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <BarChart3 size={14} className="text-primary" />
+          Campaign Analytics
+        </div>
+        <button onClick={onClose} className="p-1 rounded hover:bg-muted transition-colors">
+          <X size={13} className="text-muted-foreground" />
+        </button>
+      </div>
+
+      {/* Rate chips */}
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          { label: "Reply Rate", value: `${rates.responseRate}%`, color: "text-blue-400", bg: "bg-blue-500/10 border-blue-500/20" },
+          { label: "Hot Rate", value: `${rates.hotRate}%`, color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/20" },
+          { label: "Conversion", value: `${rates.conversionRate}%`, color: "text-green-400", bg: "bg-green-500/10 border-green-500/20" },
+        ].map(({ label, value, color, bg }) => (
+          <div key={label} className={cn("rounded-lg border p-2.5 text-center", bg)}>
+            <div className={cn("text-lg font-bold", color)}>{value}</div>
+            <div className="text-[10px] text-muted-foreground mt-0.5">{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Conversion funnel */}
+      <div className="bg-muted/20 rounded-lg p-3 space-y-2.5 border border-border/50">
+        <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider mb-3">Conversion Funnel</div>
+        <FunnelBar label="Targeted" value={funnel.targeted} max={base} color="text-muted-foreground" icon={Users} />
+        <FunnelBar label="Sent" value={funnel.sent} max={base} color="text-blue-400" icon={Send} />
+        <FunnelBar label="Replied" value={funnel.replied} max={base} color="text-purple-400" icon={MessageSquare} />
+        <FunnelBar label="Became Hot" value={funnel.becameHot} max={base} color="text-orange-400" icon={TrendingUp} />
+        <FunnelBar label="Converted" value={funnel.converted} max={base} color="text-green-400" icon={CheckCircle2} />
+        {funnel.failed > 0 && (
+          <FunnelBar label="Failed" value={funnel.failed} max={base} color="text-red-400" icon={XCircle} />
+        )}
+      </div>
+
+      {/* Responders table */}
+      {responders.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+            Responders ({responders.length})
+          </div>
+          <div className="space-y-1 max-h-52 overflow-y-auto scrollbar-thin">
+            {responders.map((r, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs p-2 rounded-md bg-muted/20 border border-border/40">
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium truncate">{r.leadName ?? "Unknown"}</div>
+                  <div className="text-muted-foreground text-[10px]">{r.leadPhone}</div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {r.statusAtSend && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded border border-border capitalize text-muted-foreground">
+                      {r.statusAtSend}
+                    </span>
+                  )}
+                  {r.statusAtSend !== r.currentStatus && r.currentStatus && (
+                    <>
+                      <span className="text-muted-foreground/40">→</span>
+                      <span className={cn(
+                        "text-[10px] px-1.5 py-0.5 rounded border capitalize font-medium",
+                        r.currentStatus === "hot" || r.currentStatus === "converted"
+                          ? "border-green-500/30 text-green-400"
+                          : "border-border text-muted-foreground"
+                      )}>
+                        {r.currentStatus}
+                      </span>
+                    </>
+                  )}
+                  {r.repliedAt && (
+                    <span className="text-[10px] text-muted-foreground/50">
+                      {new Date(r.repliedAt).toLocaleDateString("en-IN", { dateStyle: "short" })}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {responders.length === 0 && funnel.sent > 0 && (
+        <div className="text-center py-3 text-xs text-muted-foreground/60">
+          No replies recorded yet — replies come in via the BotSpace inbound webhook
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -85,6 +257,7 @@ export default function Campaigns() {
   const [previewId, setPreviewId] = useState<number | null>(null);
   const [previewData, setPreviewData] = useState<PreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [analyticsId, setAnalyticsId] = useState<number | null>(null);
 
   const { data: campaigns, isLoading } = useQuery<Campaign[]>({
     queryKey: ["campaigns"],
@@ -109,6 +282,8 @@ export default function Campaigns() {
       toast.success("Campaign blast started!");
       qc.invalidateQueries({ queryKey: ["campaigns"] });
       setPreviewId(null);
+      setPreviewData(null);
+      setAnalyticsId(id);
     },
     onError: () => toast.error("Failed to send campaign"),
   });
@@ -123,6 +298,7 @@ export default function Campaigns() {
 
   async function handlePreview(id: number) {
     setPreviewId(id);
+    setAnalyticsId(null);
     setPreviewLoading(true);
     setPreviewData(null);
     try {
@@ -155,7 +331,7 @@ export default function Campaigns() {
             <Megaphone size={20} className="text-primary" />
             Blast Campaigns
           </h1>
-          <p className="text-xs text-muted-foreground mt-0.5">Send WhatsApp messages to filtered lead segments</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Send WhatsApp messages to filtered lead segments and track replies</p>
         </div>
         <Dialog open={addOpen} onOpenChange={setAddOpen}>
           <DialogTrigger asChild>
@@ -283,175 +459,223 @@ export default function Campaigns() {
       {isLoading ? (
         <div className="space-y-3">
           {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="h-28 bg-card border border-card-border rounded-lg animate-pulse" />
+            <div key={i} className="h-32 bg-card border border-card-border rounded-lg animate-pulse" />
           ))}
         </div>
       ) : campaigns && campaigns.length > 0 ? (
         <div className="space-y-3">
-          {campaigns.map(c => (
-            <div key={c.id} data-testid={`campaign-${c.id}`} className="bg-card border border-card-border rounded-lg p-4 space-y-3">
-              {/* Top row */}
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div className={cn(
-                    "w-8 h-8 rounded-md flex items-center justify-center shrink-0",
-                    c.status === "completed" ? "bg-green-500/20" :
-                    c.status === "running" ? "bg-blue-500/20" :
-                    "bg-muted"
-                  )}>
-                    <Megaphone size={14} className={
-                      c.status === "completed" ? "text-green-400" :
-                      c.status === "running" ? "text-blue-400" :
-                      "text-muted-foreground"
-                    } />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold truncate">{c.name}</span>
-                      <CampaignBadge status={c.status} />
-                    </div>
-                    <div className="text-[10px] text-muted-foreground mt-0.5">
-                      Created {new Date(c.createdAt).toLocaleDateString("en-IN", { dateStyle: "medium" })}
-                      {c.filterStatus && c.filterStatus.length > 0 && ` · Status: ${c.filterStatus.join(", ")}`}
-                      {(c.filterScoreMin > 0 || c.filterScoreMax < 100) && ` · Score: ${c.filterScoreMin}–${c.filterScoreMax}`}
-                      {c.filterModel && ` · Model: ${c.filterModel}`}
-                    </div>
-                  </div>
-                </div>
+          {campaigns.map(c => {
+            const showAnalytics = analyticsId === c.id;
+            const showPreview = previewId === c.id;
+            const canSend = c.status === "draft" || c.status === "failed" || c.status === "completed";
 
-                {/* Actions */}
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {(c.status === "draft" || c.status === "failed") && (
-                    <>
+            return (
+              <div key={c.id} data-testid={`campaign-${c.id}`} className="bg-card border border-card-border rounded-lg p-4 space-y-3">
+                {/* Top row */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className={cn(
+                      "w-8 h-8 rounded-md flex items-center justify-center shrink-0",
+                      c.status === "completed" ? "bg-green-500/20" :
+                      c.status === "running" ? "bg-blue-500/20" :
+                      "bg-muted"
+                    )}>
+                      <Megaphone size={14} className={
+                        c.status === "completed" ? "text-green-400" :
+                        c.status === "running" ? "text-blue-400" :
+                        "text-muted-foreground"
+                      } />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold truncate">{c.name}</span>
+                        <StatusBadge status={c.status} />
+                      </div>
+                      <div className="text-[10px] text-muted-foreground mt-0.5">
+                        {new Date(c.createdAt).toLocaleDateString("en-IN", { dateStyle: "medium" })}
+                        {c.filterStatus?.length > 0 && ` · ${c.filterStatus.join(", ")}`}
+                        {(c.filterScoreMin > 0 || c.filterScoreMax < 100) && ` · Score ${c.filterScoreMin}–${c.filterScoreMax}`}
+                        {c.filterModel && ` · ${c.filterModel}`}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {/* Analytics toggle */}
+                    {(c.status === "completed" || c.status === "running") && (
                       <Button
                         size="sm" variant="outline"
-                        className="h-7 text-xs gap-1"
-                        onClick={() => handlePreview(c.id)}
-                        disabled={previewLoading && previewId === c.id}
-                        data-testid={`preview-campaign-${c.id}`}
+                        className={cn("h-7 text-xs gap-1", showAnalytics && "bg-muted")}
+                        onClick={() => {
+                          setAnalyticsId(showAnalytics ? null : c.id);
+                          setPreviewId(null);
+                        }}
+                        data-testid={`analytics-campaign-${c.id}`}
                       >
-                        <Eye size={11} />Preview
+                        <BarChart3 size={11} />
+                        Analytics
+                        {showAnalytics ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
                       </Button>
-                      <Button
-                        size="sm"
-                        className="h-7 text-xs gap-1"
-                        onClick={() => sendMutation.mutate(c.id)}
-                        disabled={sendMutation.isPending}
-                        data-testid={`send-campaign-${c.id}`}
-                      >
-                        <Send size={11} />Send Blast
-                      </Button>
-                    </>
-                  )}
-                  {c.status === "running" && (
-                    <div className="flex items-center gap-1.5 text-xs text-blue-400 font-medium">
-                      <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
-                      Sending…
-                    </div>
-                  )}
-                  <button
-                    onClick={() => { if (confirm("Delete this campaign?")) deleteMutation.mutate(c.id); }}
-                    className="p-1.5 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
-                    data-testid={`delete-campaign-${c.id}`}
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              </div>
+                    )}
 
-              {/* Stats row */}
-              <div className="flex items-center gap-4 flex-wrap">
-                <div className="flex items-center gap-1.5 text-xs">
-                  <Users size={11} className="text-muted-foreground" />
-                  <span className="text-muted-foreground">Target:</span>
-                  <span className="font-medium">{c.targetCount}</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-xs">
-                  <CheckCircle2 size={11} className="text-green-400" />
-                  <span className="text-muted-foreground">Sent:</span>
-                  <span className="font-medium text-green-400">{c.sentCount}</span>
-                </div>
-                <div className="flex items-center gap-1.5 text-xs">
-                  <XCircle size={11} className="text-red-400" />
-                  <span className="text-muted-foreground">Failed:</span>
-                  <span className="font-medium text-red-400">{c.failedCount}</span>
-                </div>
-                {c.targetCount > 0 && c.status === "completed" && (
-                  <div className="flex-1">
-                    <div className="w-full bg-muted rounded-full h-1 overflow-hidden">
-                      <div
-                        className="bg-green-500 h-1 rounded-full transition-all"
-                        style={{ width: `${Math.round((c.sentCount / c.targetCount) * 100)}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-                {c.status === "running" && c.targetCount > 0 && (
-                  <div className="flex-1">
-                    <div className="w-full bg-muted rounded-full h-1 overflow-hidden">
-                      <div
-                        className="bg-blue-500 h-1 rounded-full transition-all animate-pulse"
-                        style={{ width: `${Math.round(((c.sentCount + c.failedCount) / c.targetCount) * 100)}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Message preview */}
-              <div className="bg-muted/30 rounded-md px-3 py-2 text-xs text-muted-foreground font-mono leading-relaxed line-clamp-2 border border-border/50">
-                {c.messageTemplate}
-              </div>
-
-              {/* Audience preview panel */}
-              {previewId === c.id && (
-                <div className="border-t border-border pt-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs font-semibold">Target Audience Preview</div>
-                    <button onClick={() => { setPreviewId(null); setPreviewData(null); }} className="text-[10px] text-muted-foreground hover:text-foreground">Close</button>
-                  </div>
-                  {previewLoading ? (
-                    <div className="text-xs text-muted-foreground animate-pulse">Loading audience…</div>
-                  ) : previewData ? (
-                    <>
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="font-bold text-primary text-lg">{previewData.count}</span>
-                        <span className="text-muted-foreground text-xs">leads will receive this message</span>
+                    {canSend && (
+                      <>
+                        <Button
+                          size="sm" variant="outline"
+                          className="h-7 text-xs gap-1"
+                          onClick={() => {
+                            setPreviewId(showPreview ? null : c.id);
+                            if (!showPreview) handlePreview(c.id);
+                            setAnalyticsId(null);
+                          }}
+                          disabled={previewLoading && previewId === c.id}
+                          data-testid={`preview-campaign-${c.id}`}
+                        >
+                          <Eye size={11} />Preview
+                        </Button>
                         <Button
                           size="sm"
-                          className="ml-auto h-7 text-xs gap-1"
+                          className="h-7 text-xs gap-1"
                           onClick={() => sendMutation.mutate(c.id)}
-                          disabled={sendMutation.isPending || previewData.count === 0}
-                          data-testid={`confirm-send-${c.id}`}
+                          disabled={sendMutation.isPending}
+                          data-testid={`send-campaign-${c.id}`}
                         >
-                          <Play size={11} />Confirm & Send
+                          <Send size={11} />Send Blast
                         </Button>
+                      </>
+                    )}
+                    {c.status === "running" && (
+                      <div className="flex items-center gap-1.5 text-xs text-blue-400 font-medium">
+                        <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                        Sending…
                       </div>
-                      {previewData.leads.length > 0 && (
-                        <div className="space-y-1 max-h-40 overflow-y-auto scrollbar-thin">
-                          {previewData.leads.slice(0, 10).map(l => (
-                            <div key={l.id} className="flex items-center gap-2 text-xs py-1 px-2 rounded bg-muted/20">
-                              <span className="font-medium">{l.name}</span>
-                              <span className="text-muted-foreground">{l.phone}</span>
-                              <span className={cn(
-                                "ml-auto px-1.5 py-0.5 rounded text-[10px] border",
-                                l.score >= 70 ? "text-red-400 border-red-500/30" :
-                                l.score >= 40 ? "text-orange-400 border-orange-500/30" :
-                                "text-muted-foreground border-border"
-                              )}>{l.score}</span>
-                            </div>
-                          ))}
-                          {previewData.count > 10 && (
-                            <div className="text-[10px] text-muted-foreground text-center py-1">+ {previewData.count - 10} more</div>
-                          )}
-                        </div>
-                      )}
-                    </>
-                  ) : null}
+                    )}
+                    <button
+                      onClick={() => { if (confirm("Delete this campaign?")) deleteMutation.mutate(c.id); }}
+                      className="p-1.5 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"
+                      data-testid={`delete-campaign-${c.id}`}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
                 </div>
-              )}
-            </div>
-          ))}
+
+                {/* Stats row */}
+                <div className="flex items-center gap-5 flex-wrap">
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <Users size={11} className="text-muted-foreground" />
+                    <span className="text-muted-foreground">Target:</span>
+                    <span className="font-medium">{c.targetCount}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <CheckCircle2 size={11} className="text-green-400" />
+                    <span className="text-muted-foreground">Sent:</span>
+                    <span className="font-medium text-green-400">{c.sentCount}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <XCircle size={11} className="text-red-400" />
+                    <span className="text-muted-foreground">Failed:</span>
+                    <span className="font-medium text-red-400">{c.failedCount}</span>
+                  </div>
+                  {c.repliedCount > 0 && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <MessageSquare size={11} className="text-purple-400" />
+                      <span className="text-muted-foreground">Replied:</span>
+                      <span className="font-medium text-purple-400">{c.repliedCount}</span>
+                    </div>
+                  )}
+                  {/* Progress bar for running campaigns */}
+                  {c.status === "running" && c.targetCount > 0 && (
+                    <div className="flex-1 min-w-[100px]">
+                      <div className="w-full bg-muted rounded-full h-1 overflow-hidden">
+                        <div
+                          className="bg-blue-500 h-1 rounded-full transition-all animate-pulse"
+                          style={{ width: `${Math.round(((c.sentCount + c.failedCount) / c.targetCount) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {/* Progress bar for completed campaigns */}
+                  {c.status === "completed" && c.targetCount > 0 && (
+                    <div className="flex-1 min-w-[100px]">
+                      <div className="w-full bg-muted rounded-full h-1 overflow-hidden">
+                        <div
+                          className="bg-green-500 h-1 rounded-full"
+                          style={{ width: `${Math.round((c.sentCount / c.targetCount) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Message preview */}
+                <div className="bg-muted/30 rounded-md px-3 py-2 text-xs text-muted-foreground font-mono leading-relaxed line-clamp-2 border border-border/50">
+                  {c.messageTemplate}
+                </div>
+
+                {/* Analytics panel */}
+                {showAnalytics && (
+                  <AnalyticsPanel campaignId={c.id} onClose={() => setAnalyticsId(null)} />
+                )}
+
+                {/* Audience preview panel */}
+                {showPreview && (
+                  <div className="border-t border-border pt-3 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-semibold">Target Audience Preview</div>
+                      <button
+                        onClick={() => { setPreviewId(null); setPreviewData(null); }}
+                        className="text-[10px] text-muted-foreground hover:text-foreground"
+                      >
+                        Close
+                      </button>
+                    </div>
+                    {previewLoading ? (
+                      <div className="text-xs text-muted-foreground animate-pulse">Loading audience…</div>
+                    ) : previewData ? (
+                      <>
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="font-bold text-primary text-lg">{previewData.count}</span>
+                          <span className="text-muted-foreground text-xs">leads will receive this message</span>
+                          <Button
+                            size="sm"
+                            className="ml-auto h-7 text-xs gap-1"
+                            onClick={() => sendMutation.mutate(c.id)}
+                            disabled={sendMutation.isPending || previewData.count === 0}
+                            data-testid={`confirm-send-${c.id}`}
+                          >
+                            <Play size={11} />Confirm & Send
+                          </Button>
+                        </div>
+                        {previewData.leads.length > 0 && (
+                          <div className="space-y-1 max-h-40 overflow-y-auto scrollbar-thin">
+                            {previewData.leads.slice(0, 10).map(l => (
+                              <div key={l.id} className="flex items-center gap-2 text-xs py-1 px-2 rounded bg-muted/20">
+                                <span className="font-medium">{l.name}</span>
+                                <span className="text-muted-foreground">{l.phone}</span>
+                                <span className={cn(
+                                  "ml-auto px-1.5 py-0.5 rounded text-[10px] border",
+                                  l.score >= 70 ? "text-red-400 border-red-500/30" :
+                                  l.score >= 40 ? "text-orange-400 border-orange-500/30" :
+                                  "text-muted-foreground border-border"
+                                )}>{l.score}</span>
+                              </div>
+                            ))}
+                            {previewData.count > 10 && (
+                              <div className="text-[10px] text-muted-foreground text-center py-1">
+                                + {previewData.count - 10} more
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       ) : (
         <div className="bg-card border border-card-border rounded-lg py-20 text-center">
@@ -463,10 +687,10 @@ export default function Campaigns() {
         </div>
       )}
 
-      {/* Tips */}
+      {/* Template variable reference */}
       <div className="bg-card border border-card-border rounded-lg p-4 text-xs text-muted-foreground space-y-1.5">
-        <div className="font-medium text-foreground text-sm mb-2">Template Variables</div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div className="font-medium text-foreground text-sm mb-2">Template Variables & Webhook</div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
           {[
             { v: "{name}", desc: "Customer's full name" },
             { v: "{phone}", desc: "Customer's phone number" },
@@ -477,6 +701,10 @@ export default function Campaigns() {
               <span className="text-muted-foreground/70">{desc}</span>
             </div>
           ))}
+        </div>
+        <div className="border-t border-border pt-2">
+          <span className="text-muted-foreground/70">WhatsApp reply webhook (configure in BotSpace): </span>
+          <code className="font-mono text-primary/80 text-[10px] break-all">POST /api/webhooks/whatsapp/inbound</code>
         </div>
       </div>
     </div>

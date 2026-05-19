@@ -14,6 +14,7 @@ export const campaignsTable = pgTable("campaigns", {
   targetCount: integer("target_count").default(0),
   sentCount: integer("sent_count").default(0),
   failedCount: integer("failed_count").default(0),
+  repliedCount: integer("replied_count").default(0),
   scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
