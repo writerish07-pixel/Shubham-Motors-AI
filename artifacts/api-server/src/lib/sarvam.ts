@@ -72,7 +72,7 @@ export async function textToSpeech(
       {
         inputs: [text.slice(0, 500)], // Sarvam TTS max ~500 chars per request
         target_language_code: langCode,
-        speaker: "meera",
+        speaker: "anushka",
         model: "bulbul:v2",
         enable_preprocessing: true,
       },
