@@ -332,16 +332,26 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     const ttsB64 = await textToSpeech(text, language);
     if (!ttsB64) return;
 
-    // Parse WAV from Sarvam, downsample to 8 kHz, encode as mulaw
+    // Sarvam now returns 8kHz PCM directly — no resampling, no aliasing.
     const wavBuf = Buffer.from(ttsB64, "base64");
     const { pcm, sampleRate } = parseWav(wavBuf);
-    const pcm8k = resample(pcm, sampleRate, EXOTEL_SAMPLE_RATE);
+    const pcm8k = sampleRate === EXOTEL_SAMPLE_RATE
+      ? pcm
+      : resample(pcm, sampleRate, EXOTEL_SAMPLE_RATE);
     const mulawBuf = s16ToMulaw(pcm8k);
 
-    // Send in 20 ms chunks (160 bytes each)
-    for (let i = 0; i < mulawBuf.length; i += CHUNK_BYTES) {
+    // Pace by absolute wall-clock time so setTimeout jitter doesn't accumulate.
+    // 160 bytes = 20 ms of audio. We schedule chunk N for t0 + N*20ms.
+    const totalChunks = Math.ceil(mulawBuf.length / CHUNK_BYTES);
+    const t0 = Date.now();
+    for (let n = 0; n < totalChunks; n++) {
       if (ws.readyState !== WebSocket.OPEN) break;
-      const chunk = mulawBuf.subarray(i, i + CHUNK_BYTES);
+      const targetTime = t0 + n * 20;
+      const now = Date.now();
+      const wait = targetTime - now;
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      const start = n * CHUNK_BYTES;
+      const chunk = mulawBuf.subarray(start, start + CHUNK_BYTES);
       ws.send(
         JSON.stringify({
           event: "media",
@@ -349,8 +359,6 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
           media: { payload: chunk.toString("base64") },
         })
       );
-      // 20 ms pacing
-      await new Promise((r) => setTimeout(r, 20));
     }
 
     // Mark — lets us know when playback finished
