@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "2CFq25Ok4wOddj_Eg1kiS"
+uri = "file://artifacts/api-server/greeting-sample.wav"
+type = "audio"
+title = "What the caller hears (9.2s greeting with new anti-aliased pipeline)"

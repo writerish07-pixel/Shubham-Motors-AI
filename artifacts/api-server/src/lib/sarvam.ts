@@ -75,7 +75,7 @@ export async function textToSpeech(
         speaker: "anushka",
         model: "bulbul:v2",
         enable_preprocessing: true,
-        speech_sample_rate: 8000,
+        speech_sample_rate: 22050,
       },
       {
         headers: {

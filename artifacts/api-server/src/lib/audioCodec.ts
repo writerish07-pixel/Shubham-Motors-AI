@@ -42,18 +42,59 @@ export function s16ToMulaw(samples: Int16Array): Buffer {
   return out;
 }
 
-/** Linear resampler: change sample rate */
+/** Biquad low-pass filter (Butterworth Q=0.707), applied twice for steeper rolloff. */
+function lowPass(input: Int16Array, cutoffHz: number, sampleRate: number): Int16Array {
+  const omega = (2 * Math.PI * cutoffHz) / sampleRate;
+  const cosw = Math.cos(omega);
+  const alpha = Math.sin(omega) / (2 * 0.7071);
+  const a0 = 1 + alpha;
+  const b0 = (1 - cosw) / 2 / a0;
+  const b1 = (1 - cosw) / a0;
+  const b2 = (1 - cosw) / 2 / a0;
+  const a1 = (-2 * cosw) / a0;
+  const a2 = (1 - alpha) / a0;
+
+  const out = new Int16Array(input.length);
+  // First pass
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < input.length; i++) {
+    const x0 = input[i]!;
+    const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    out[i] = Math.max(-32768, Math.min(32767, Math.round(y0)));
+    x2 = x1; x1 = x0; y2 = y1; y1 = y0;
+  }
+  // Second pass for ~24 dB/octave rolloff
+  x1 = 0; x2 = 0; y1 = 0; y2 = 0;
+  for (let i = 0; i < out.length; i++) {
+    const x0 = out[i]!;
+    const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    out[i] = Math.max(-32768, Math.min(32767, Math.round(y0)));
+    x2 = x1; x1 = x0; y2 = y1; y1 = y0;
+  }
+  return out;
+}
+
+/**
+ * Linear resampler with anti-aliasing for downsampling.
+ * When downsampling, applies a 3400 Hz low-pass first (telephone band) to avoid aliasing.
+ */
 export function resample(input: Int16Array, fromHz: number, toHz: number): Int16Array {
   if (fromHz === toHz) return input;
+
+  // Anti-alias filter BEFORE downsampling — critical to prevent metallic distortion
+  const source = fromHz > toHz
+    ? lowPass(input, Math.min(toHz / 2 - 200, 3400), fromHz)
+    : input;
+
   const ratio = fromHz / toHz;
-  const outLen = Math.floor(input.length / ratio);
+  const outLen = Math.floor(source.length / ratio);
   const out = new Int16Array(outLen);
   for (let i = 0; i < outLen; i++) {
     const pos = i * ratio;
     const idx = Math.floor(pos);
     const frac = pos - idx;
-    const a = input[idx] ?? 0;
-    const b = input[idx + 1] ?? a;
+    const a = source[idx] ?? 0;
+    const b = source[idx + 1] ?? a;
     out[i] = Math.round(a + frac * (b - a));
   }
   return out;
