@@ -61,6 +61,9 @@ interface Session {
   speechCount: number;
   isProcessing: boolean;
   isClosed: boolean;
+  isSpeaking?: boolean;      // true while agent TTS is being streamed out
+  ttsAbort?: boolean;        // set to true to stop the in-flight TTS stream (barge-in)
+  bargeInCount?: number;     // consecutive loud frames during TTS
 }
 
 // ── Attach WebSocket server to existing HTTP server ───────────────────────────
@@ -151,7 +154,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     }
     if (!lead && digits) {
       [lead] = await db.insert(leadsTable).values({
-        name: `Lead ${digits.slice(-4)}`,
+        name: "",                       // unknown — agent will address as "Sir/Ma'am"
         phone: digits,
         status: "new",
         score: 0,
@@ -180,7 +183,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     callSid,
     streamSid,
     leadId: lead?.id ?? 0,
-    leadName: lead?.name ?? "Customer",
+    leadName: (lead?.name && lead.name.trim() && !lead.name.startsWith("Lead ")) ? lead.name : "Sir",
     callDbId,
     language: lead?.language ?? "hi-IN",
     history: [],
@@ -193,15 +196,16 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     isClosed: false,
   };
 
-  // Send Hindi greeting after a 200 ms gap
+  // Send Hindi greeting after a 200 ms gap. Use "Sir/Ma'am" when name unknown.
   setTimeout(async () => {
     if (ws.readyState !== WebSocket.OPEN) return;
+    const salutation = session.leadName === "Sir" ? "सर" : `${session.leadName} जी`;
     const greeting =
-      `नमस्ते ${session.leadName} जी! मैं प्रिया हूं, शुभम मोटर्स की AI सेल्स असिस्टेंट। ` +
-      `हम Hero MotoCorp के अधिकृत डीलर हैं। आप किस Hero बाइक में रुचि रखते हैं?`;
+      `नमस्ते ${salutation}! मैं प्रिया बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। ` +
+      `आपकी कॉल का धन्यवाद! बताइए, कौन सी Hero बाइक या स्कूटर में आपकी रुचि है?`;
     session.transcript.push(`Agent: ${greeting}`);
     session.history.push({ role: "assistant", content: greeting });
-    await streamTtsToWs(ws, session.streamSid, greeting, session.language);
+    await streamTtsToWs(ws, session.streamSid, greeting, session.language, session);
   }, 200);
 
   return session;
@@ -215,6 +219,36 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
   const chunk = Buffer.from(payload, "base64");
   const pcm = pcm16LeToS16(chunk);
   const energy = rmsEnergy(pcm);
+
+  // ── BARGE-IN with echo guard ──────────────────────────────────────────────
+  // Risk: outbound TTS can echo back through the PSTN/Exotel path and either
+  // (a) trigger a false barge-in that cuts off our own speech, or
+  // (b) get fed into STT and produce loop-back transcripts.
+  //
+  // Guards:
+  // 1. Require a much higher energy (4× silence floor) than normal speech
+  //    detection so faint echo of own TTS doesn't qualify.
+  // 2. Require 5 consecutive loud frames (~100 ms of continuous loud audio)
+  //    before declaring barge-in.
+  // 3. While isSpeaking is true, DO NOT buffer audio for STT — discard it.
+  //    Real customer speech that triggers barge-in will be captured on
+  //    subsequent frames once isSpeaking flips false.
+  if (session.isSpeaking) {
+    if (energy > SILENCE_RMS * 4) {
+      session.bargeInCount = (session.bargeInCount ?? 0) + 1;
+      if (session.bargeInCount >= 5) {
+        session.ttsAbort = true;
+        logger.info({ callSid: session.callSid, energy }, "Barge-in confirmed — stopping TTS");
+        try {
+          ws.send(JSON.stringify({ event: "clear", stream_sid: session.streamSid, streamSid: session.streamSid }));
+        } catch { /* ws closed */ }
+        session.bargeInCount = 0;
+      }
+    } else {
+      session.bargeInCount = 0;
+    }
+    return; // ignore inbound audio while agent is speaking
+  }
 
   if (energy > SILENCE_RMS) {
     session.speechCount++;
@@ -323,7 +357,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   if (session.turn > 10) {
     const bye = "धन्यवाद! हम जल्द आपसे संपर्क करेंगे। नमस्ते!";
     session.transcript.push(`Agent: ${bye}`);
-    await streamTtsToWs(ws, session.streamSid, bye, session.language);
+    await streamTtsToWs(ws, session.streamSid, bye, session.language, session);
     return;
   }
 
@@ -342,13 +376,14 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   }
 
   // TTS → send audio back
-  await streamTtsToWs(ws, session.streamSid, agentText, session.language);
+  await streamTtsToWs(ws, session.streamSid, agentText, session.language, session);
 }
 
 // ── Send TTS audio to Exotel over WebSocket ───────────────────────────────────
 
-async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, language: string): Promise<void> {
+async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, language: string, session?: Session): Promise<void> {
   if (ws.readyState !== WebSocket.OPEN) return;
+  if (session) { session.isSpeaking = true; session.ttsAbort = false; session.bargeInCount = 0; }
 
   try {
     const ttsB64 = await textToSpeech(text, language);
@@ -381,6 +416,10 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     const t0 = Date.now();
     for (let n = 0; n < totalChunks; n++) {
       if (ws.readyState !== WebSocket.OPEN) break;
+      if (session?.ttsAbort) {
+        logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)");
+        break;
+      }
       const targetTime = t0 + n * 20;
       const now = Date.now();
       const wait = targetTime - now;
@@ -399,13 +438,17 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     }
 
     // Mark — lets us know when playback finished
-    ws.send(JSON.stringify({
-      event: "mark",
-      stream_sid: streamSid,
-      streamSid,
-      mark: { name: "tts_done" },
-    }));
+    if (!session?.ttsAbort) {
+      ws.send(JSON.stringify({
+        event: "mark",
+        stream_sid: streamSid,
+        streamSid,
+        mark: { name: "tts_done" },
+      }));
+    }
   } catch (err) {
     logger.error({ err }, "TTS streaming error");
+  } finally {
+    if (session) { session.isSpeaking = false; session.ttsAbort = false; session.bargeInCount = 0; }
   }
 }
