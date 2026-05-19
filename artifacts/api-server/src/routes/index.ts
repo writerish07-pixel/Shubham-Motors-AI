@@ -7,6 +7,7 @@ import followupsRouter from "./followups";
 import analyticsRouter from "./analytics";
 import webhooksRouter from "./webhooks";
 import schedulerRouter from "./scheduler";
+import campaignsRouter from "./campaigns";
 
 const router: IRouter = Router();
 
@@ -18,5 +19,6 @@ router.use(followupsRouter);
 router.use(analyticsRouter);
 router.use(webhooksRouter);
 router.use(schedulerRouter);
+router.use(campaignsRouter);
 
 export default router;
