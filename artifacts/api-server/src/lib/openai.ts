@@ -3,6 +3,11 @@ import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { classifyTurn, tryDirectAnswer } from "./modelRouter";
+
+// Model IDs — kept here so the Settings UI or env can swap them later.
+const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
+const MODEL_PREMIUM = process.env.OPENAI_MODEL_PREMIUM ?? "gpt-4o";
 
 // Use Replit's managed OpenAI integration (no key required — proxied through Replit).
 // Falls back to user-provided OPENAI_API_KEY only if integration env vars are missing.
@@ -66,6 +71,18 @@ ${knowledge || DEFAULT_HERO_KNOWLEDGE}
 Customer addressing: ${addressForm}
 Language: ${language}`;
 
+  // ── Tier 0: try to answer directly from KB without any LLM call (saves 100%
+  // of the tokens for greetings, hours, address, simple price lookups).
+  const direct = tryDirectAnswer(customerText, knowledge || DEFAULT_HERO_KNOWLEDGE, addressForm);
+  if (direct) {
+    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router → direct KB answer");
+    return direct;
+  }
+
+  // ── Tier 1/2: pick mini vs premium model based on conversation complexity.
+  const tier = classifyTurn(customerText, conversationHistory);
+  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
+
   const messages: OpenAI.ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },
     ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
@@ -73,12 +90,13 @@ Language: ${language}`;
   ];
 
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model,
     messages,
     max_tokens: 180,
     temperature: 0.7,
   });
 
+  logger.info({ tier, model, inputLen: customerText.length }, "Hybrid router → LLM reply");
   return response.choices[0]?.message?.content ?? "जी बोलिए, मैं सुन रही हूँ।";
 }
 
