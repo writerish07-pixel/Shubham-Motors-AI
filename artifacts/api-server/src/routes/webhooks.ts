@@ -143,7 +143,7 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
   // Prefer the published HTTPS domain (REPLIT_DOMAINS) — Exotel must reach a public
   // TLS endpoint. We convert https → wss and point at our Voicebot handler.
   const httpsHost = getHost(req);
-  const wssUrl = httpsHost.replace(/^https?:\/\//, "wss://") + "/call/stream";
+  const wssUrl = httpsHost.replace(/^https?:\/\//, "wss://") + "/api/voicebot/stream";
 
   // <Stream> ExoML — hands the live media stream to our Sarvam pipeline.
   // The custom parameters land on the `start` event so the WS knows who is calling.
