@@ -1,9 +1,9 @@
 /**
  * Exotel Voicebot WebSocket handler.
- * Exotel opens a WS connection to /api/voicebot/stream when a call connects.
- * (Path is under /api/ so the Replit production proxy passes WS upgrades
- * through — non-/api paths get the Upgrade header stripped, which breaks
- * the WS handshake and causes silent calls.)
+ * Exotel opens a WS connection to /call/stream when a call connects.
+ * (The /call path is registered in artifact.toml and the Replit production
+ * proxy DOES pass WS upgrades through on this path. Do NOT move this to
+ * /api/* — that was tried and broke production calls.)
  * Audio: G.711 μ-law, 8 kHz, 8-bit, mono (20 ms chunks = 160 bytes each).
  *
  * Flow per call:
@@ -73,7 +73,7 @@ interface Session {
 
 // ── Attach WebSocket server to existing HTTP server ───────────────────────────
 export function setupVoicebotWS(httpServer: Server): void {
-  const wss = new WebSocketServer({ server: httpServer, path: "/api/voicebot/stream" });
+  const wss = new WebSocketServer({ server: httpServer, path: "/call/stream" });
 
   wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
     let session: Session | null = null;
@@ -128,7 +128,7 @@ export function setupVoicebotWS(httpServer: Server): void {
     ws.on("error", (err) => logger.error({ err }, "Voicebot WS error"));
   });
 
-  logger.info("Voicebot WebSocket server ready at /api/voicebot/stream");
+  logger.info("Voicebot WebSocket server ready at /call/stream");
 }
 
 // ── Event handlers ────────────────────────────────────────────────────────────

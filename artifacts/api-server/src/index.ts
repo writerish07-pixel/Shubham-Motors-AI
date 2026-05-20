@@ -19,7 +19,7 @@ if (Number.isNaN(port) || port <= 0) {
 // Create a plain HTTP server so the WebSocket server can share the same port
 const server = http.createServer(app);
 
-// Attach Exotel Voicebot WebSocket handler at /api/voicebot/stream
+// Attach Exotel Voicebot WebSocket handler at /call/stream
 setupVoicebotWS(server);
 
 server.listen(port, () => {
