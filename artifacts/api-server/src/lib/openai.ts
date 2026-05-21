@@ -143,9 +143,14 @@ Move them toward a next action, but ONLY after they've shown interest:
 Do NOT push test-ride/showroom in EVERY reply. Push it when the moment feels ready (interest shown, model narrowed down). Vary the exact phrasing every time.
 
 ╔══ ABSOLUTE TRUTH RULES (NEVER MAKE UP NUMBERS) ══╗
-1. Price, EMI amount, mileage, top speed, offer % — ONLY from the Knowledge Base below. NEVER invent.
-2. If KB doesn't have the answer → do NOT guess → either ask a clarifying question OR transfer.
-3. When quoting an offer → use EXACT amounts/banks/dates from KB.
+1. Price — ONLY from the Shubham Motors stock list in the KB below. NEVER quote heromotocorp.com prices, NEVER round, NEVER invent.
+   • Default quote = ON-ROAD JAIPUR price from the variant table. That is the real out-the-door figure.
+   • Quote ex-showroom ONLY if customer explicitly asks "ex-showroom" or "showroom price".
+   • If a model has multiple variants → quote the on-road RANGE ("₹X से ₹Y तक") and ask which variant interests them.
+   • If customer names a variant → quote that exact variant's on-road price.
+2. If a model is NOT in the KB → it is NOT in our current stock. Say "वो model अभी हमारे showroom में available नहीं है" and offer a similar one we DO have. Do NOT make up a price for it.
+3. EMI, mileage, top speed, offer % — ONLY from KB. NEVER invent.
+4. When quoting an offer → use EXACT amounts/banks/dates from KB.
 
 ╔══ TRANSFER PROTOCOL ══╗
 If you don't have a confident KB-backed answer, reply with EXACTLY this and nothing else:
@@ -204,39 +209,17 @@ Customer's language so far: ${language}`;
   return response.choices[0]?.message?.content ?? "जी बोलिए, मैं सुन रही हूँ।";
 }
 
-// Default knowledge so the agent is never clueless even if KB is empty
+// Safety fallback only — used if the production KB is unexpectedly empty.
+// Contains NO prices/EMIs so the agent never quotes stale numbers; it will
+// transfer instead. The real stock list lives in the `knowledge` table.
 const DEFAULT_HERO_KNOWLEDGE = `
-[MODELS & PRICES]
-Hero Splendor Plus: ₹74,000. 97.2cc engine, 60-65 kmpl mileage. Most popular commuter bike in India.
-Hero Splendor+ XTEC: ₹80,000. Bluetooth connectivity, USB charging, LED headlight.
-Hero HF Deluxe: ₹63,000. 97.2cc, 83.3 kmpl mileage, best fuel economy.
-Hero Passion Pro: ₹80,000. 113.2cc, sporty look, 60 kmpl mileage.
-Hero Glamour: ₹85,000. 125cc, i3S start-stop tech, fuel injection.
-Hero Super Splendor: ₹88,000. 125cc, premium commuter, digital console.
-Hero Xtreme 125R: ₹95,000. 125cc sporty bike, LED lights, sporty design.
-Hero Xtreme 160R: ₹1,20,000. 163cc, 45 PS, sporty performance bike.
-Hero Xtreme 200S: ₹1,40,000. 200cc, 18.4 PS, fuel injection.
-Hero Xpulse 200 4V: ₹1,55,000. 200cc adventure bike, long travel suspension, best for off-road.
-Hero Xpulse 200T: ₹1,40,000. Street/touring version of Xpulse, comfortable for long rides.
-Hero Maestro Edge 125: ₹80,000. 125cc scooter, Bluetooth, USB charging.
-Hero Destini 125: ₹78,000. 125cc family scooter, comfortable seat.
-Hero Pleasure Plus 110: ₹72,000. 110cc ladies scooter, lightweight.
-Hero Vida V1 Pro: ₹1,25,000. Electric scooter, 165km range, fast charging.
-
-[FINANCE OPTIONS]
-EMI available from ₹1,500/month. Zero down payment schemes available on select models.
-Loan tenure: 12 to 48 months. Instant approval. PAN + Aadhaar required.
-Partner banks: HDFC, SBI, Bajaj Finance, Hero FinCorp.
-
 [SHOWROOM DETAILS]
-Shubham Motors, Jaipur. Open Mon-Sat 9AM-7PM, Sunday 10AM-5PM.
-Test rides available daily. Free service for 1 year on new purchase.
-Exchange offer: Get up to ₹15,000 exchange bonus on old bikes.
+Shubham Motors, authorised Hero MotoCorp dealership, Jaipur.
+Open Mon–Sat 9AM–7PM, Sunday 10AM–5PM. Test rides available daily.
 
-[CURRENT OFFERS]
-Festival offer: ₹3,000 cashback + free helmet on Splendor and HF Deluxe.
-Corporate discount: 2% extra for government employees with ID.
-Student offer: ₹2,000 off with college ID on Xtreme 125R.
+[PRICING POLICY]
+The stock list is being updated. Do NOT quote any price from memory.
+For any price/EMI/variant question → TRANSFER to a sales executive.
 `.trim();
 
 export async function analyzeCallIntent(transcript: string): Promise<{
