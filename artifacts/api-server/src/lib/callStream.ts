@@ -208,8 +208,8 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     if (ws.readyState !== WebSocket.OPEN) return;
     const knowsName = session.leadName !== "Sir";
     const greeting = knowsName
-      ? `नमस्ते ${session.leadName} जी! मैं प्रिया बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। आपकी कॉल का धन्यवाद! बताइए, कौन सी Hero बाइक या स्कूटर में आपकी रुचि है?`
-      : `नमस्ते सर! मैं प्रिया बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। आपकी कॉल का धन्यवाद! पहले आपका शुभ नाम बताइए ताकि मैं आपको सही से help कर सकूँ?`;
+      ? `नमस्ते ${session.leadName} जी! मैं साक्षी बोल रही हूं, शुभम मोटर्स से। बताइए, मैं आपकी क्या help कर सकती हूँ?`
+      : `नमस्ते! मैं साक्षी बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
     session.transcript.push(`Agent: ${greeting}`);
     session.history.push({ role: "assistant", content: greeting });
     await streamTtsToWs(ws, session.streamSid, greeting, session.language, session);

@@ -11,9 +11,13 @@
 
 // Strong "name intent" patterns — match a phrase that clearly introduces a name
 // and capture the following word(s). We then strip any trailing stopword/verb.
+// IMPORTANT: capture group must NOT swallow trailing verbs like "है", "हूँ".
+// Customer typically says: "मेरा नाम ऋषभ है" — we want "ऋषभ", not "ऋषभ है".
+// We capture greedy name tokens then call stripTrailingStopwords() to peel
+// off any verb/filler that got included.
 const PHRASE_PATTERNS: RegExp[] = [
-  /(?:मेरा\s+(?:शुभ\s+)?नाम(?:\s+है)?)\s+([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)/i,
-  /(?:मैं|main)\s+([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)\s+(?:बोल\s*रहा|बोल\s*रही|hoon|hu|बोलता|बोलती)/i,
+  /(?:मेरा\s+(?:शुभ\s+)?नाम\s+(?:है\s+)?)([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)/i,
+  /(?:मैं|main)\s+([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)\s+(?:बोल\s*रहा|बोल\s*रही|hoon|hu|hoon|बोलता|बोलती|हूँ|हूं)/i,
   /(?:my\s+name\s+is|name\s+is|this\s+is|i\s+am|i'm)\s+([A-Za-z][A-Za-z]{1,20}(?:\s+[A-Za-z]{1,20})?)/i,
 ];
 
@@ -28,6 +32,9 @@ const STOPWORDS = new Set([
   "chahiye", "lena", "lenge", "leni", "le", "lo", "interested", "want", "wanted", "looking",
   "buy", "buying", "book", "booking", "test", "ride", "see", "show", "tell", "know", "need",
   "batao", "bataiye", "bolo", "bol", "samajh", "samjha", "samjhao", "pata",
+  // Hindi "to be" verbs — critical: customer says "मेरा नाम ऋषभ है" and we
+  // must strip the trailing "है" so the stored name is "ऋषभ" not "ऋषभ है".
+  "है", "हैं", "हूँ", "हूं", "था", "थी", "थे", "hai", "hain", "hu", "hoon", "tha", "thi",
   "kya", "kaun", "kaisa", "kaisi", "kab", "kahan", "kitna", "kitni", "what", "who", "how", "when", "where",
   // Model names (must never be captured as a customer name)
   "splendor", "passion", "glamour", "destini", "pleasure", "xtreme", "xpulse",
@@ -38,7 +45,9 @@ const STOPWORDS = new Set([
 
 export function extractCustomerName(text: string): string | null {
   if (!text) return null;
-  const cleaned = text.trim();
+  // Strip Hindi danda (।, ॥) and ASCII punctuation BEFORE regex matching so
+  // they don't get pulled into the name capture group.
+  const cleaned = text.replace(/[।॥.,!?;:]/g, " ").replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
 
   // 1. Strong phrase pattern: "my name is X", "मेरा नाम X है", etc.
