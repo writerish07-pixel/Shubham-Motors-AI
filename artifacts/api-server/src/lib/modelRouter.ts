@@ -6,162 +6,201 @@
 //   Tier 1 — gpt-4o-mini  (cheap, default for normal conversation)
 //   Tier 2 — gpt-4o       (premium, only for complex objections / negotiation /
 //                           explicit competitor comparisons / hot-buy closing)
-//
-// Routing is done with cheap regex/keyword heuristics so we don't burn a
-// classifier LLM call to decide which LLM to call.
 
 import type { ConversationTurn } from "./openai";
 
 export type ModelTier = "mini" | "premium";
 
-// Complexity heuristics — if ANY hit, we promote to the premium model.
+// ─────────────────────────────────────────────────────────────────────────────
+// STT alias correction. Sarvam often mishears Hero model names. We normalise
+// the customer text BEFORE both the direct-answer router and the LLM see it
+// so Sakshi never gets confused by spelling drift.
+// ─────────────────────────────────────────────────────────────────────────────
+const STT_ALIASES: Array<[RegExp, string]> = [
+  // Xoom often comes as "Zoom" / "जूम"
+  [/\bzoom\b/gi, "Xoom"],
+  [/जूम/g, "Xoom"],
+  // Splendor variants
+  [/\bsplender\b/gi, "Splendor"],
+  [/\bsplendar\b/gi, "Splendor"],
+  [/स्प्लेंडर/g, "Splendor"],
+  // Xtreme
+  [/\bextreme\b/gi, "Xtreme"],
+  [/\bx[- ]?treme\b/gi, "Xtreme"],
+  [/एक्सट्रीम/g, "Xtreme"],
+  // Xpulse
+  [/\bex[- ]?pulse\b/gi, "Xpulse"],
+  [/\bexpulse\b/gi, "Xpulse"],
+  [/एक्सपल्स/g, "Xpulse"],
+  // Glamour
+  [/\bglamor\b/gi, "Glamour"],
+  [/ग्लैमर/g, "Glamour"],
+  // Destini
+  [/\bdestiny\b/gi, "Destini"],
+  [/\bdestini\b/gi, "Destini"],
+  [/डेस्टिनी/g, "Destini"],
+  // Passion
+  [/\bpashan\b/gi, "Passion"],
+  [/पैशन/g, "Passion"],
+  // Pleasure
+  [/\bpleasur\b/gi, "Pleasure"],
+  [/प्लेज़र/g, "Pleasure"],
+  [/प्लेजर/g, "Pleasure"],
+  // Karizma
+  [/\bcarisma\b/gi, "Karizma"],
+  [/\bkarisma\b/gi, "Karizma"],
+  // HF Deluxe
+  [/\bhf[- ]?delux\b/gi, "HF Deluxe"],
+  [/\bach[- ]?ef\b/gi, "HF"],
+];
+
+export function correctStt(text: string): string {
+  let t = text;
+  for (const [re, rep] of STT_ALIASES) t = t.replace(re, rep);
+  return t;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier classifier — promotes to premium model only when needed.
+// ─────────────────────────────────────────────────────────────────────────────
 const PREMIUM_KEYWORDS_RE = new RegExp(
   [
-    // Price/discount negotiation
     "discount", "kam karo", "kam karoge", "kam kar do", "sasta", "mehnga", "महंगा", "महंगी",
     "बहुत ज्यादा", "जादा है", "जयदा है", "best price", "final price", "negotiate", "मोलभाव",
-    // Financing / EMI complexity
     "emi calculation", "down payment", "loan eligibility", "cibil", "interest rate",
-    // Competitor comparison (Hero-vs-X)
     "bajaj", "tvs", "honda", "yamaha", "suzuki", "ktm", "royal enfield", "bullet",
     "vs ", " versus ", "compare karo", "comparison", "तुलना", "किसका better",
-    // Hot-buy commitment signals
     "book kar", "booking karna", "confirm karta", "abhi le", "aaj le lenge",
     "final kar", "delivery kab", "registration kab",
-    // Multi-criteria / specific specs
     "mileage aur power", "kitne ka aata", "टॉर्क", "torque", "bhp", "ground clearance",
-    // Trade-in / exchange
     "exchange", "purani bike", "second hand", "trade",
   ].join("|"),
   "i"
 );
 
-// Pure-info questions answerable directly from KB without an LLM.
-const PRICE_QUERY_RE = /(?:price|कीमत|दाम|kitne ka|kitne ki|kya rate|on[- ]?road|ex[- ]?showroom)/i;
+const PRICE_QUERY_RE = /(?:price|कीमत|दाम|kitne ka|kitne ki|kya rate|on[- ]?road|ex[- ]?showroom|कितने|kitna|kitne)/i;
+const VARIANT_QUERY_RE = /(?:variant|variants|कौन सी|kaunsi|kaun si|model|वेरिएंट|version)/i;
+const FEATURE_QUERY_RE = /(?:feature|features|specs|mileage|माइलेज|engine|cc|warranty|वारंटी)/i;
 const HOURS_QUERY_RE = /(?:timing|kab khulta|kab khulte|open|close|hours|शोरूम कब)/i;
 const ADDRESS_QUERY_RE = /(?:address|पता|location|kahan hai|कहाँ है|कैसे आऊं|directions)/i;
 const YESNO_RE = /^(?:haan|han|ji|yes|ok|okay|theek|sahi|nahi|no|nope)[\s.!?]*$/i;
 const GREETING_RE = /^(?:hello|hi|namaste|namaskaar|namaskar|नमस्ते|jai mata di|salaam|salam)[\s.!?]*$/i;
 
 export function classifyTurn(customerText: string, history: ConversationTurn[]): ModelTier {
-  // Premium signals win regardless of turn position — a competitor comparison
-  // or "final price?" in turn 1 still deserves the better model.
   if (PREMIUM_KEYWORDS_RE.test(customerText)) return "premium";
-
-  // Long customer turn likely needs better reasoning.
   if (customerText.length > 220 || customerText.split(/\s+/).length > 40) return "premium";
-
-  // Otherwise the cheap model is fine, including the very first turns.
-  void history; // history reserved for future signals (e.g. repeated objection)
+  void history;
   return "mini";
 }
 
-// Tier-0 attempt: try to answer using only the KB string (already built by
-// caller). Returns a complete reply string or null if no clean match.
-// Keeps the same agent voice as the LLM ("…सर!" closer + follow-up question).
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier-0 direct answer — operates on the new `[MODELS] Hero <name>: ...`
+// knowledge format. Returns a complete reply (Sakshi voice + follow-up
+// question) or null if it can't confidently answer.
+// ─────────────────────────────────────────────────────────────────────────────
 export function tryDirectAnswer(
   customerText: string,
   knowledge: string,
   addressForm: string
 ): string | null {
-  const text = customerText.trim();
+  const text = correctStt(customerText.trim());
   if (!text) return null;
 
-  // Greeting-only message
   if (GREETING_RE.test(text)) {
     return `नमस्ते ${addressForm}! बताइए, कौन सी Hero बाइक या स्कूटर में आपकी रुचि है?`;
   }
-
-  // Pure yes/no with no model context — too ambiguous, let LLM handle
   if (YESNO_RE.test(text)) return null;
 
-  // Showroom hours — prefer KB-sourced answer; fall back to known defaults.
   if (HOURS_QUERY_RE.test(text)) {
-    const kbHours = findKbLineByPattern(knowledge, /timing|hours|open|close|खुलता|बजे/i);
-    const body = kbHours
-      ? stripCategoryPrefix(kbHours)
-      : "शुभम मोटर्स सोमवार से शनिवार सुबह 9 से शाम 7 बजे, रविवार सुबह 10 से शाम 5 तक खुला रहता है";
-    return `${body}. आप कब आना चाहेंगे ${addressForm}?`;
+    return `Shubham Motors सोमवार से शनिवार सुबह 9 से शाम 7 बजे तक, और रविवार सुबह 10 से शाम 5 तक खुला रहता है. आप कब आना चाहेंगे ${addressForm}?`;
   }
-
-  // Address — prefer KB if present.
   if (ADDRESS_QUERY_RE.test(text)) {
-    const kbAddr = findKbLineByPattern(knowledge, /address|location|showroom|जयपुर|jaipur/i);
-    const body = kbAddr
-      ? stripCategoryPrefix(kbAddr)
-      : "हमारा showroom जयपुर में है। मैं exact location WhatsApp पर भेज देती हूँ";
-    return `${body}. क्या आज शाम का test ride book कर लूँ ${addressForm}?`;
+    return `हमारा showroom जयपुर में है ${addressForm}, मैं exact location WhatsApp पर अभी भेज देती हूँ. क्या आज शाम का test ride book कर लूँ?`;
   }
 
-  // Direct model-name + price lookup — restricted to [PRICE] rows only so a
-  // stock or FAQ line for the same model can't be returned as the "price".
-  if (PRICE_QUERY_RE.test(text)) {
-    const model = findModelInText(text, knowledge);
-    if (model) {
-      const line = findPriceLine(knowledge, model);
-      if (line) {
-        return `${stripCategoryPrefix(line)}. ${addressForm}, आज showroom आ कर देख लीजिए — colour भी choose कर सकते हैं?`;
-      }
+  // Model lookup — find which KB model the customer is asking about
+  const modelEntry = findModelEntry(text, knowledge);
+  if (!modelEntry) return null;
+
+  const isPriceQ = PRICE_QUERY_RE.test(text);
+  const isVariantQ = VARIANT_QUERY_RE.test(text);
+  const isFeatureQ = FEATURE_QUERY_RE.test(text);
+
+  if (isPriceQ) {
+    const range = extractOnRoadRange(modelEntry.body);
+    if (range) {
+      return `${modelEntry.title} की on-road Jaipur price ${range} है ${addressForm}. कितने variant हैं उसमें से कौन सा देखना चाहेंगी — मैं detail भेज दूँ?`;
+    }
+  }
+  if (isVariantQ) {
+    const variants = extractVariantList(modelEntry.body);
+    if (variants.length) {
+      const list = variants.slice(0, 3).map(v => `${v.name} (₹${v.onRoad.toLocaleString("en-IN")})`).join(", ");
+      const extra = variants.length > 3 ? `और भी ${variants.length - 3} variant हैं` : "";
+      return `${modelEntry.title} में ${variants.length} variant available हैं — ${list}${extra ? ", " + extra : ""}. इनमें से कौन सा आपके लिए suit करेगा ${addressForm}?`;
+    }
+  }
+  if (isFeatureQ) {
+    const engine = matchLine(modelEntry.body, /^Engine:\s*(.+)$/m);
+    const warranty = matchLine(modelEntry.body, /^Warranty:\s*(.+)$/m);
+    if (engine) {
+      const parts = [engine ? `Engine ${engine}` : null, warranty ? `warranty ${warranty}` : null].filter(Boolean);
+      return `${modelEntry.title} में ${parts.join(", ")}. आप test ride के लिए कब आ सकेंगी ${addressForm}?`;
     }
   }
 
   return null;
 }
 
-function stripCategoryPrefix(line: string): string {
-  return line.replace(/^\[[A-Z_]+\]\s*/i, "").trim();
-}
+interface ModelEntry { title: string; body: string }
 
-function findKbLineByPattern(knowledge: string, pattern: RegExp): string | null {
-  for (const line of knowledge.split("\n")) {
-    if (pattern.test(line)) return line;
+function findModelEntry(text: string, knowledge: string): ModelEntry | null {
+  // Each KB entry in the assembled string looks like:
+  //   [MODELS] Hero Xoom 125: Hero Xoom 125 — Shubham Motors Jaipur ... \n ...
+  // Entries are separated by single newlines but the content itself contains
+  // newlines, so we split on the `[MODELS] ` prefix instead.
+  const chunks = knowledge.split(/\n?\[MODELS\]\s+/i).filter(Boolean);
+  const entries: ModelEntry[] = [];
+  for (const c of chunks) {
+    const m = c.match(/^([^:]+):\s*([\s\S]+?)(?=\n\[[A-Z_]+\]\s|$)/);
+    if (m) entries.push({ title: m[1].trim(), body: m[2].trim() });
   }
-  return null;
-}
+  if (!entries.length) return null;
 
-// Extract the first Hero model name from the customer text that also appears
-// in the KB (so we don't false-match on random words).
-function findModelInText(text: string, knowledge: string): string | null {
-  const kbModels = new Set<string>();
-  for (const line of knowledge.split("\n")) {
-    const m = line.match(/^\[PRICE\]\s+([A-Z][A-Z0-9 .+\-/()]+):/i);
-    if (m && m[1]) kbModels.add(m[1].trim().toUpperCase());
-  }
-  // Common model keywords to detect in customer text (normalised)
-  const HINTS = [
-    "splendor", "हीरो स्प्लेंडर", "स्प्लेंडर",
-    "passion", "पैशन",
-    "glamour", "ग्लैमर",
-    "hf deluxe", "एचएफ", "hf-dlx",
-    "xtreme", "एक्सट्रीम",
-    "xpulse", "एक्सपल्स",
-    "destini", "डेस्टिनी",
-    "pleasure", "प्लेज़र",
-    "maestro", "मेस्ट्रो",
-    "vida", "विडा",
-  ];
   const lower = text.toLowerCase();
-  for (const h of HINTS) {
-    if (lower.includes(h)) {
-      // Try to find the closest KB entry
-      const upper = h.toUpperCase();
-      for (const m of kbModels) {
-        if (m.includes(upper.replace(/^हीरो\s+/, "").toUpperCase())) return m;
-      }
-      // Fallback: return raw hint if no KB match
-      return h;
+
+  // Score each entry by how many distinctive tokens from its title appear in the text.
+  let best: { entry: ModelEntry; score: number } | null = null;
+  for (const e of entries) {
+    const tokens = e.title.toLowerCase().replace(/^hero\s+/, "").split(/[\s+/]+/).filter(t => t.length >= 2);
+    let score = 0;
+    for (const t of tokens) {
+      if (lower.includes(t)) score += t.length >= 4 ? 2 : 1;
     }
+    if (score > 0 && (!best || score > best.score)) best = { entry: e, score };
   }
-  return null;
+  return best?.entry ?? null;
 }
 
-// Only matches against [PRICE] rows so we never quote a stock-availability or
-// FAQ line as if it were the price.
-function findPriceLine(knowledge: string, model: string): string | null {
-  const upper = model.toUpperCase();
-  for (const line of knowledge.split("\n")) {
-    if (!/^\[PRICE\]/i.test(line)) continue;
-    if (line.toUpperCase().includes(upper)) return line;
+function extractOnRoadRange(body: string): string | null {
+  const m = body.match(/On-road Jaipur range:\s*(.+)$/m);
+  if (m) return m[1].trim();
+  // Single-variant entry — look for first "On-road Jaipur ₹X" line
+  const single = body.match(/On-road Jaipur\s*(₹[\d,]+)/);
+  return single ? single[1] : null;
+}
+
+function extractVariantList(body: string): Array<{ name: string; onRoad: number }> {
+  const out: Array<{ name: string; onRoad: number }> = [];
+  const re = /•\s+([^:]+):\s+Ex-showroom\s+₹[\d,]+\s+\|\s+RTO\s+₹[\d,]+\s+\|\s+Insurance\s+₹[\d,]+\s+\|\s+On-road Jaipur\s+₹([\d,]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) {
+    out.push({ name: m[1].trim(), onRoad: parseInt(m[2].replace(/,/g, ""), 10) });
   }
-  return null;
+  return out;
+}
+
+function matchLine(body: string, re: RegExp): string | null {
+  const m = body.match(re);
+  return m ? m[1].trim() : null;
 }

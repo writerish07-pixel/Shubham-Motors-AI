@@ -25,6 +25,7 @@ import { sendCallSummaryWhatsApp } from "./whatsapp";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
 import { transferCallToAgent } from "./exotel";
 import { extractCustomerName } from "./nameExtractor";
+import { correctStt } from "./modelRouter";
 
 // Exotel Voicebot media_format: { encoding: "base64", sample_rate: "8000", bit_rate: "128kbps" }
 // 128 kbps ÷ 8000 Hz = 16 bits/sample → linear PCM 16-bit little-endian, mono. NOT μ-law.
@@ -382,8 +383,16 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     return;
   }
 
+  // Correct common STT mishears (Zoom→Xoom, Splendar→Splendor, etc.) BEFORE
+  // either the direct router or the LLM sees the text. Saves us from refusing
+  // a real in-stock model just because Sarvam dropped/added a letter.
+  const correctedText = correctStt(customerText);
+  if (correctedText !== customerText) {
+    logger.info({ callSid: session.callSid, before: customerText, after: correctedText }, "STT alias corrected");
+  }
+
   // OpenAI with knowledge-base context
-  const agentText = await generateAgentReply(customerText, session.history, session.leadName, session.language);
+  const agentText = await generateAgentReply(correctedText, session.history, session.leadName, session.language);
   logger.info({ callSid: session.callSid, agentText }, "Agent reply");
 
   session.history.push({ role: "user", content: customerText });
