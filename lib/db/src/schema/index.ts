@@ -5,3 +5,4 @@ export * from "./followups";
 export * from "./campaigns";
 export * from "./campaignRecipients";
 export * from "./contacts";
+export * from "./financerBanks";
