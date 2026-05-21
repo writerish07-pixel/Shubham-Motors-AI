@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Settings2, Phone, MessageSquare, Mic, Bot, CheckCircle, Upload, FileSpreadsheet, Key, AlertCircle } from "lucide-react";
+import { Settings2, Phone, MessageSquare, Mic, Bot, CheckCircle, Upload, FileSpreadsheet, Key, AlertCircle, Users } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import ContactsManager from "@/components/ContactsManager";
 
 const ADMIN_TOKEN_KEY = "shubham_admin_token";
 
@@ -91,6 +92,18 @@ export default function Settings() {
       <div>
         <h1 className="text-xl font-bold flex items-center gap-2"><Settings2 size={20} />Settings</h1>
         <p className="text-xs text-muted-foreground mt-1">Configure your AI voice agent integrations and update product data</p>
+      </div>
+
+      {/* ── SALES & FINANCE TRANSFER CONTACTS ───────────────────────────── */}
+      <div className="bg-card border border-primary/30 rounded-lg p-5 space-y-3">
+        <div className="flex items-start gap-2.5">
+          <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center text-primary"><Users size={16} /></div>
+          <div className="flex-1">
+            <div className="text-sm font-semibold">Sales Team &amp; Finance Partners</div>
+            <div className="text-xs text-muted-foreground">Names &amp; phone numbers Sakshi uses for live call transfer. Sales for negotiations &amp; objections, finance for loan approvals &amp; exact EMI.</div>
+          </div>
+        </div>
+        <ContactsManager />
       </div>
 
       {/* ── DAILY / MONTHLY DATA UPLOADS ───────────────────────────────────── */}

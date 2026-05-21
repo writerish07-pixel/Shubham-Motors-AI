@@ -4,3 +4,4 @@ export * from "./knowledge";
 export * from "./followups";
 export * from "./campaigns";
 export * from "./campaignRecipients";
+export * from "./contacts";

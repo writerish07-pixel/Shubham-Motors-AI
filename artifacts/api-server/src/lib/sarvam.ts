@@ -1,5 +1,6 @@
 import axios from "axios";
 import { logger } from "./logger";
+import { prepareTtsText } from "./ttsPrep";
 
 const SARVAM_BASE = "https://api.sarvam.ai";
 
@@ -67,15 +68,19 @@ export async function textToSpeech(
 ): Promise<string> {
   try {
     const langCode = normalizeLangCode(language);
+    // Convert English brand/model words → phonetic Devanagari so the customer
+    // can clearly hear "Xoom 125" as "ज़ूम वन ट्वेंटी फाइव" instead of garble.
+    const speakable = prepareTtsText(text);
     const response = await axios.post(
       `${SARVAM_BASE}/text-to-speech`,
       {
-        inputs: [text.slice(0, 500)], // Sarvam TTS max ~500 chars per request
+        inputs: [speakable.slice(0, 500)], // Sarvam TTS max ~500 chars per request
         target_language_code: langCode,
         speaker: "anushka",
         model: "bulbul:v2",
         enable_preprocessing: true,
         speech_sample_rate: 22050,
+        pace: 0.95, // slow down ~5% for better Hinglish clarity
       },
       {
         headers: {

@@ -18,7 +18,7 @@ import type { IncomingMessage } from "http";
 import type { Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
-import { db, callsTable, leadsTable, followupsTable } from "@workspace/db";
+import { db, callsTable, leadsTable, followupsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
 import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "./openai";
 import { sendCallSummaryWhatsApp } from "./whatsapp";
@@ -404,16 +404,46 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   // with `[TRANSFER]`. We say a handoff line and transfer the live call to
   // the configured sales agent number. This prevents the AI from making up
   // wrong prices/offers — much better to hand off than to misinform.
-  if (/^\s*\[TRANSFER\]/i.test(agentText)) {
-    const handoff = `एक मिनट ${session.leadName === "Sir" ? "सर" : session.leadName + " जी"}, मैं आपको अपने senior sales expert से connect कर रही हूँ। Line पर रहिए।`;
+  if (/^\s*\[TRANSFER/i.test(agentText)) {
+    // Tag format:
+    //   [TRANSFER] reason                          → sales
+    //   [TRANSFER:FINANCE] reason                  → first active finance
+    //   [TRANSFER:FINANCE:HDFC] reason             → specific bank, else any finance
+    const m = agentText.match(/^\s*\[TRANSFER(?::([A-Z]+))?(?::([^\]]+))?\]/i);
+    const tag = (m?.[1] ?? "SALES").toUpperCase();
+    const bankHint = m?.[2]?.trim().toUpperCase() ?? "";
+
+    let target: typeof contactsTable.$inferSelect | undefined;
+    const contacts = await db.select().from(contactsTable);
+    const active = contacts.filter(c => c.isActive);
+    if (tag === "FINANCE") {
+      target = active.find(c => c.type === "finance" && bankHint && (c.bankName ?? "").toUpperCase().includes(bankHint))
+        ?? active.find(c => c.type === "finance");
+    } else {
+      target = active.find(c => c.type === "sales");
+    }
+    // Last-resort fallback to env var so existing deployments don't break
+    const phone = target?.phone ?? process.env.SALES_TRANSFER_NUMBER ?? "";
+    const targetLabel = target
+      ? (target.type === "finance" ? (target.bankName ?? "Finance team") : target.name)
+      : "sales expert";
+
+    const addrName = session.leadName === "Sir" ? "सर" : session.leadName + " जी";
+    const handoff = tag === "FINANCE"
+      ? `एक मिनट ${addrName}, मैं आपको ${targetLabel} के finance expert से connect कर रही हूँ। Line पर रहिए।`
+      : `एक मिनट ${addrName}, मैं आपको हमारे senior sales expert ${target ? target.name : ""} से connect कर रही हूँ। Line पर रहिए।`;
     session.transcript.push(`Agent: ${handoff}`);
     await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
-    const salesNum = process.env.SALES_TRANSFER_NUMBER;
-    if (salesNum && session.callSid) {
+
+    if (phone && session.callSid) {
       await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-      await transferCallToAgent(session.callSid, salesNum);
+      await transferCallToAgent(session.callSid, phone);
     } else {
-      logger.warn({ callSid: session.callSid }, "Transfer requested but SALES_TRANSFER_NUMBER not set");
+      // No contact in DB and no env fallback — tell the customer instead of silently dropping.
+      const sorry = `माफ़ कीजिए ${addrName}, अभी हमारा sales expert available नहीं है। मैं आपका नंबर note कर लेती हूँ, हम 5 मिनट में call back करेंगे।`;
+      session.transcript.push(`Agent: ${sorry}`);
+      await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
+      logger.warn({ callSid: session.callSid, tag, bankHint }, "Transfer requested but no contact configured");
     }
     return;
   }
