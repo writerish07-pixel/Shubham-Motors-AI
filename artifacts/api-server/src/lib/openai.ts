@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { classifyTurn, tryDirectAnswer } from "./modelRouter";
 
@@ -16,38 +16,72 @@ const openai = new OpenAI({
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
+// ─── In-memory cache for KB context + fuel price ─────────────────────────────
+// Both are re-read from DB on every single agent turn, which adds 200-500 ms
+// of latency per reply on a typical KB. They change minutes-to-hours apart
+// (admin edits), so a short TTL is safe. Cache is invalidated by KB write
+// routes (see invalidateKnowledgeCache below) so admin edits show up instantly.
+const KB_CACHE_TTL_MS = 60_000;
+let _kbCache: { value: string; expiresAt: number } | null = null;
+let _kbInflight: Promise<string> | null = null;
+let _fuelCache: { value: number; expiresAt: number } | null = null;
+let _fuelInflight: Promise<number> | null = null;
+
+export function invalidateKnowledgeCache(): void {
+  _kbCache = null;
+  _fuelCache = null;
+}
+
 export async function buildKnowledgeContext(): Promise<string> {
-  const items = await db.select().from(knowledgeTable).where(eq(knowledgeTable.isActive, true));
-  if (items.length === 0) return "";
-  // Skip review-pending rows so unverified self-learnings never reach the agent.
-  return items
-    .filter((i) => !i.requiresReview)
-    .map((i) => `[${i.category.toUpperCase()}] ${i.title}: ${i.content}`)
-    .join("\n");
+  const now = Date.now();
+  if (_kbCache && _kbCache.expiresAt > now) return _kbCache.value;
+  if (_kbInflight) return _kbInflight;
+  _kbInflight = (async () => {
+    const items = await db.select().from(knowledgeTable)
+      .where(and(eq(knowledgeTable.isActive, true), eq(knowledgeTable.requiresReview, false)));
+    const value = items.length === 0 ? "" : items
+      .map((i) => `[${i.category.toUpperCase()}] ${i.title}: ${i.content}`)
+      .join("\n");
+    _kbCache = { value, expiresAt: Date.now() + KB_CACHE_TTL_MS };
+    return value;
+  })();
+  try { return await _kbInflight; }
+  finally { _kbInflight = null; }
 }
 
 /**
  * Fetch the current Jaipur petrol price (₹/L) from the special KB row
  * `category='market', title='fuel_price_jaipur'`. Falls back to ₹107 if unset.
- * Admin updates this weekly via the Knowledge UI.
+ * Admin updates this weekly via the Knowledge UI. Cached 5 min — price changes
+ * daily at most, no need to re-query per turn.
  */
+const FUEL_CACHE_TTL_MS = 5 * 60_000;
 export async function getJaipurFuelPrice(): Promise<number> {
-  try {
-    const { and, desc } = await import("drizzle-orm");
-    const rows = await db.select().from(knowledgeTable)
-      .where(and(
-        eq(knowledgeTable.title, "fuel_price_jaipur"),
-        eq(knowledgeTable.category, "market"),
-        eq(knowledgeTable.isActive, true),
-        eq(knowledgeTable.requiresReview, false),
-      ))
-      .orderBy(desc(knowledgeTable.updatedAt))
-      .limit(1);
-    const raw = rows[0]?.content?.trim() ?? "";
-    const n = parseFloat(raw);
-    if (Number.isFinite(n) && n > 50 && n < 200) return n;
-  } catch { /* fall through */ }
-  return 107;
+  const now = Date.now();
+  if (_fuelCache && _fuelCache.expiresAt > now) return _fuelCache.value;
+  if (_fuelInflight) return _fuelInflight;
+  _fuelInflight = (async () => {
+    try {
+      const rows = await db.select().from(knowledgeTable)
+        .where(and(
+          eq(knowledgeTable.title, "fuel_price_jaipur"),
+          eq(knowledgeTable.category, "market"),
+          eq(knowledgeTable.isActive, true),
+          eq(knowledgeTable.requiresReview, false),
+        ))
+        .orderBy(desc(knowledgeTable.updatedAt))
+        .limit(1);
+      const raw = rows[0]?.content?.trim() ?? "";
+      const n = parseFloat(raw);
+      const value = Number.isFinite(n) && n > 50 && n < 200 ? n : 107;
+      _fuelCache = { value, expiresAt: Date.now() + FUEL_CACHE_TTL_MS };
+      return value;
+    } catch {
+      return 107;
+    }
+  })();
+  try { return await _fuelInflight; }
+  finally { _fuelInflight = null; }
 }
 
 export interface ConversationTurn {
@@ -326,7 +360,7 @@ export async function* generateAgentReplyStream(
   const stream = await openai.chat.completions.create({
     model,
     messages,
-    max_tokens: 90,
+    max_tokens: 75,
     temperature: 0.7,
     stream: true,
   });
@@ -334,9 +368,18 @@ export async function* generateAgentReplyStream(
   let buf = "";
   let totalChars = 0;
   let isTransfer = false;
-  // Split on sentence-ending punctuation in Hindi (।), English (.!?), or a
-  // hard line break. Require min 12 chars so we don't flush tiny fragments.
-  const SENTENCE_END = /[.!?।]\s|\n/;
+  // Flush on:
+  //   • English sentence end "[.!?]" followed by whitespace (LLMs always
+  //     add a space, so " " is reliable).
+  //   • Bare Hindi "।" — no trailing-space requirement, because LLMs often
+  //     emit "।" directly before the next word in Hindi output.
+  //   • Hard newline anywhere.
+  // Minimum sentence length is 6 chars (down from 12) so short openers like
+  // "नमस्ते सर!" can flush IMMEDIATELY and start TTS pipelining — this was
+  // the main mid-call latency cause: the first short sentence was re-buffered
+  // and the customer heard nothing until the full reply was generated.
+  const SENTENCE_END = /[.!?]\s|।|\n/;
+  const MIN_SENTENCE_CHARS = 6;
 
   for await (const part of stream) {
     const delta = part.choices[0]?.delta?.content ?? "";
@@ -358,7 +401,7 @@ export async function* generateAgentReplyStream(
       const cut = m.index + m[0].length;
       const sentence = buf.slice(0, cut).trim();
       buf = buf.slice(cut);
-      if (sentence.length >= 12) {
+      if (sentence.length >= MIN_SENTENCE_CHARS) {
         yield sentence;
       } else if (sentence) {
         // Too short to stand alone — re-attach to whatever comes next.

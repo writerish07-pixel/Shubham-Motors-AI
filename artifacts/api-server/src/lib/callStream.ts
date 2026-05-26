@@ -20,7 +20,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
-import { generateAgentReplyStream, analyzeCallIntent, learnFromTranscript } from "./openai";
+import { generateAgentReplyStream, analyzeCallIntent, learnFromTranscript, buildKnowledgeContext, getJaipurFuelPrice } from "./openai";
 import { sendCallSummaryWhatsApp } from "./whatsapp";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
 import { transferCallToAgent } from "./exotel";
@@ -229,6 +229,12 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
   } else {
     void streamTtsToWs(ws, session.streamSid, greeting, session.language, session).catch(() => {});
   }
+
+  // Warm KB + fuel-price caches in parallel with greeting playback so the
+  // first customer turn doesn't pay the cold-DB tax. Fire-and-forget; the
+  // pipeline will hit the warm cache if it's ready, fall through to DB
+  // otherwise. Both functions are dedup-safe via their in-flight promise.
+  void Promise.all([buildKnowledgeContext(), getJaipurFuelPrice()]).catch(() => {});
 
   return session;
 }

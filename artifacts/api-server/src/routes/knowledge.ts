@@ -9,7 +9,7 @@ import {
   UpdateKnowledgeItemBody,
   DeleteKnowledgeItemParams,
 } from "@workspace/api-zod";
-import { analyzeCallIntent, learnFromTranscript } from "../lib/openai";
+import { analyzeCallIntent, learnFromTranscript, invalidateKnowledgeCache } from "../lib/openai";
 
 const router: IRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -58,6 +58,7 @@ router.post("/knowledge/upload/stock", upload.single("file"), async (req, res): 
     // Atomic: only delete existing once we have valid rows to insert
     await db.transaction(async (tx) => {
       await tx.delete(knowledgeTable).where(eq(knowledgeTable.category, "stock"));
+      invalidateKnowledgeCache();
       await tx.insert(knowledgeTable).values(inserts);
     });
     res.json({ ok: true, models: inserts.length, source: req.file.originalname });
@@ -111,6 +112,7 @@ router.post("/knowledge/upload/price", upload.single("file"), async (req, res): 
     }
     await db.transaction(async (tx) => {
       await tx.delete(knowledgeTable).where(eq(knowledgeTable.category, "price"));
+      invalidateKnowledgeCache();
       await tx.insert(knowledgeTable).values(inserts);
     });
     res.json({ ok: true, models: inserts.length, source: req.file.originalname });
@@ -325,6 +327,7 @@ router.post("/knowledge/import", async (req, res): Promise<void> => {
     }
   });
 
+  invalidateKnowledgeCache();
   res.json({ ok: true, mode, imported: normalized.length });
 });
 
@@ -349,6 +352,7 @@ router.post("/knowledge/:id/approve", async (req, res): Promise<void> => {
     .where(and(eq(knowledgeTable.id, id), eq(knowledgeTable.requiresReview, true)))
     .returning();
   if (!item) { res.status(404).json({ error: "not found or not pending review" }); return; }
+  invalidateKnowledgeCache();
   res.json(item);
 });
 
@@ -382,6 +386,7 @@ router.post("/knowledge", async (req, res): Promise<void> => {
     isActive: true,
   }).returning();
 
+  invalidateKnowledgeCache();
   res.status(201).json(item);
 });
 
@@ -406,6 +411,7 @@ router.patch("/knowledge/:id", async (req, res): Promise<void> => {
     res.status(404).json({ error: "Not found" });
     return;
   }
+  invalidateKnowledgeCache();
   res.json(item);
 });
 
@@ -416,6 +422,7 @@ router.delete("/knowledge/:id", async (req, res): Promise<void> => {
     return;
   }
   await db.delete(knowledgeTable).where(eq(knowledgeTable.id, params.data.id));
+  invalidateKnowledgeCache();
   res.sendStatus(204);
 });
 
