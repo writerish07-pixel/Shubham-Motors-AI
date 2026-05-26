@@ -214,7 +214,18 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
 
   const cachedPcm = knowsName ? null : GREETING_CACHE.get(greeting);
   if (cachedPcm) {
-    void playPcm8k(ws, session.streamSid, cachedPcm, session).catch(() => {});
+    // Manage isSpeaking lifecycle ourselves so the inbound media branch
+    // treats early customer audio as barge-in (not as input to STT).
+    session.isSpeaking = true;
+    session.ttsAbort = false;
+    session.bargeInCount = 0;
+    void playPcm8k(ws, session.streamSid, cachedPcm, session)
+      .catch(() => {})
+      .finally(() => {
+        session.isSpeaking = false;
+        session.ttsAbort = false;
+        session.bargeInCount = 0;
+      });
   } else {
     void streamTtsToWs(ws, session.streamSid, greeting, session.language, session).catch(() => {});
   }
@@ -459,10 +470,20 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     session.bargeInCount = 0;
   }
 
-  const agentText = transferText ?? collected.join(" ").trim();
-  logger.info({ callSid: session.callSid, agentText, streamed: collected.length }, "Agent reply");
-  session.history.push({ role: "assistant", content: agentText });
-  session.transcript.push(`Agent: ${agentText}`);
+  // History/transcript must reflect what the customer ACTUALLY heard.
+  // If a transfer tag fired after some sentences were already spoken, log
+  // both the spoken text and the transfer event — not just the tag.
+  const spoken = collected.join(" ").trim();
+  const agentText = transferText ?? spoken;
+  if (spoken) {
+    session.history.push({ role: "assistant", content: spoken });
+    session.transcript.push(`Agent: ${spoken}`);
+  }
+  if (transferText) {
+    session.history.push({ role: "assistant", content: transferText });
+    session.transcript.push(`Agent[tag]: ${transferText}`);
+  }
+  logger.info({ callSid: session.callSid, agentText, streamed: collected.length, transfer: !!transferText }, "Agent reply");
 
   // ── TRANSFER-TO-HUMAN ────────────────────────────────────────────────────
   // If the LLM is unsure / can't answer reliably, it emits a reply starting
@@ -519,8 +540,9 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     await db.update(leadsTable).set({ status: "hot", score: 90 }).where(eq(leadsTable.id, session.leadId));
   }
 
-  // TTS → send audio back
-  await streamTtsToWs(ws, session.streamSid, agentText, session.language, session);
+  // No final streamTtsToWs() here — the streaming pipeline above already
+  // synthesized and played every sentence in `collected`. Calling it again
+  // would double-speak the entire reply.
 }
 
 // ── Send TTS audio to Exotel over WebSocket ───────────────────────────────────
