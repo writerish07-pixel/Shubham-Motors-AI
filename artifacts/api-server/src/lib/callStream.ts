@@ -51,6 +51,15 @@ const STT_SAMPLE_RATE = 16000;    // Sarvam STT wants 16 kHz
 const EXOTEL_SAMPLE_RATE = 8000;  // Exotel sends 8 kHz linear PCM 16-bit
 const CHUNK_BYTES = 320;          // 20 ms @ 8 kHz × 2 bytes/sample = 320 bytes (PCM16LE)
 
+// ── Barge-in / echo-guard tuning ──────────────────────────────────────────────
+// PRODUCTION LOGS showed dozens of false-positive "Barge-in" events firing at
+// energies of 0.10–0.20 while only the agent was speaking — Exotel/PSTN was
+// echoing our own TTS back into the inbound stream. The old guard (energy >
+// 0.032, 5 frames = 100 ms) was nowhere near strict enough.
+const BARGE_IN_RMS = SILENCE_RMS * 12;   // 0.096 — well above strong echo (~0.05) and below normal speech (~0.15)
+const BARGE_IN_FRAMES = 15;              // 15 × 20 ms = 300 ms of continuous loud audio
+const BARGE_IN_GRACE_MS = 600;           // First 600 ms of any agent reply: ignore barge-in entirely (TTS warmup echo)
+
 // ── Per-call session ──────────────────────────────────────────────────────────
 interface Session {
   callSid: string;
@@ -70,6 +79,7 @@ interface Session {
   isSpeaking?: boolean;      // true while agent TTS is being streamed out
   ttsAbort?: boolean;        // set to true to stop the in-flight TTS stream (barge-in)
   bargeInCount?: number;     // consecutive loud frames during TTS
+  speakingStartedAt?: number; // ms timestamp; used for barge-in grace period
 }
 
 // ── Attach WebSocket server to existing HTTP server ───────────────────────────
@@ -219,12 +229,14 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     session.isSpeaking = true;
     session.ttsAbort = false;
     session.bargeInCount = 0;
+    session.speakingStartedAt = Date.now();
     void playPcm8k(ws, session.streamSid, cachedPcm, session)
       .catch(() => {})
       .finally(() => {
         session.isSpeaking = false;
         session.ttsAbort = false;
         session.bargeInCount = 0;
+        session.speakingStartedAt = undefined;
       });
   } else {
     void streamTtsToWs(ws, session.streamSid, greeting, session.language, session).catch(() => {});
@@ -283,9 +295,21 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
   //    Real customer speech that triggers barge-in will be captured on
   //    subsequent frames once isSpeaking flips false.
   if (session.isSpeaking) {
-    if (energy > SILENCE_RMS * 4) {
+    // Once ttsAbort fires, we're already tearing down playback. Don't keep
+    // logging "Barge-in confirmed" every 300 ms — let the pipeline unwind.
+    if (session.ttsAbort) return;
+
+    // Grace period: ignore the first ~600 ms of any agent reply. PSTN warmup
+    // and Sarvam TTS attack often produce a louder leading transient that
+    // looks like speech.
+    const startedAt = session.speakingStartedAt ?? 0;
+    if (startedAt && Date.now() - startedAt < BARGE_IN_GRACE_MS) {
+      return;
+    }
+
+    if (energy > BARGE_IN_RMS) {
       session.bargeInCount = (session.bargeInCount ?? 0) + 1;
-      if (session.bargeInCount >= 5) {
+      if (session.bargeInCount >= BARGE_IN_FRAMES) {
         session.ttsAbort = true;
         logger.info({ callSid: session.callSid, energy }, "Barge-in confirmed — stopping TTS");
         try {
@@ -444,10 +468,18 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.isSpeaking = true;
   session.ttsAbort = false;
   session.bargeInCount = 0;
+  session.speakingStartedAt = Date.now();
 
-  const collected: string[] = [];
+  // Track sentences that ACTUALLY made it to the customer's ear (TTS
+  // succeeded + playback completed without abort). The transcript / LLM
+  // history must reflect what was heard — not what we attempted. Previously
+  // we stored every attempted sentence, so a TTS failure mid-reply produced
+  // a transcript that didn't match what the customer heard.
+  const played: string[] = [];
   let playChain: Promise<void> = Promise.resolve();
   let transferText: string | null = null;
+  let attemptedCount = 0;
+  let ttsFailures = 0;
 
   try {
     for await (const sentence of generateAgentReplyStream(correctedText, session.history, session.leadName, session.language)) {
@@ -457,16 +489,17 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         transferText = sentence;
         break;
       }
-      collected.push(sentence);
+      attemptedCount++;
       // Kick off TTS NOW; queue playback behind the previous one
       const myTts = synthesizeTts(sentence, session.language);
       const prev = playChain;
       playChain = (async () => {
         const pcm = await myTts;
         await prev;
-        if (pcm && !session.ttsAbort && ws.readyState === WebSocket.OPEN) {
-          await playPcm8k(ws, session.streamSid, pcm, session);
-        }
+        if (!pcm) { ttsFailures++; return; }
+        if (session.ttsAbort || ws.readyState !== WebSocket.OPEN) return;
+        await playPcm8k(ws, session.streamSid, pcm, session);
+        if (!session.ttsAbort) played.push(sentence);
       })();
     }
     await playChain;
@@ -474,12 +507,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     session.isSpeaking = false;
     session.ttsAbort = false;
     session.bargeInCount = 0;
+    session.speakingStartedAt = undefined;
   }
 
   // History/transcript must reflect what the customer ACTUALLY heard.
   // If a transfer tag fired after some sentences were already spoken, log
   // both the spoken text and the transfer event — not just the tag.
-  const spoken = collected.join(" ").trim();
+  const spoken = played.join(" ").trim();
   const agentText = transferText ?? spoken;
   if (spoken) {
     session.history.push({ role: "assistant", content: spoken });
@@ -489,7 +523,14 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     session.history.push({ role: "assistant", content: transferText });
     session.transcript.push(`Agent[tag]: ${transferText}`);
   }
-  logger.info({ callSid: session.callSid, agentText, streamed: collected.length, transfer: !!transferText }, "Agent reply");
+  logger.info({
+    callSid: session.callSid,
+    agentText,
+    attempted: attemptedCount,
+    played: played.length,
+    ttsFailures,
+    transfer: !!transferText,
+  }, "Agent reply");
 
   // ── TRANSFER-TO-HUMAN ────────────────────────────────────────────────────
   // If the LLM is unsure / can't answer reliably, it emits a reply starting
@@ -554,11 +595,22 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 // ── Send TTS audio to Exotel over WebSocket ───────────────────────────────────
 
 // Synthesize a single text fragment to Exotel-ready 8 kHz mono PCM16LE
-// (gain-limited). Returns null on TTS failure.
+// (gain-limited). Returns null on TTS failure. Retries once on transient
+// Sarvam errors (production has shown intermittent 5xx/timeout for ~5% of
+// requests — a single retry recovers most of them and prevents the customer
+// from hearing only some sentences of a multi-sentence reply).
 async function synthesizeTts(text: string, language: string): Promise<Int16Array | null> {
   try {
-    const ttsB64 = await textToSpeech(text, language);
-    if (!ttsB64) return null;
+    let ttsB64 = await textToSpeech(text, language);
+    if (!ttsB64) {
+      // Brief backoff then retry once
+      await new Promise((r) => setTimeout(r, 200));
+      ttsB64 = await textToSpeech(text, language);
+    }
+    if (!ttsB64) {
+      logger.warn({ textLen: text.length }, "TTS returned empty after retry");
+      return null;
+    }
     const wavBuf = Buffer.from(ttsB64, "base64");
     const { pcm, sampleRate } = parseWav(wavBuf);
     const pcm8k = sampleRate === EXOTEL_SAMPLE_RATE
@@ -623,11 +675,21 @@ async function playPcm8k(ws: WebSocket, streamSid: string, pcm8k: Int16Array, se
 // goodbye, sorry). Manages session.isSpeaking lifecycle.
 async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, language: string, session?: Session): Promise<void> {
   if (ws.readyState !== WebSocket.OPEN) return;
-  if (session) { session.isSpeaking = true; session.ttsAbort = false; session.bargeInCount = 0; }
+  if (session) {
+    session.isSpeaking = true;
+    session.ttsAbort = false;
+    session.bargeInCount = 0;
+    session.speakingStartedAt = Date.now();
+  }
   try {
     const pcm = await synthesizeTts(text, language);
     if (pcm) await playPcm8k(ws, streamSid, pcm, session);
   } finally {
-    if (session) { session.isSpeaking = false; session.ttsAbort = false; session.bargeInCount = 0; }
+    if (session) {
+      session.isSpeaking = false;
+      session.ttsAbort = false;
+      session.bargeInCount = 0;
+      session.speakingStartedAt = undefined;
+    }
   }
 }

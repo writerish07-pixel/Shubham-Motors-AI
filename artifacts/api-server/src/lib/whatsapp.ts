@@ -21,7 +21,7 @@ export async function sendWhatsAppMessage(phone: string, message: string): Promi
           Authorization: `Bearer ${BOTSPACE_API_KEY}`,
           "Content-Type": "application/json",
         },
-        timeout: 10000,
+        timeout: 25000,
       }
     );
 
@@ -70,7 +70,7 @@ export async function sendBrochureWhatsApp(
           Authorization: `Bearer ${BOTSPACE_API_KEY}`,
           "Content-Type": "application/json",
         },
-        timeout: 10000,
+        timeout: 25000,
       }
     );
 

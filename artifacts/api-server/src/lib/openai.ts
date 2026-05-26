@@ -360,7 +360,7 @@ export async function* generateAgentReplyStream(
   const stream = await openai.chat.completions.create({
     model,
     messages,
-    max_tokens: 75,
+    max_tokens: 110,
     temperature: 0.7,
     stream: true,
   });
