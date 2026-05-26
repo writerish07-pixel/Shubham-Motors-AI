@@ -199,11 +199,53 @@ router.get("/knowledge", async (req, res): Promise<void> => {
   const params = ListKnowledgeItemsQueryParams.safeParse(req.query);
   let items = await db.select().from(knowledgeTable).orderBy(knowledgeTable.category);
 
+  // Hide self-learning review-pending items from the main KB list by default.
+  // The Pending Review UI uses GET /knowledge/pending explicitly.
+  items = items.filter((i) => !i.requiresReview);
+
   if (params.success && params.data.category) {
     items = items.filter((i) => i.category === params.data.category);
   }
 
   res.json(items);
+});
+
+// ─── Self-learning review queue (admin only — pending rows may contain call transcript snippets) ─
+router.get("/knowledge/pending", async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const items = await db.select().from(knowledgeTable)
+    .where(eq(knowledgeTable.requiresReview, true))
+    .orderBy(knowledgeTable.createdAt);
+  res.json(items);
+});
+
+// Approve only constrains to requiresReview=true so this endpoint can't be used
+// to flip arbitrary KB rows back to active.
+router.post("/knowledge/:id/approve", async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "invalid id" }); return; }
+  const { and } = await import("drizzle-orm");
+  const [item] = await db.update(knowledgeTable)
+    .set({ requiresReview: false, isActive: true })
+    .where(and(eq(knowledgeTable.id, id), eq(knowledgeTable.requiresReview, true)))
+    .returning();
+  if (!item) { res.status(404).json({ error: "not found or not pending review" }); return; }
+  res.json(item);
+});
+
+// Reject only deletes review-pending rows, so this endpoint can't be used to
+// nuke production KB entries.
+router.post("/knowledge/:id/reject", async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const id = parseInt(String(req.params.id), 10);
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "invalid id" }); return; }
+  const { and } = await import("drizzle-orm");
+  const deleted = await db.delete(knowledgeTable)
+    .where(and(eq(knowledgeTable.id, id), eq(knowledgeTable.requiresReview, true)))
+    .returning({ id: knowledgeTable.id });
+  if (deleted.length === 0) { res.status(404).json({ error: "not found or not pending review" }); return; }
+  res.sendStatus(204);
 });
 
 router.post("/knowledge", async (req, res): Promise<void> => {

@@ -366,7 +366,7 @@ async function handleStop(session: Session): Promise<void> {
       await sendCallSummaryWhatsApp(lead.phone, lead.name, analysis.summary, lead.interestedModel);
     }
 
-    await learnFromTranscript(transcript, analysis.summary);
+    await learnFromTranscript(transcript, analysis.summary, session.callSid);
   } catch (err) {
     logger.error({ err, callSid: session.callSid }, "Error finalising call");
   }

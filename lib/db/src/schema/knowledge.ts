@@ -10,6 +10,9 @@ export const knowledgeTable = pgTable("knowledge", {
   modelName: text("model_name"),
   fileUrl: text("file_url"),
   isActive: boolean("is_active").notNull().default(true),
+  requiresReview: boolean("requires_review").notNull().default(false),
+  evidence: text("evidence"),
+  source: text("source"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Plus, Edit2, Trash2, Check, X, BookOpen } from "lucide-react";
+import { Plus, Edit2, Trash2, Check, X, BookOpen, Sparkles } from "lucide-react";
 import {
   useListKnowledgeItems, getListKnowledgeItemsQueryKey,
   useCreateKnowledgeItem, useUpdateKnowledgeItem, useDeleteKnowledgeItem
 } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +42,30 @@ export default function Knowledge() {
 
   function invalidate() {
     qc.invalidateQueries({ queryKey: getListKnowledgeItemsQueryKey() });
+    qc.invalidateQueries({ queryKey: ["knowledge-pending"] });
+  }
+
+  // ─── Self-learning review queue ────────────────────────────────────────────
+  type PendingItem = { id: number; title: string; category: string; content: string; evidence: string | null; source: string | null; createdAt: string };
+  const pendingQ = useQuery<PendingItem[]>({
+    queryKey: ["knowledge-pending"],
+    queryFn: async () => {
+      const r = await fetch("/api/knowledge/pending");
+      if (!r.ok) throw new Error("failed");
+      return r.json();
+    },
+    refetchInterval: 30000,
+  });
+  const pending = pendingQ.data ?? [];
+
+  async function approvePending(id: number) {
+    const r = await fetch(`/api/knowledge/${id}/approve`, { method: "POST" });
+    if (r.ok) { toast.success("Approved — added to KB"); invalidate(); } else toast.error("Failed");
+  }
+  async function rejectPending(id: number) {
+    if (!confirm("Reject and discard this learning?")) return;
+    const r = await fetch(`/api/knowledge/${id}/reject`, { method: "POST" });
+    if (r.ok) { toast.success("Rejected"); invalidate(); } else toast.error("Failed");
   }
 
   function handleCreate() {
@@ -103,6 +127,36 @@ export default function Knowledge() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* Self-learning review queue */}
+      {pending.length > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Sparkles size={14} className="text-amber-400" />
+            <h2 className="text-sm font-semibold text-amber-300">Sakshi learned {pending.length} new thing{pending.length === 1 ? "" : "s"} from recent calls — review</h2>
+          </div>
+          <div className="space-y-2">
+            {pending.map((p) => (
+              <div key={p.id} data-testid={`pending-${p.id}`} className="bg-card border border-card-border rounded-md p-3 space-y-1.5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/40 text-amber-300 uppercase">{p.category}</span>
+                      <h3 className="text-sm font-medium truncate">{p.title}</h3>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{p.content}</p>
+                    {p.evidence && <p className="text-[11px] italic text-muted-foreground/70 mt-1 border-l-2 border-amber-500/40 pl-2">"{p.evidence}"</p>}
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <button onClick={() => approvePending(p.id)} title="Approve & add to KB" data-testid={`approve-${p.id}`} className="p-1.5 rounded hover:bg-green-500/20 hover:text-green-400 transition-colors"><Check size={14} /></button>
+                    <button onClick={() => rejectPending(p.id)} title="Reject & discard" data-testid={`reject-${p.id}`} className="p-1.5 rounded hover:bg-destructive/20 hover:text-destructive transition-colors"><X size={14} /></button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Category filter */}
       <div className="flex gap-2 flex-wrap">

@@ -330,7 +330,7 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
         }
       }
 
-      await learnFromTranscript(fullTranscript, analysis.summary);
+      await learnFromTranscript(fullTranscript, analysis.summary, CallSid);
 
     } catch (err) {
       req.log.error({ err, CallSid }, "Error processing call completion");
