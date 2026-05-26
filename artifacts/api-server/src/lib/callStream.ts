@@ -20,7 +20,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
-import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "./openai";
+import { generateAgentReplyStream, analyzeCallIntent, learnFromTranscript } from "./openai";
 import { sendCallSummaryWhatsApp } from "./whatsapp";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
 import { transferCallToAgent } from "./exotel";
@@ -44,7 +44,7 @@ import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 const SILENCE_RMS = 0.008;        // Below this → silence
-const SILENCE_CHUNKS = 18;        // 18 × 20 ms = 360 ms silence → trigger STT (was 600ms — too laggy)
+const SILENCE_CHUNKS = 12;        // 12 × 20 ms = 240 ms silence → trigger STT (low-latency)
 const MIN_SPEECH_CHUNKS = 8;      // 8 × 20 ms = 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 600 × 20 ms = 12 s max before forced trigger
 const STT_SAMPLE_RATE = 16000;    // Sarvam STT wants 16 kHz
@@ -202,22 +202,46 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     isClosed: false,
   };
 
-  // Send Hindi greeting after a 200 ms gap. If we don't know the customer's
-  // name yet, the FIRST thing we ask is their name — every subsequent reply
-  // will then address them by name (captured in runPipeline below).
-  setTimeout(async () => {
-    if (ws.readyState !== WebSocket.OPEN) return;
-    const knowsName = session.leadName !== "Sir";
-    const greeting = knowsName
-      ? `नमस्ते ${session.leadName} जी! मैं साक्षी बोल रही हूं, शुभम मोटर्स से। बताइए, मैं आपकी क्या help कर सकती हूँ?`
-      : `नमस्ते! मैं साक्षी बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
-    session.transcript.push(`Agent: ${greeting}`);
-    session.history.push({ role: "assistant", content: greeting });
-    await streamTtsToWs(ws, session.streamSid, greeting, session.language, session);
-  }, 200);
+  // Greet immediately — no artificial delay. If we have a pre-cached PCM for
+  // the unknown-name greeting (warmed on boot), playback starts in ~150 ms
+  // instead of waiting ~1.5 s for a Sarvam TTS round-trip.
+  const knowsName = session.leadName !== "Sir";
+  const greeting = knowsName
+    ? `नमस्ते ${session.leadName} जी! मैं साक्षी बोल रही हूं, शुभम मोटर्स से। बताइए, मैं आपकी क्या help कर सकती हूँ?`
+    : `नमस्ते! मैं साक्षी बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
+  session.transcript.push(`Agent: ${greeting}`);
+  session.history.push({ role: "assistant", content: greeting });
+
+  const cachedPcm = knowsName ? null : GREETING_CACHE.get(greeting);
+  if (cachedPcm) {
+    void playPcm8k(ws, session.streamSid, cachedPcm, session).catch(() => {});
+  } else {
+    void streamTtsToWs(ws, session.streamSid, greeting, session.language, session).catch(() => {});
+  }
 
   return session;
 }
+
+// ── Greeting TTS pre-cache ────────────────────────────────────────────────────
+// The unknown-name Hindi greeting is identical for every cold inbound call.
+// Warming its TTS once at boot saves ~1.5 s on time-to-first-word.
+const GREETING_CACHE = new Map<string, Int16Array>();
+const UNKNOWN_GREETING = `नमस्ते! मैं साक्षी बोल रही हूं, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
+
+async function warmGreetingCache(): Promise<void> {
+  try {
+    const pcm = await synthesizeTts(UNKNOWN_GREETING, "hi-IN");
+    if (pcm) {
+      GREETING_CACHE.set(UNKNOWN_GREETING, pcm);
+      logger.info({ samples: pcm.length }, "Greeting TTS pre-cached");
+    }
+  } catch (err) {
+    logger.warn({ err }, "Greeting pre-cache failed (non-fatal)");
+  }
+}
+// Fire on module load — non-blocking. If Sarvam is slow at boot, the first
+// real call falls back to a live TTS call automatically.
+void warmGreetingCache();
 
 async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, unknown>): Promise<void> {
   const media = (msg.media ?? {}) as Record<string, unknown>;
@@ -355,9 +379,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   logger.info({ callSid: session.callSid, customerText }, "STT result");
   session.transcript.push(`Customer: ${customerText}`);
 
-  // Detect language on first real turn
+  // Detect language on first real turn — fire-and-forget so we don't add
+  // ~500 ms to the customer's first reply. Worst case: turn 1 uses hi-IN
+  // (same as greeting) and turn 2 onwards uses the detected language.
   if (session.turn === 0) {
-    try { session.language = await detectLanguage(customerText); } catch { /* keep */ }
+    void detectLanguage(customerText)
+      .then((lang) => { session.language = lang; })
+      .catch(() => { /* keep hi-IN */ });
   }
   session.turn++;
 
@@ -391,11 +419,48 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     logger.info({ callSid: session.callSid, before: customerText, after: correctedText }, "STT alias corrected");
   }
 
-  // OpenAI with knowledge-base context
-  const agentText = await generateAgentReply(correctedText, session.history, session.leadName, session.language);
-  logger.info({ callSid: session.callSid, agentText }, "Agent reply");
-
+  // ── Streaming LLM → pipelined TTS ─────────────────────────────────────────
+  // We yield sentence-sized chunks from the LLM and start TTS on each as soon
+  // as it arrives. While sentence N is being played, the synth for N+1 is
+  // already in flight — this collapses end-to-end latency by ~3 s per turn.
   session.history.push({ role: "user", content: customerText });
+  session.isSpeaking = true;
+  session.ttsAbort = false;
+  session.bargeInCount = 0;
+
+  const collected: string[] = [];
+  let playChain: Promise<void> = Promise.resolve();
+  let transferText: string | null = null;
+
+  try {
+    for await (const sentence of generateAgentReplyStream(correctedText, session.history, session.leadName, session.language)) {
+      if (session.ttsAbort) break;
+      // Transfer tag is emitted as a single buffered chunk (see openai.ts)
+      if (/^\s*\[TRANSFER/i.test(sentence)) {
+        transferText = sentence;
+        break;
+      }
+      collected.push(sentence);
+      // Kick off TTS NOW; queue playback behind the previous one
+      const myTts = synthesizeTts(sentence, session.language);
+      const prev = playChain;
+      playChain = (async () => {
+        const pcm = await myTts;
+        await prev;
+        if (pcm && !session.ttsAbort && ws.readyState === WebSocket.OPEN) {
+          await playPcm8k(ws, session.streamSid, pcm, session);
+        }
+      })();
+    }
+    await playChain;
+  } finally {
+    session.isSpeaking = false;
+    session.ttsAbort = false;
+    session.bargeInCount = 0;
+  }
+
+  const agentText = transferText ?? collected.join(" ").trim();
+  logger.info({ callSid: session.callSid, agentText, streamed: collected.length }, "Agent reply");
   session.history.push({ role: "assistant", content: agentText });
   session.transcript.push(`Agent: ${agentText}`);
 
@@ -460,25 +525,21 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
 // ── Send TTS audio to Exotel over WebSocket ───────────────────────────────────
 
-async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, language: string, session?: Session): Promise<void> {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  if (session) { session.isSpeaking = true; session.ttsAbort = false; session.bargeInCount = 0; }
-
+// Synthesize a single text fragment to Exotel-ready 8 kHz mono PCM16LE
+// (gain-limited). Returns null on TTS failure.
+async function synthesizeTts(text: string, language: string): Promise<Int16Array | null> {
   try {
     const ttsB64 = await textToSpeech(text, language);
-    if (!ttsB64) return;
-
-    // Sarvam now returns 8kHz PCM directly — no resampling, no aliasing.
+    if (!ttsB64) return null;
     const wavBuf = Buffer.from(ttsB64, "base64");
     const { pcm, sampleRate } = parseWav(wavBuf);
     const pcm8k = sampleRate === EXOTEL_SAMPLE_RATE
       ? pcm
       : resample(pcm, sampleRate, EXOTEL_SAMPLE_RATE);
 
-    // Apply −6 dB gain + soft limiter to prevent clipping (Sarvam output is hot).
-    // Recording analysis showed peaks hitting 32767 and audible clipping bursts.
-    const GAIN = 0.5;          // −6 dB
-    const CEIL = 28000;        // ~−1.3 dBFS soft ceiling
+    // −6 dB gain + soft limiter. Sarvam output is hot and clips at 32767.
+    const GAIN = 0.5;
+    const CEIL = 28000;
     const limited = new Int16Array(pcm8k.length);
     for (let i = 0; i < pcm8k.length; i++) {
       let s = pcm8k[i]! * GAIN;
@@ -486,47 +547,58 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
       if (s < -CEIL) s = -CEIL + (s + CEIL)  * 0.15;
       limited[i] = Math.max(-32768, Math.min(32767, Math.round(s)));
     }
-    const pcmBuf = s16ToPcm16Le(limited);
-
-    // Pace by absolute wall-clock time so setTimeout jitter doesn't accumulate.
-    // 320 bytes = 20 ms of PCM16LE audio @ 8 kHz. Schedule chunk N for t0 + N*20ms.
-    // Exotel Voicebot protocol uses snake_case (stream_sid) in outbound frames.
-    const totalChunks = Math.ceil(pcmBuf.length / CHUNK_BYTES);
-    const t0 = Date.now();
-    for (let n = 0; n < totalChunks; n++) {
-      if (ws.readyState !== WebSocket.OPEN) break;
-      if (session?.ttsAbort) {
-        logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)");
-        break;
-      }
-      const targetTime = t0 + n * 20;
-      const now = Date.now();
-      const wait = targetTime - now;
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-      const start = n * CHUNK_BYTES;
-      const chunk = pcmBuf.subarray(start, start + CHUNK_BYTES);
-      ws.send(
-        JSON.stringify({
-          event: "media",
-          stream_sid: streamSid,
-          streamSid,
-          sequence_number: String(n + 1),
-          media: { payload: chunk.toString("base64") },
-        })
-      );
-    }
-
-    // Mark — lets us know when playback finished
-    if (!session?.ttsAbort) {
-      ws.send(JSON.stringify({
-        event: "mark",
-        stream_sid: streamSid,
-        streamSid,
-        mark: { name: "tts_done" },
-      }));
-    }
+    return limited;
   } catch (err) {
-    logger.error({ err }, "TTS streaming error");
+    logger.error({ err }, "TTS synth error");
+    return null;
+  }
+}
+
+// Stream a pre-synthesized 8 kHz PCM buffer to Exotel, paced at 20 ms/chunk
+// by absolute wall-clock so setTimeout jitter doesn't accumulate. Respects
+// session.ttsAbort for barge-in.
+async function playPcm8k(ws: WebSocket, streamSid: string, pcm8k: Int16Array, session?: Session): Promise<void> {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const pcmBuf = s16ToPcm16Le(pcm8k);
+  const totalChunks = Math.ceil(pcmBuf.length / CHUNK_BYTES);
+  const t0 = Date.now();
+  for (let n = 0; n < totalChunks; n++) {
+    if (ws.readyState !== WebSocket.OPEN) break;
+    if (session?.ttsAbort) {
+      logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)");
+      break;
+    }
+    const targetTime = t0 + n * 20;
+    const wait = targetTime - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    const start = n * CHUNK_BYTES;
+    const chunk = pcmBuf.subarray(start, start + CHUNK_BYTES);
+    ws.send(JSON.stringify({
+      event: "media",
+      stream_sid: streamSid,
+      streamSid,
+      sequence_number: String(n + 1),
+      media: { payload: chunk.toString("base64") },
+    }));
+  }
+  if (!session?.ttsAbort && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      event: "mark",
+      stream_sid: streamSid,
+      streamSid,
+      mark: { name: "tts_done" },
+    }));
+  }
+}
+
+// Convenience wrapper used for one-shot lines (greeting fallback, handoff,
+// goodbye, sorry). Manages session.isSpeaking lifecycle.
+async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, language: string, session?: Session): Promise<void> {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (session) { session.isSpeaking = true; session.ttsAbort = false; session.bargeInCount = 0; }
+  try {
+    const pcm = await synthesizeTts(text, language);
+    if (pcm) await playPcm8k(ws, streamSid, pcm, session);
   } finally {
     if (session) { session.isSpeaking = false; session.ttsAbort = false; session.bargeInCount = 0; }
   }

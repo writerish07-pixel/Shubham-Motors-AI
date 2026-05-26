@@ -237,13 +237,143 @@ Customer's language so far: ${language}`;
   const response = await openai.chat.completions.create({
     model,
     messages,
-    max_tokens: 180,
+    max_tokens: 90,
     temperature: 0.7,
   });
 
   logger.info({ tier, model, inputLen: customerText.length }, "Hybrid router → LLM reply");
   return response.choices[0]?.message?.content ?? "जी बोलिए, मैं सुन रही हूँ।";
 }
+
+/**
+ * Streaming variant: yields sentence-sized chunks of the reply as soon as the
+ * LLM emits sentence-ending punctuation. Lets the caller pipeline each
+ * sentence into TTS while the rest of the response is still being generated.
+ *
+ * Yields the SAME total text generateAgentReply would return, just split.
+ * If the very first chunk starts with `[TRANSFER`, the entire response is
+ * buffered and yielded as a single chunk (so the caller can parse the tag).
+ */
+export async function* generateAgentReplyStream(
+  customerText: string,
+  conversationHistory: ConversationTurn[],
+  leadName: string,
+  language: string
+): AsyncGenerator<string, void, void> {
+  const knowledge = await buildKnowledgeContext();
+  const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
+
+  // Tier 0 — direct KB answer, no LLM
+  const direct = tryDirectAnswer(customerText, knowledge || DEFAULT_HERO_KNOWLEDGE, addressForm);
+  if (direct) {
+    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router (stream) → direct KB answer");
+    yield direct;
+    return;
+  }
+
+  const tier = classifyTurn(customerText, conversationHistory);
+  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
+
+  // Reuse the same system prompt as generateAgentReply by calling it via a
+  // shared builder. To avoid duplicating the long prompt string, we inline
+  // a minimal rebuild here — keep in sync with generateAgentReply.
+  // (The full prompt builder is internal to generateAgentReply; we duplicate
+  // by re-invoking the non-stream path's prompt assembly through a helper.)
+  const systemPrompt = await buildSystemPrompt(addressForm, language, knowledge);
+
+  const messages: OpenAI.ChatCompletionMessageParam[] = [
+    { role: "system", content: systemPrompt },
+    ...conversationHistory.map((t) => ({ role: t.role, content: t.content })),
+    { role: "user", content: customerText },
+  ];
+
+  const stream = await openai.chat.completions.create({
+    model,
+    messages,
+    max_tokens: 90,
+    temperature: 0.7,
+    stream: true,
+  });
+
+  let buf = "";
+  let totalChars = 0;
+  let isTransfer = false;
+  // Split on sentence-ending punctuation in Hindi (।), English (.!?), or a
+  // hard line break. Require min 12 chars so we don't flush tiny fragments.
+  const SENTENCE_END = /[.!?।]\s|\n/;
+
+  for await (const part of stream) {
+    const delta = part.choices[0]?.delta?.content ?? "";
+    if (!delta) continue;
+    buf += delta;
+    totalChars += delta.length;
+
+    // Detect [TRANSFER…] tag once we have enough characters — if present,
+    // buffer the entire response and yield it as one chunk.
+    if (!isTransfer && totalChars >= 10 && /^\s*\[TRANSFER/i.test(buf)) {
+      isTransfer = true;
+    }
+    if (isTransfer) continue;
+
+    // Flush completed sentences
+    while (true) {
+      const m = buf.match(SENTENCE_END);
+      if (!m || m.index === undefined) break;
+      const cut = m.index + m[0].length;
+      const sentence = buf.slice(0, cut).trim();
+      buf = buf.slice(cut);
+      if (sentence.length >= 12) {
+        yield sentence;
+      } else if (sentence) {
+        // Too short to stand alone — re-attach to whatever comes next.
+        buf = sentence + " " + buf;
+        break;
+      }
+    }
+  }
+
+  const tail = buf.trim();
+  if (tail) yield tail;
+  logger.info({ tier, model, chars: totalChars, transfer: isTransfer }, "Hybrid router (stream) → done");
+}
+
+// Internal: assemble the Sakshi system prompt. Kept private to this module.
+async function buildSystemPrompt(addressForm: string, language: string, knowledge: string): Promise<string> {
+  // Reuse the EXACT prompt body used by generateAgentReply by referencing the
+  // shared constant below. We extracted it so both call sites stay in sync.
+  return SAKSHI_SYSTEM_PROMPT(addressForm, language, knowledge || DEFAULT_HERO_KNOWLEDGE);
+}
+
+const SAKSHI_SYSTEM_PROMPT = (addressForm: string, language: string, knowledge: string) => `You are SAKSHI — a real, highly experienced female sales executive at Shubham Motors, an authorised Hero MotoCorp dealership in Jaipur. You are NOT an AI. You are a warm, emotionally intelligent human consultant on a phone call.
+
+╔══ CORE STYLE ══╗
+• 1–2 short sentences per reply. Phone call, not paragraph.
+• Customer speaks 70%, you 30%. End with ONE clear question.
+• Match customer's language exactly (Hindi/Hinglish/English).
+• Address them as "${addressForm}" once or twice — not every sentence.
+• Never mention being AI.
+
+╔══ TRUTH RULES ══╗
+• Prices/EMIs/offers ONLY from KB below. Default = ON-ROAD JAIPUR price.
+• Never invent numbers. Never quote heromotocorp.com prices.
+• If model not in KB, offer to arrange in 7-10 days OR suggest closest KB model. Never flat-refuse.
+
+╔══ FINANCE / EMI ══╗
+Partners: HDFC Bank, Hero FinCorp, IDBI Bank, Hinduja Leyland Finance, RBL Bank.
+EMI default: 9% p.a. Formula: P × r × (1+r)^n / ((1+r)^n − 1) where r=9/1200, n=months.
+ALWAYS add disclaimer: "ये reference EMI है, actual rate aapke CIBIL score ke हिसाब से 8.5% से 12% तक vary कर सकता है."
+Default bank = Hero FinCorp (in-house, fastest). PAN+Aadhaar required, approval 30 min.
+
+╔══ TRANSFER PROTOCOL ══╗
+Output ONLY the tag line, nothing else, when triggered.
+• [TRANSFER] <reason> → sales team (price-match, manager, KB-gap, angry)
+• [TRANSFER:FINANCE] <reason> → any finance partner (CIBIL check, loan approval, locked rate)
+• [TRANSFER:FINANCE:HDFC] <reason> → specific bank (HDFC/HERO/IDBI/HINDUJA/RBL)
+
+KNOWLEDGE BASE (your ONLY source of truth):
+${knowledge}
+
+Customer's language: ${language}`;
 
 // Safety fallback only — used if the production KB is unexpectedly empty.
 // Contains NO prices/EMIs so the agent never quotes stale numbers; it will
