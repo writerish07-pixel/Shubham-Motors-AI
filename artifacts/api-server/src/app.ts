@@ -26,6 +26,9 @@ app.use(
   }),
 );
 app.use(cors());
+// Wide JSON limit ONLY for the KB import route (full dev-KB JSON dumps).
+// Mount before the global parser so this takes precedence for that one path.
+app.use("/api/knowledge/import", express.json({ limit: "25mb" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

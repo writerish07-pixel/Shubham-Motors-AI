@@ -9,9 +9,12 @@ import {
   UpdateKnowledgeItemBody,
   DeleteKnowledgeItemParams,
 } from "@workspace/api-zod";
+import { analyzeCallIntent, learnFromTranscript } from "../lib/openai";
 
 const router: IRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+// Whisper accepts up to 25 MB; allow up to 25 MB for historical recordings.
+const uploadAudio = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
 // Lightweight admin guard for KB-mutating uploads. Set ADMIN_TOKEN in env;
 // callers must send `X-Admin-Token: <token>` (or `Authorization: Bearer <token>`).
@@ -208,6 +211,121 @@ router.get("/knowledge", async (req, res): Promise<void> => {
   }
 
   res.json(items);
+});
+
+// ─── Historical call recording upload → Whisper STT → self-learning queue ─────
+// Accepts MP3/WAV/M4A/OGG up to 25 MB. Transcribes via OpenAI Whisper, then
+// feeds into the same learnFromTranscript pipeline as live calls. Resulting
+// insights go into the review queue (isActive=false, requiresReview=true),
+// tagged with source="upload:<filename>" for provenance.
+router.post("/knowledge/upload/recording", uploadAudio.single("file"), async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  if (!req.file) { res.status(400).json({ error: "audio file required" }); return; }
+  const mime = (req.file.mimetype || "").toLowerCase();
+  const ALLOWED = ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave", "audio/mp4", "audio/m4a", "audio/x-m4a", "audio/ogg", "audio/webm"];
+  if (!ALLOWED.some((a) => mime.startsWith(a))) {
+    res.status(400).json({ error: `unsupported audio type "${mime}" — please upload MP3, WAV, M4A, OGG, or WebM` });
+    return;
+  }
+  try {
+    const { default: OpenAI } = await import("openai");
+    const { toFile } = await import("openai/uploads");
+    const openai = new OpenAI({
+      apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY,
+      baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+    });
+
+    const file = await toFile(req.file.buffer, req.file.originalname, { type: mime });
+    const tx = await openai.audio.transcriptions.create({
+      file,
+      model: "whisper-1",
+    });
+    const transcript = (tx.text ?? "").trim();
+    if (transcript.length < 20) {
+      res.status(400).json({ error: "transcript too short — recording may be silent or corrupt" });
+      return;
+    }
+
+    const analysis = await analyzeCallIntent(transcript);
+    const source = `upload:${req.file.originalname}`;
+    const beforeCount = (await db.select({ id: knowledgeTable.id }).from(knowledgeTable)
+      .where(eq(knowledgeTable.requiresReview, true))).length;
+    await learnFromTranscript(transcript, analysis.summary ?? "Historical recording", source);
+    const afterCount = (await db.select({ id: knowledgeTable.id }).from(knowledgeTable)
+      .where(eq(knowledgeTable.requiresReview, true))).length;
+
+    res.json({
+      ok: true,
+      filename: req.file.originalname,
+      transcriptChars: transcript.length,
+      summary: analysis.summary,
+      itemsQueuedForReview: afterCount - beforeCount,
+    });
+  } catch (err) {
+    res.status(500).json({ error: String((err as Error).message) });
+  }
+});
+
+// ─── Bulk export / import for dev → prod KB sync (admin only) ─────────────────
+// SAFE ALLOWLIST: only curated KB fields are exported/imported. Review-queue
+// fields (requiresReview, evidence, source) and pending rows are excluded so
+// unreviewed call-derived data never propagates between environments. The
+// review queue must be approved in each environment independently.
+const KB_SAFE_FIELDS = ["id", "title", "category", "content", "modelName", "fileUrl", "isActive", "createdAt", "updatedAt"] as const;
+const MAX_IMPORT_ROWS = 5000;
+
+router.get("/knowledge/export", async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const rows = await db.select().from(knowledgeTable)
+    .where(eq(knowledgeTable.requiresReview, false));
+  const items = rows.map((r) => {
+    const out: Record<string, unknown> = {};
+    for (const k of KB_SAFE_FIELDS) out[k] = (r as Record<string, unknown>)[k];
+    return out;
+  });
+  res.setHeader("Content-Disposition", `attachment; filename="knowledge-export-${new Date().toISOString().slice(0,10)}.json"`);
+  res.json({ exportedAt: new Date().toISOString(), count: items.length, items });
+});
+
+router.post("/knowledge/import", async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body ?? {};
+  const items: unknown[] = Array.isArray(body.items) ? body.items : [];
+  const mode: "replace" | "merge" = body.mode === "replace" ? "replace" : "merge";
+  if (items.length === 0) { res.status(400).json({ error: "items[] required (use export format)" }); return; }
+  if (items.length > MAX_IMPORT_ROWS) { res.status(413).json({ error: `too many rows (${items.length}); max ${MAX_IMPORT_ROWS}` }); return; }
+
+  // Always force imported rows to be live KB entries — never pending review,
+  // never carry transcript evidence or call sids across environments.
+  const normalized = items
+    .filter((it): it is Record<string, unknown> => typeof it === "object" && it !== null)
+    .map((it) => ({
+      title: String(it.title ?? "").slice(0, 200),
+      category: String(it.category ?? "general").slice(0, 50),
+      content: String(it.content ?? "").slice(0, 5000),
+      modelName: it.modelName ? String(it.modelName).slice(0, 100) : null,
+      fileUrl: it.fileUrl ? String(it.fileUrl).slice(0, 500) : null,
+      isActive: it.isActive === false ? false : true,
+      requiresReview: false as const,
+      evidence: null,
+      source: null,
+    }))
+    .filter((it) => it.title && it.content);
+
+  if (normalized.length === 0) { res.status(400).json({ error: "no valid rows in payload" }); return; }
+
+  await db.transaction(async (tx) => {
+    if (mode === "replace") {
+      // Replace only the curated KB; leave the local review queue untouched.
+      await tx.delete(knowledgeTable).where(eq(knowledgeTable.requiresReview, false));
+    }
+    const CHUNK = 100;
+    for (let i = 0; i < normalized.length; i += CHUNK) {
+      await tx.insert(knowledgeTable).values(normalized.slice(i, i + CHUNK));
+    }
+  });
+
+  res.json({ ok: true, mode, imported: normalized.length });
 });
 
 // ─── Self-learning review queue (admin only — pending rows may contain call transcript snippets) ─

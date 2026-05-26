@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Plus, Edit2, Trash2, Check, X, BookOpen, Sparkles } from "lucide-react";
+import { useRef, useState } from "react";
+import { Plus, Edit2, Trash2, Check, X, BookOpen, Sparkles, Upload, Download, FileAudio } from "lucide-react";
 import {
   useListKnowledgeItems, getListKnowledgeItemsQueryKey,
   useCreateKnowledgeItem, useUpdateKnowledgeItem, useDeleteKnowledgeItem
@@ -46,26 +46,100 @@ export default function Knowledge() {
   }
 
   // ─── Self-learning review queue ────────────────────────────────────────────
+  const adminToken = () => localStorage.getItem("shubham_admin_token") ?? "";
+  const adminHeaders = (extra: Record<string, string> = {}) => {
+    const t = adminToken();
+    return t ? { "X-Admin-Token": t, ...extra } : extra;
+  };
+  function requireToken(): boolean {
+    if (!adminToken()) { toast.error("Set Admin Token in Settings first"); return false; }
+    return true;
+  }
+
   type PendingItem = { id: number; title: string; category: string; content: string; evidence: string | null; source: string | null; createdAt: string };
   const pendingQ = useQuery<PendingItem[]>({
     queryKey: ["knowledge-pending"],
     queryFn: async () => {
-      const r = await fetch("/api/knowledge/pending");
+      const r = await fetch("/api/knowledge/pending", { headers: adminHeaders() });
       if (!r.ok) throw new Error("failed");
       return r.json();
     },
     refetchInterval: 30000,
+    enabled: !!adminToken(),
   });
   const pending = pendingQ.data ?? [];
 
   async function approvePending(id: number) {
-    const r = await fetch(`/api/knowledge/${id}/approve`, { method: "POST" });
+    if (!requireToken()) return;
+    const r = await fetch(`/api/knowledge/${id}/approve`, { method: "POST", headers: adminHeaders() });
     if (r.ok) { toast.success("Approved — added to KB"); invalidate(); } else toast.error("Failed");
   }
   async function rejectPending(id: number) {
+    if (!requireToken()) return;
     if (!confirm("Reject and discard this learning?")) return;
-    const r = await fetch(`/api/knowledge/${id}/reject`, { method: "POST" });
+    const r = await fetch(`/api/knowledge/${id}/reject`, { method: "POST", headers: adminHeaders() });
     if (r.ok) { toast.success("Rejected"); invalidate(); } else toast.error("Failed");
+  }
+
+  // ─── Historical recording upload ───────────────────────────────────────────
+  const audioInputRef = useRef<HTMLInputElement>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  async function handleAudioUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!requireToken()) return;
+    if (file.size > 25 * 1024 * 1024) { toast.error("File too large (max 25 MB)"); return; }
+    setUploading(true);
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch("/api/knowledge/upload/recording", { method: "POST", headers: adminHeaders(), body: fd });
+      const j = await r.json();
+      if (r.ok) { toast.success(`Transcribed — ${j.itemsQueuedForReview ?? 0} new learnings queued`); invalidate(); }
+      else toast.error(j.error ?? "Upload failed");
+    } catch { toast.error("Upload failed"); }
+    finally { setUploading(false); }
+  }
+
+  async function handleExport() {
+    if (!requireToken()) return;
+    const r = await fetch("/api/knowledge/export", { headers: adminHeaders() });
+    if (!r.ok) { toast.error("Export failed"); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `knowledge-export-${new Date().toISOString().slice(0,10)}.json`;
+    a.click(); URL.revokeObjectURL(url);
+    toast.success("Exported");
+  }
+
+  async function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!requireToken()) return;
+    const mode = confirm("Click OK to REPLACE the entire KB with this file.\nClick Cancel to MERGE (add rows alongside existing).") ? "replace" : "merge";
+    if (mode === "replace" && !confirm("This will DELETE every existing knowledge row first. Are you absolutely sure?")) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const items = Array.isArray(parsed) ? parsed : parsed.items;
+      if (!Array.isArray(items)) { toast.error("Invalid file — expected exported JSON"); setImporting(false); return; }
+      const r = await fetch("/api/knowledge/import", {
+        method: "POST",
+        headers: adminHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ mode, items }),
+      });
+      const j = await r.json();
+      if (r.ok) { toast.success(`Imported ${j.imported} rows (${mode})`); invalidate(); }
+      else toast.error(j.error ?? "Import failed");
+    } catch { toast.error("Import failed — invalid JSON"); }
+    finally { setImporting(false); }
   }
 
   function handleCreate() {
@@ -100,6 +174,18 @@ export default function Knowledge() {
           <h1 className="text-xl font-bold">Knowledge Base</h1>
           <p className="text-xs text-muted-foreground mt-0.5">The AI agent's brain — models, prices, offers, FAQs</p>
         </div>
+        <div className="flex items-center gap-2">
+          <input ref={audioInputRef} type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm" hidden onChange={handleAudioUpload} />
+          <input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={handleImport} />
+          <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={() => audioInputRef.current?.click()} disabled={uploading}>
+            <FileAudio size={13} />{uploading ? "Transcribing..." : "Upload Call"}
+          </Button>
+          <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={handleExport}>
+            <Download size={13} />Export
+          </Button>
+          <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={() => importInputRef.current?.click()} disabled={importing}>
+            <Upload size={13} />{importing ? "Importing..." : "Import"}
+          </Button>
         <Dialog open={addOpen} onOpenChange={setAddOpen}>
           <DialogTrigger asChild>
             <Button size="sm" className="gap-2 text-xs" data-testid="add-knowledge-button"><Plus size={13} />Add Item</Button>
@@ -126,6 +212,7 @@ export default function Knowledge() {
             </div>
           </DialogContent>
         </Dialog>
+        </div>
       </div>
 
       {/* Self-learning review queue */}
