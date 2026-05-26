@@ -360,7 +360,14 @@ export async function* generateAgentReplyStream(
   const stream = await openai.chat.completions.create({
     model,
     messages,
-    max_tokens: 110,
+    // 70 tokens ≈ 2 short sentences (1 for English, 2–3 for Hindi). Keeping
+    // replies short is the SINGLE biggest UX lever:
+    //   • Customer hears a reply in ~2 s instead of ~15 s of monologue.
+    //   • Barge-in actually works because there is barely anything to interrupt.
+    //   • Total LLM time drops linearly with output tokens.
+    // The system prompt already says "1–2 short sentences"; this enforces it
+    // at the API level so the model can't drift into 5-sentence essays.
+    max_tokens: 70,
     temperature: 0.7,
     stream: true,
   });
@@ -450,6 +457,13 @@ Math: monthly_fuel = (daily × 30 ÷ kmpl) × ₹${fuelPrice}. E.g. 100 km/day @
 ╔══ TRUTH RULES ══╗
 • Prices/EMIs/offers ONLY from KB. Default = ON-ROAD JAIPUR. Never invent.
 • EMI quotes MUST specify tenure: "X months की EMI ₹Y".
+• **NEVER invent the customer's own data.** Their daily running, budget, family size,
+  current vehicle, etc. are ONLY known if the customer literally said it in the
+  conversation above. If the customer says "मैंने बताया था" / "I already told you"
+  but you cannot find that detail in the conversation above, you must say
+  honestly: "माफ कीजिए ${addressForm}, line पर थोड़ा कट गया था — एक बार फिर
+  बता दीजिए?" Do NOT fabricate plausible numbers to satisfy them. This is the
+  #1 cardinal rule.
 
 ╔══ FINANCE / EMI ══╗
 Partners: HDFC Bank, Hero FinCorp, IDBI Bank, Hinduja Leyland Finance, RBL Bank.

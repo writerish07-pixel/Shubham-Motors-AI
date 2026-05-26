@@ -57,8 +57,8 @@ const CHUNK_BYTES = 320;          // 20 ms @ 8 kHz × 2 bytes/sample = 320 bytes
 // echoing our own TTS back into the inbound stream. The old guard (energy >
 // 0.032, 5 frames = 100 ms) was nowhere near strict enough.
 const BARGE_IN_RMS = SILENCE_RMS * 12;   // 0.096 — well above strong echo (~0.05) and below normal speech (~0.15)
-const BARGE_IN_FRAMES = 15;              // 15 × 20 ms = 300 ms of continuous loud audio
-const BARGE_IN_GRACE_MS = 600;           // First 600 ms of any agent reply: ignore barge-in entirely (TTS warmup echo)
+const BARGE_IN_FRAMES = 10;              // 10 × 20 ms = 200 ms of continuous loud audio (snappier interruption)
+const BARGE_IN_GRACE_MS = 400;           // First 400 ms ignored (TTS warmup echo); was 600 ms but felt unresponsive
 
 // ── Per-call session ──────────────────────────────────────────────────────────
 interface Session {
@@ -352,6 +352,12 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
 
 async function handleStop(session: Session): Promise<void> {
   logger.info({ callSid: session.callSid }, "Call stream stopped — analysing");
+  // Tear down any in-flight TTS/LLM pipeline. Production showed cases where
+  // the LLM kept streaming for 20 s after the call ended (wasted OpenAI cost
+  // and confused logs with an "Agent reply played=0" long after the customer
+  // had already hung up). The pipeline checks ttsAbort/isClosed and exits.
+  session.ttsAbort = true;
+  session.isSpeaking = false;
   const transcript = session.transcript.join("\n");
   if (!transcript || !session.callDbId) return;
 
@@ -393,7 +399,12 @@ async function handleStop(session: Session): Promise<void> {
 
     const [lead] = await db.select().from(leadsTable).where(eq(leadsTable.id, session.leadId));
     if (lead) {
-      await sendCallSummaryWhatsApp(lead.phone, lead.name, analysis.summary, lead.interestedModel);
+      // Fire-and-forget — BotSpace's POST often takes 25+ s and was blocking
+      // the post-call DB cleanup and learning pipeline. The customer doesn't
+      // care if the summary text takes an extra 30 s to arrive; we do care
+      // that the call record gets finalised promptly.
+      void sendCallSummaryWhatsApp(lead.phone, lead.name, analysis.summary, lead.interestedModel)
+        .catch((err) => logger.error({ err }, "Background WhatsApp summary failed"));
     }
 
     await learnFromTranscript(transcript, analysis.summary, session.callSid);
@@ -406,6 +417,9 @@ async function handleStop(session: Session): Promise<void> {
 
 async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): Promise<void> {
   if (ws.readyState !== WebSocket.OPEN) return;
+  // If the call already ended (stop event received), don't burn an LLM/TTS
+  // round trip for audio that nobody will hear.
+  if (session.isClosed) return;
 
   // Concatenate PCM16LE chunks → PCM 8 kHz → upsample to 16 kHz → WAV
   const raw = Buffer.concat(chunks);
@@ -490,7 +504,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   try {
     for await (const sentence of generateAgentReplyStream(correctedText, session.history, session.leadName, session.language)) {
-      if (session.ttsAbort) break;
+      if (session.ttsAbort || session.isClosed) break;
       // Transfer tag is emitted as a single buffered chunk (see openai.ts)
       if (/^\s*\[TRANSFER/i.test(sentence)) {
         transferText = sentence;
