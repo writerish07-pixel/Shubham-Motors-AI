@@ -44,7 +44,7 @@ import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 const SILENCE_RMS = 0.008;        // Below this → silence
-const SILENCE_CHUNKS = 12;        // 12 × 20 ms = 240 ms silence → trigger STT (low-latency)
+const SILENCE_CHUNKS = 8;         // 8 × 20 ms = 160 ms silence → trigger STT (snappy turn-taking)
 const MIN_SPEECH_CHUNKS = 8;      // 8 × 20 ms = 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 600 × 20 ms = 12 s max before forced trigger
 const STT_SAMPLE_RATE = 16000;    // Sarvam STT wants 16 kHz
@@ -465,6 +465,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   // as it arrives. While sentence N is being played, the synth for N+1 is
   // already in flight — this collapses end-to-end latency by ~3 s per turn.
   session.history.push({ role: "user", content: customerText });
+  // Cap conversation history at the last 16 messages (~8 exchanges). Every
+  // extra turn adds ~50–200 ms to LLM first-token latency because the model
+  // re-reads the whole call. The KB context + system prompt already give
+  // Sakshi all the long-term grounding she needs.
+  if (session.history.length > 16) {
+    session.history.splice(0, session.history.length - 16);
+  }
   session.isSpeaking = true;
   session.ttsAbort = false;
   session.bargeInCount = 0;
@@ -617,8 +624,10 @@ async function synthesizeTts(text: string, language: string): Promise<Int16Array
       ? pcm
       : resample(pcm, sampleRate, EXOTEL_SAMPLE_RATE);
 
-    // −6 dB gain + soft limiter. Sarvam output is hot and clips at 32767.
-    const GAIN = 0.5;
+    // −2.5 dB gain + soft limiter. PSTN expects hot levels; the previous
+    // −6 dB was leaving callers asking "I can't hear you". Soft limiter
+    // still prevents the residual clipping in loud Sarvam frames.
+    const GAIN = 0.75;
     const CEIL = 28000;
     const limited = new Int16Array(pcm8k.length);
     for (let i = 0; i < pcm8k.length; i++) {

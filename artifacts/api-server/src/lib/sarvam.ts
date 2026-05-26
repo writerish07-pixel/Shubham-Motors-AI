@@ -79,8 +79,13 @@ export async function textToSpeech(
         speaker: "anushka",
         model: "bulbul:v2",
         enable_preprocessing: true,
-        speech_sample_rate: 22050,
-        pace: 0.95, // slow down ~5% for better Hinglish clarity
+        // Ask Sarvam for 8 kHz directly — Exotel needs 8 kHz, and Sarvam's
+        // own resampler/anti-alias is better than our naive biquad. Cuts the
+        // "metallic / muffled" artifact callers were complaining about and
+        // also shaves ~30% off the TTS payload size (faster network).
+        speech_sample_rate: 8000,
+        // Default pace (1.0). The previous 0.95 made the voice sound dragged
+        // and lengthened every reply by ~5% for no real clarity benefit.
       },
       {
         headers: {
