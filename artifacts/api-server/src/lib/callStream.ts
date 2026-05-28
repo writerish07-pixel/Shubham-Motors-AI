@@ -93,6 +93,10 @@ interface Session {
   // runPipeline's finally block (preventing the "old reply audio replays
   // over customer's new sentence" race).
   ttsGen: number;
+  // Snapshot of what we know about this customer at call start, passed to
+  // every LLM turn so Sakshi can open warmly (e.g. "aapne pichli baar
+  // Splendor pe interest dikhayi thi") instead of starting from scratch.
+  leadProfile?: import("./openai").LeadProfile;
 }
 
 // ── Attach WebSocket server to existing HTTP server ───────────────────────────
@@ -224,6 +228,17 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     isProcessing: false,
     isClosed: false,
     ttsGen: 0,
+    // Carry forward whatever the CRM knows about this caller so Sakshi can
+    // personalise the conversation. lastCallSummary comes from the previous
+    // call's `analyzeCallIntent` write (stored on the lead row as
+    // `intentSummary`).
+    leadProfile: lead ? {
+      name: lead.name || undefined,
+      interestedModel: lead.interestedModel ?? null,
+      notes: lead.notes ?? null,
+      lastCallSummary: lead.intentSummary ?? null,
+      status: lead.status ?? null,
+    } : undefined,
   };
 
   // Greet immediately — no artificial delay. If we have a pre-cached PCM for
@@ -519,6 +534,27 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     logger.info({ callSid: session.callSid, before: customerText, after: correctedText }, "STT alias corrected");
   }
 
+  // ── Customer-requested TRANSFER safety net ────────────────────────────────
+  // PRODUCTION BUG (recording AUD-20260528-WA0003): customer said
+  // "क्या आप मुझे किसी sales वाले से बात करा सकते हैं?" and Sakshi replied
+  // "धन्यवाद हम जल्द आपसे संपर्क करेंगे" — ending the call instead of
+  // transferring. The prompt tells the LLM to transfer, but the LLM is not
+  // 100% reliable. This regex-based safety net runs BEFORE the LLM and forces
+  // a [TRANSFER] tag whenever the customer explicitly asks to speak to a
+  // human/sales/manager, so we never lose another hot lead to a farewell.
+  if (isCustomerAskingForHuman(correctedText)) {
+    session.history.push({ role: "user", content: customerText });
+    if (session.history.length > 12) {
+      session.history.splice(0, session.history.length - 12);
+    }
+    const tag = "[TRANSFER] customer explicitly asked to speak with a sales person";
+    session.history.push({ role: "assistant", content: tag });
+    session.transcript.push(`Agent[tag]: ${tag}`);
+    logger.info({ callSid: session.callSid, correctedText }, "Customer-requested transfer (safety net)");
+    await runTransfer(ws, session, tag);
+    return;
+  }
+
   // ── Intent fast-path ──────────────────────────────────────────────────────
   // For short common replies ("haan", "theek hai", "address kya hai", "test
   // ride", "EMI", "thanks", "busy", "callback") skip the LLM entirely and
@@ -605,7 +641,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const MAX_REPLY_SENTENCES = 2;
 
   try {
-    for await (const sentence of generateAgentReplyStream(correctedText, session.history, session.leadName, session.language)) {
+    for await (const sentence of generateAgentReplyStream(correctedText, session.history, session.leadName, session.language, session.leadProfile)) {
       if (session.ttsAbort || session.isClosed) break;
       // Transfer tag is emitted as a single buffered chunk (see openai.ts)
       if (/^\s*\[TRANSFER/i.test(sentence)) {
@@ -663,51 +699,10 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   }, "Agent reply");
 
   // ── TRANSFER-TO-HUMAN ────────────────────────────────────────────────────
-  // If the LLM is unsure / can't answer reliably, it emits a reply starting
-  // with `[TRANSFER]`. We say a handoff line and transfer the live call to
-  // the configured sales agent number. This prevents the AI from making up
-  // wrong prices/offers — much better to hand off than to misinform.
+  // If the LLM emitted a [TRANSFER…] tag, hand off the live call. Common path
+  // for "I can't answer this from KB" / negotiation / explicit human request.
   if (/^\s*\[TRANSFER/i.test(agentText)) {
-    // Tag format:
-    //   [TRANSFER] reason                          → sales
-    //   [TRANSFER:FINANCE] reason                  → first active finance
-    //   [TRANSFER:FINANCE:HDFC] reason             → specific bank, else any finance
-    const m = agentText.match(/^\s*\[TRANSFER(?::([A-Z]+))?(?::([^\]]+))?\]/i);
-    const tag = (m?.[1] ?? "SALES").toUpperCase();
-    const bankHint = m?.[2]?.trim().toUpperCase() ?? "";
-
-    let target: typeof contactsTable.$inferSelect | undefined;
-    const contacts = await db.select().from(contactsTable);
-    const active = contacts.filter(c => c.isActive);
-    if (tag === "FINANCE") {
-      target = active.find(c => c.type === "finance" && bankHint && (c.bankName ?? "").toUpperCase().includes(bankHint))
-        ?? active.find(c => c.type === "finance");
-    } else {
-      target = active.find(c => c.type === "sales");
-    }
-    // Last-resort fallback to env var so existing deployments don't break
-    const phone = target?.phone ?? process.env.SALES_TRANSFER_NUMBER ?? "";
-    const targetLabel = target
-      ? (target.type === "finance" ? (target.bankName ?? "Finance team") : target.name)
-      : "sales expert";
-
-    const addrName = session.leadName === "Sir" ? "सर" : session.leadName + " जी";
-    const handoff = tag === "FINANCE"
-      ? `एक मिनट ${addrName}, मैं आपको ${targetLabel} के finance expert से connect कर रही हूँ। Line पर रहिए।`
-      : `एक मिनट ${addrName}, मैं आपको हमारे senior sales expert ${target ? target.name : ""} से connect कर रही हूँ। Line पर रहिए।`;
-    session.transcript.push(`Agent: ${handoff}`);
-    await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
-
-    if (phone && session.callSid) {
-      await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-      await transferCallToAgent(session.callSid, phone);
-    } else {
-      // No contact in DB and no env fallback — tell the customer instead of silently dropping.
-      const sorry = `माफ़ कीजिए ${addrName}, अभी हमारा sales expert available नहीं है। मैं आपका नंबर note कर लेती हूँ, हम 5 मिनट में call back करेंगे।`;
-      session.transcript.push(`Agent: ${sorry}`);
-      await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
-      logger.warn({ callSid: session.callSid, tag, bankHint }, "Transfer requested but no contact configured");
-    }
+    await runTransfer(ws, session, agentText);
     return;
   }
 
@@ -720,6 +715,95 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   // No final streamTtsToWs() here — the streaming pipeline above already
   // synthesized and played every sentence in `collected`. Calling it again
   // would double-speak the entire reply.
+}
+
+/**
+ * Detect customer phrases that mean "please connect me to a human/sales/manager".
+ * Used as a safety net BEFORE the LLM runs so we never repeat the production bug
+ * where the LLM said farewell instead of triggering [TRANSFER].
+ *
+ * Covers Hindi, Hinglish, and English variants. Tuned to be specific — single
+ * words like "sales" alone are NOT triggers (customer might be asking about
+ * "sales offer"). Requires a verb of asking/connecting paired with a human
+ * subject (sales person / manager / human / kisi se baat).
+ */
+function isCustomerAskingForHuman(text: string): boolean {
+  const t = text.toLowerCase();
+  // EXCLUSION GUARD — if the sentence is clearly ABOUT a topic (offers,
+  // discounts, schemes, EMI, finance, price), do NOT trigger transfer even if
+  // it incidentally contains "sales". Customer is asking a question, not
+  // asking to be handed off. This prevents false transfers on phrases like
+  // "mujhe sales offer ke baare mein baat karni hai".
+  if (/(offer|discount|scheme|cashback|deal|price|kimat|qeemat|कीमत|emi|finance|कर्ज़|loan|kist|किस्त|mileage|माइलेज|stock|address|service|warranty|कब|when)/i.test(t)) {
+    return false;
+  }
+  // TRIGGER PATTERNS — each requires both an explicit handoff verb and a
+  // "human / sales person / manager" noun (NOT just the word "sales").
+  const patterns: RegExp[] = [
+    // Hindi: "किसी से बात कराओ/कराइए/करवा दो"
+    /किसी\s+से\s+बात\s+(करा|करवा)/,
+    // Hindi/Hinglish: "sales वाले से बात कराओ", "sales वाले से बात करा सकते"
+    // Requires the qualifier word (वाले/वाली/person/wala/staff/team) — bare
+    // "sales se baat" by itself is too ambiguous.
+    /(sales|manager|senior|sales\s*expert)\s*(वाले|वाली|बंदे|भाई|व्यक्ति|person|wala|waale|staff|team|executive|representative|agent)\s*(से|se)\s+(बात|baat|connect|कनेक्ट)/i,
+    // Roman English: "connect me to sales/manager", "transfer to a human"
+    /(connect|transfer|forward|put\s+me\s+through)\s+(me\s+|us\s+)?(to|with)\s+(a\s+|the\s+)?(sales|manager|human|senior|real\s+person|representative|agent)/i,
+    /(talk|speak)\s+(to|with)\s+(a\s+|the\s+)?(human|real\s+person|manager|senior|sales\s+(person|guy|executive|expert))/i,
+    // Hindi: "किसी असली व्यक्ति से बात"
+    /(असली|asli|real)\s+(व्यक्ति|person|aadmi|आदमी|insaan|इंसान)\s+(से|se)\s+(बात|baat)/i,
+    // Hinglish: "kisi se baat karwa do/karao do"
+    /kisi\s+se\s+baat\s+(kara|karwa)/i,
+    // Direct: "manager se baat karna hai/chahiye"
+    /(manager|senior)\s+(से|se)\s+baat\s+(karn[ai]|chahi|करनी|करना)/i,
+  ];
+  return patterns.some((re) => re.test(t));
+}
+
+/**
+ * Resolve a [TRANSFER…] tag to a real handoff: say a handoff line, transfer
+ * the Exotel leg, mark the lead hot. Extracted from runPipeline so we can
+ * also invoke it from the customer-side safety net (which runs BEFORE the LLM
+ * and forms its own tag).
+ */
+async function runTransfer(ws: WebSocket, session: Session, agentText: string): Promise<void> {
+  // Tag format:
+  //   [TRANSFER] reason                  → sales
+  //   [TRANSFER:FINANCE] reason          → first active finance
+  //   [TRANSFER:FINANCE:HDFC] reason     → specific bank, else any finance
+  const m = agentText.match(/^\s*\[TRANSFER(?::([A-Z]+))?(?::([^\]]+))?\]/i);
+  const tag = (m?.[1] ?? "SALES").toUpperCase();
+  const bankHint = m?.[2]?.trim().toUpperCase() ?? "";
+
+  let target: typeof contactsTable.$inferSelect | undefined;
+  const contacts = await db.select().from(contactsTable);
+  const active = contacts.filter(c => c.isActive);
+  if (tag === "FINANCE") {
+    target = active.find(c => c.type === "finance" && bankHint && (c.bankName ?? "").toUpperCase().includes(bankHint))
+      ?? active.find(c => c.type === "finance");
+  } else {
+    target = active.find(c => c.type === "sales");
+  }
+  const phone = target?.phone ?? process.env.SALES_TRANSFER_NUMBER ?? "";
+  const targetLabel = target
+    ? (target.type === "finance" ? (target.bankName ?? "Finance team") : target.name)
+    : "sales expert";
+
+  const addrName = session.leadName === "Sir" ? "सर" : session.leadName + " जी";
+  const handoff = tag === "FINANCE"
+    ? `एक मिनट ${addrName}, मैं आपको ${targetLabel} के finance expert से connect कर रही हूँ। Line पर रहिए।`
+    : `एक मिनट ${addrName}, मैं आपको हमारे senior sales expert ${target ? target.name : ""} से connect कर रही हूँ। Line पर रहिए।`;
+  session.transcript.push(`Agent: ${handoff}`);
+  await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
+
+  if (phone && session.callSid) {
+    await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
+    await transferCallToAgent(session.callSid, phone);
+  } else {
+    const sorry = `माफ़ कीजिए ${addrName}, अभी हमारा sales expert available नहीं है। मैं आपका नंबर note कर लेती हूँ, हम 5 मिनट में call back करेंगे।`;
+    session.transcript.push(`Agent: ${sorry}`);
+    await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
+    logger.warn({ callSid: session.callSid, tag, bankHint }, "Transfer requested but no contact configured");
+  }
 }
 
 // ── Send TTS audio to Exotel over WebSocket ───────────────────────────────────
