@@ -135,7 +135,8 @@ export async function generateAgentReply(
 
   // ── Tier 0: try to answer directly from KB without any LLM call (saves 100%
   // of the tokens for greetings, hours, address, simple price lookups).
-  const direct = tryDirectAnswer(customerText, knowledge || DEFAULT_HERO_KNOWLEDGE, addressForm);
+  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
+  const direct = tryDirectAnswer(customerText, directKb, addressForm);
   if (direct) {
     logger.info({ tier: "direct", chars: direct.length }, "Hybrid router → direct KB answer");
     return direct;
@@ -182,7 +183,8 @@ export async function* generateAgentReplyStream(
   const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
 
   // Tier 0 — direct KB answer, no LLM
-  const direct = tryDirectAnswer(customerText, knowledge || DEFAULT_HERO_KNOWLEDGE, addressForm);
+  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
+  const direct = tryDirectAnswer(customerText, directKb, addressForm);
   if (direct) {
     logger.info({ tier: "direct", chars: direct.length }, "Hybrid router (stream) → direct KB answer");
     yield direct;
@@ -267,8 +269,18 @@ export async function* generateAgentReplyStream(
 }
 
 // Internal: assemble the Sakshi system prompt. Kept private to this module.
+// CRITICAL: DEFAULT_HERO_KNOWLEDGE (catalog + prices + EMI table + showroom) is
+// ALWAYS included — it is structural data the agent cannot do its job without.
+// Admin-curated KB rows are APPENDED on top under [ADMIN KB OVERRIDES], so a
+// dealer entry like "Festival cashback ₹3000 on Splendor till 30-May" extends
+// (and overrides via recency) the baseline rather than wiping it out.
+// Previous bug: `knowledge || DEFAULT_HERO_KNOWLEDGE` meant any admin row would
+// nuke the entire catalog + EMI table, leaving Sakshi to hallucinate prices.
 async function buildSystemPrompt(addressForm: string, language: string, knowledge: string, fuelPrice: number, leadProfile?: LeadProfile): Promise<string> {
-  return SAKSHI_SYSTEM_PROMPT(addressForm, language, knowledge || DEFAULT_HERO_KNOWLEDGE, fuelPrice, leadProfile);
+  const merged = knowledge && knowledge.trim()
+    ? `${DEFAULT_HERO_KNOWLEDGE}\n\n[ADMIN KB OVERRIDES — dealer-curated, takes precedence when contradicts the baseline above]\n${knowledge}`
+    : DEFAULT_HERO_KNOWLEDGE;
+  return SAKSHI_SYSTEM_PROMPT(addressForm, language, merged, fuelPrice, leadProfile);
 }
 
 const SAKSHI_SYSTEM_PROMPT = (addressForm: string, language: string, knowledge: string, fuelPrice: number, leadProfile?: LeadProfile) => `You are SAKSHI — a real, highly experienced female sales executive at Shubham Motors, an authorised Hero MotoCorp dealership in Jaipur. You are NOT an AI. You are a warm, emotionally intelligent human consultant on a phone call. Your job is not to "give information" — it is to BUILD TRUST, UNDERSTAND THE PERSON, and either book a showroom visit or transfer to a closer.
@@ -289,10 +301,10 @@ When the customer says a bare number like "110", "125", "160", "200", "350", "41
 WRONG: customer says "125 ke baare mein batao" → you talk only about "Xtreme 125R".
 RIGHT: customer says "125 ke baare mein batao" → you list ALL Hero 125cc options in ONE short line, then ask which segment they want (bike or scooter, sporty or family).
 
-EXAMPLES OF THE RIGHT BEHAVIOUR:
-• "125 ke baare mein batao" → "Ji ${addressForm}, hamare paas 125cc mein bikes hain — Super Splendor, Glamour X, Xtreme 125R — aur scooters mein Xoom 125 aur Destini 125. Aap bike dekhna chahenge ya scooter?"
-• "110 dekhna hai" → "110cc mein hamare paas Splendor Plus aur HF Deluxe (bikes) hain, aur Pleasure Plus aur Destini 110 (scooters). Aapko bike chahiye ya scooter?"
-• "160 batao" → "160cc segment mein hamari Xtreme 160R 2V aur 4V dono available hain — sporty riding ke liye. Aap commuting ke liye dekh rahe hain ya weekend rides ke liye?"
+EXAMPLES OF THE RIGHT BEHAVIOUR (ALWAYS include BOTH bikes AND scooters when CC has both):
+• "125 ke baare mein batao" → "Ji ${addressForm}, 125cc mein hamare paas 5 options hain — bikes mein Super Splendor, Glamour X, aur sporty Xtreme 125R; scooters mein Xoom 125 aur Destini 125. Aap bike dekhna chahenge ya scooter, aur use family ke liye hai ya khud ke liye?"
+• "110 dekhna hai" → "110cc mein bikes — Splendor Plus aur HF Deluxe; scooters — Pleasure Plus aur Destini 110. Aapko bike chahiye ya scooter?"
+• "160 batao" → "160cc mein hamari Xtreme 160R 2V aur 4V dono available hain — sporty riding ke liye. Aap commuting ke liye dekh rahe hain ya weekend rides ke liye?"
 
 ONLY when the customer explicitly names a SPECIFIC model with the number (e.g. "Xtreme 125R", "Xoom 125", "Destini 125") — then directly answer about that model. Bare numbers = CC, NEVER one model.
 
@@ -427,6 +439,9 @@ Listen → Acknowledge → Explore → Respond. Never argue.
 ╔══ TRUTH RULES ══╗
 • Prices/EMIs/offers ONLY from KB. Default = ON-ROAD JAIPUR. Never invent.
 • EMI quotes MUST specify tenure: "X months की EMI ₹Y".
+• **ZERO ARITHMETIC RULE** — you are FORBIDDEN from doing any addition, subtraction, multiplication, or division in your head. EVERY price and EVERY EMI must be read VERBATIM from the [PRICES …] or [PRECOMPUTED EMI TABLE] sections of the KB. If you cannot find the exact variant or the exact down/tenure combination → say "ek minute, main exact figure WhatsApp pe bhej deti hoon" or \`[TRANSFER:FINANCE]\` — DO NOT estimate.
+• **STAY ON THE MODEL THE CUSTOMER JUST NAMED.** If the customer says "Glamour kaisi rahegi" — your reply MUST be about Glamour X, NOT about whatever model was discussed in the previous turn. Re-read the customer's last utterance and identify the model name before replying. Wrong model = lost trust.
+• **NEVER say a farewell phrase as a reply to a real question.** Phrases like "धन्यवाद, जल्द आपसे संपर्क करेंगे, नमस्ते" / "thank you, we will get back to you" are END-OF-CALL phrases ONLY. If the customer asked about offer / price / finance / model / showroom / anything substantive — you MUST answer the question. You may say goodbye ONLY when the customer themselves said "bye / nahi chahiye / call band karo / khud aaunga / baat ho gayi" — and even then, prefer \`[TRANSFER]\` if they showed any interest in price or finance.
 • **NEVER invent the customer's own data.** Their daily running, budget, family size,
   current vehicle, etc. are ONLY known if the customer literally said it in this conversation
   OR if it appears in "WHAT YOU ALREADY KNOW" above. If the customer says "मैंने बताया था"
@@ -483,6 +498,78 @@ KNOWLEDGE BASE (your ONLY source of truth):
 ${knowledge}
 
 Customer's language: ${language}`;
+
+// ─── EMI table generator ─────────────────────────────────────────────────────
+// The LLM is unreliable at arithmetic. Production bug (WA-2026-05-28 14:33):
+// Sakshi quoted Glamour X price as ₹80,000 (actual ₹1,04,555), computed
+// ₹50k down → ₹30k loan (actual ₹54,555), and quoted ₹2,750 EMI (actual ~₹4,770).
+// Fix: precompute every popular {variant × down × tenure} → EMI permutation
+// SERVER-SIDE and inject into the KB so the LLM reads numbers instead of
+// computing them. Rule in the prompt forbids the LLM from doing any math.
+const EMI_FACTORS_9PA: Record<number, number> = {
+  12: 0.087451,
+  18: 0.059602,
+  24: 0.045685,
+  36: 0.031800,
+};
+function _emi(principal: number, months: number): number {
+  const factor = EMI_FACTORS_9PA[months];
+  if (factor == null) {
+    const r = 0.09 / 12;
+    return Math.round(principal * (r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1));
+  }
+  return Math.round(principal * factor);
+}
+function _fmtInr(n: number): string {
+  return n.toLocaleString("en-IN");
+}
+function buildEmiTable(): string {
+  const variants: Array<{ name: string; onRoad: number }> = [
+    { name: "HF Deluxe Kick",          onRoad: 74698 },
+    { name: "HF Deluxe DRS",           onRoad: 77423 },
+    { name: "HF Deluxe Pro",           onRoad: 83348 },
+    { name: "Splendor AHO",            onRoad: 91272 },
+    { name: "Splendor i3S",            onRoad: 92564 },
+    { name: "Splendor XTEC",           onRoad: 95377 },
+    { name: "Splendor XTEC Disc",      onRoad: 98695 },
+    { name: "Splendor+ XTEC 2.0",      onRoad: 97973 },
+    { name: "Passion Plus",            onRoad: 94605 },
+    { name: "Super Splendor XTEC",     onRoad: 98169 },
+    { name: "Super Splendor XTEC DSS", onRoad: 102777 },
+    { name: "Glamour X DRS",           onRoad: 104555 },
+    { name: "Glamour X DSS",           onRoad: 111587 },
+    { name: "Xtreme 125R IBS",         onRoad: 108088 },
+    { name: "Xtreme 125R ABS",         onRoad: 113247 },
+    { name: "Xtreme 125R ABS DC",      onRoad: 126275 },
+    { name: "Xtreme 160R 2V SD",       onRoad: 130320 },
+    { name: "Xtreme 160R 2V DD",       onRoad: 135224 },
+    { name: "Xtreme 160R 4V",          onRoad: 161109 },
+    { name: "Pleasure+ VX",            onRoad: 89023 },
+    { name: "Pleasure XTEC",           onRoad: 93177 },
+    { name: "Destini 110 VX",          onRoad: 89547 },
+    { name: "Destini 110 ZX",          onRoad: 98775 },
+    { name: "Destini Prime",           onRoad: 90841 },
+    { name: "Destini 125 VX",          onRoad: 95857 },
+    { name: "Destini 125 ZX",          onRoad: 106122 },
+    { name: "Destini 125 ZX+",         onRoad: 107287 },
+    { name: "Xoom 125 VX",             onRoad: 103178 },
+    { name: "Xoom 125 ZX",             onRoad: 110647 },
+  ];
+  const downs = [20000, 30000, 50000];
+  const tenures = [12, 18, 24, 36];
+  const out: string[] = [];
+  for (const v of variants) {
+    out.push(`${v.name} — on-road ₹${_fmtInr(v.onRoad)}`);
+    for (const d of downs) {
+      if (d >= v.onRoad) continue;
+      const loan = v.onRoad - d;
+      const emis = tenures.map((m) => `${m}mo=₹${_fmtInr(_emi(loan, m))}`).join("  ");
+      out.push(`  Down ₹${_fmtInr(d)} → loan ₹${_fmtInr(loan)} → EMI: ${emis}`);
+    }
+  }
+  return out.join("\n");
+}
+const _EMI_TABLE = buildEmiTable();
 
 // Production fallback KB — real prices from the 16.05.2026 dealer price list,
 // grouped BY DISPLACEMENT so the agent can correctly handle "125 batao" /
@@ -548,6 +635,17 @@ Open Mon–Sat 9AM–7PM, Sunday 10AM–5PM. Test rides available daily.
   Xtreme 160R 2V & 4V
   Destini 110, Destini 125, Destini Prime, Pleasure+, Xoom 125
 For any model not listed above, say "main exact colour stock confirm karke batati hoon" — never flat-refuse.
+
+[PRECOMPUTED EMI TABLE — READ THESE NUMBERS DIRECTLY, NEVER COMPUTE]
+9% p.a. reference rate. ALWAYS quote with disclaimer:
+"ye reference EMI hai, actual rate aapke CIBIL score ke hisaab se 8.5%–12% vary kar sakta hai."
+Procedure when customer asks "EMI kitna":
+  1. Find the EXACT variant the customer named in the table below.
+  2. Find the EXACT down-payment row (₹20k / ₹30k / ₹50k) and EXACT tenure column (12/18/24/36 mo).
+  3. Read the number. Quote it. NEVER add, subtract, multiply, or estimate yourself.
+  4. If customer's down or tenure doesn't match a row exactly → quote the closest row and say "approximate hisaab se" + offer to send exact via WhatsApp.
+
+${_EMI_TABLE}
 
 [OFFERS — always-available levers, never say "no offer"]
 1. FINANCE — EMI from ₹1,590/month (₹50k principal, 36mo @ 9% reference). Zero processing fee on Hero FinCorp. 30-min approval.

@@ -518,11 +518,15 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     }
   }
 
-  // Limit turns to keep costs reasonable
-  if (session.turn > 10) {
-    const bye = "धन्यवाद! हम जल्द आपसे संपर्क करेंगे। नमस्ते!";
-    session.transcript.push(`Agent: ${bye}`);
-    await streamTtsToWs(ws, session.streamSid, bye, session.language, session);
+  // Limit turns to keep costs reasonable. PRODUCTION BUG (WA-2026-05-28 14:33):
+  // previous limit of 10 was hanging up hot leads mid-finance-conversation
+  // with a farewell ("dhanyavaad, jald sampark karenge") when customer was
+  // STILL asking about offers/EMIs. Raised to 25, and at the limit we
+  // [TRANSFER] to a sales person instead of a cold goodbye — every
+  // turn-25 conversation has earned a human handoff.
+  if (session.turn > 25) {
+    logger.info({ callSid: session.callSid, turn: session.turn }, "Turn limit reached → transfer to sales");
+    await runTransfer(ws, session, "[TRANSFER] turn limit reached — long conversation, hand to sales");
     return;
   }
 
