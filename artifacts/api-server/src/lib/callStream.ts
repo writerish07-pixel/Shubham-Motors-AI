@@ -45,7 +45,12 @@ import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 const SILENCE_RMS = 0.008;        // Below this → silence
-const SILENCE_CHUNKS = 8;         // 8 × 20 ms = 160 ms silence → trigger STT (snappy turn-taking)
+// 12 × 20 ms = 240 ms silence → trigger STT. Was 160 ms (8 chunks) but
+// production showed customers' natural breath pauses chopped sentences in
+// half (e.g. "देखो… मुझे हीरो स्कूटर के बारे में" → STT only got "देखो"),
+// making it look like Sakshi ignored what they said. 240 ms is still snappy
+// but lets a single natural pause through.
+const SILENCE_CHUNKS = 12;
 const MIN_SPEECH_CHUNKS = 8;      // 8 × 20 ms = 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 600 × 20 ms = 12 s max before forced trigger
 const STT_SAMPLE_RATE = 16000;    // Sarvam STT wants 16 kHz
@@ -81,6 +86,13 @@ interface Session {
   ttsAbort?: boolean;        // set to true to stop the in-flight TTS stream (barge-in)
   bargeInCount?: number;     // consecutive loud frames during TTS
   speakingStartedAt?: number; // ms timestamp; used for barge-in grace period
+  // Monotonic counter incremented at the start of every speaking turn and
+  // on every barge-in. Each queued playback task captures the value at
+  // creation time and refuses to play if it no longer matches — this makes
+  // stale in-flight TTS promises inert even after `ttsAbort` is reset by
+  // runPipeline's finally block (preventing the "old reply audio replays
+  // over customer's new sentence" race).
+  ttsGen: number;
 }
 
 // ── Attach WebSocket server to existing HTTP server ───────────────────────────
@@ -211,6 +223,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     speechCount: 0,
     isProcessing: false,
     isClosed: false,
+    ttsGen: 0,
   };
 
   // Greet immediately — no artificial delay. If we have a pre-cached PCM for
@@ -303,32 +316,55 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
   //    Real customer speech that triggers barge-in will be captured on
   //    subsequent frames once isSpeaking flips false.
   if (session.isSpeaking) {
-    // Once ttsAbort fires, we're already tearing down playback. Don't keep
-    // logging "Barge-in confirmed" every 300 ms — let the pipeline unwind.
-    if (session.ttsAbort) return;
-
-    // Grace period: ignore the first ~600 ms of any agent reply. PSTN warmup
-    // and Sarvam TTS attack often produce a louder leading transient that
-    // looks like speech.
-    const startedAt = session.speakingStartedAt ?? 0;
-    if (startedAt && Date.now() - startedAt < BARGE_IN_GRACE_MS) {
-      return;
-    }
-
-    if (energy > BARGE_IN_RMS) {
-      session.bargeInCount = (session.bargeInCount ?? 0) + 1;
-      if (session.bargeInCount >= BARGE_IN_FRAMES) {
-        session.ttsAbort = true;
-        logger.info({ callSid: session.callSid, energy }, "Barge-in confirmed — stopping TTS");
-        try {
-          ws.send(JSON.stringify({ event: "clear", stream_sid: session.streamSid, streamSid: session.streamSid }));
-        } catch { /* ws closed */ }
-        session.bargeInCount = 0;
-      }
+    // ttsAbort already set in a previous frame → barge-in confirmed earlier
+    // and the pipeline is still unwinding. STOP dropping audio: the
+    // customer is mid-sentence right now, and we must capture it.
+    // Falls through to the normal buffering branch below.
+    if (session.ttsAbort) {
+      session.isSpeaking = false;
+      // fall through (do NOT return)
     } else {
-      session.bargeInCount = 0;
+      // Grace period: ignore the first ~600 ms of any agent reply. PSTN warmup
+      // and Sarvam TTS attack often produce a louder leading transient that
+      // looks like speech.
+      const startedAt = session.speakingStartedAt ?? 0;
+      if (startedAt && Date.now() - startedAt < BARGE_IN_GRACE_MS) {
+        return;
+      }
+
+      if (energy > BARGE_IN_RMS) {
+        session.bargeInCount = (session.bargeInCount ?? 0) + 1;
+        if (session.bargeInCount >= BARGE_IN_FRAMES) {
+          session.ttsAbort = true;
+          // Bump the generation token so any TTS promise that was queued
+          // for the now-aborted turn becomes inert — even if `ttsAbort`
+          // later gets reset by runPipeline's finally before the stale
+          // promise resolves, the gen mismatch will prevent it from ever
+          // calling playPcm8k. Without this guard the customer would hear
+          // old reply audio replay over their new sentence.
+          session.ttsGen++;
+          // CRITICAL: release isSpeaking immediately so the *next* inbound
+          // audio frame buffers for STT instead of being discarded while
+          // the pipeline tears down its in-flight TTS promises. Without
+          // this we saw ~5–10 s of dead air after every barge-in — the
+          // customer kept talking but Sakshi heard nothing because audio
+          // was being dropped while playChain unwound.
+          session.isSpeaking = false;
+          logger.info({ callSid: session.callSid, energy }, "Barge-in confirmed — stopping TTS");
+          try {
+            ws.send(JSON.stringify({ event: "clear", stream_sid: session.streamSid, streamSid: session.streamSid }));
+          } catch { /* ws closed */ }
+          session.bargeInCount = 0;
+          // Fall through so THIS frame's audio is also buffered — the
+          // customer's barge-in word is real speech we want to capture.
+        } else {
+          return; // not enough confirmation yet
+        }
+      } else {
+        session.bargeInCount = 0;
+        return;
+      }
     }
-    return; // ignore inbound audio while agent is speaking
   }
 
   if (energy > SILENCE_RMS) {
@@ -366,6 +402,7 @@ async function handleStop(session: Session): Promise<void> {
   // had already hung up). The pipeline checks ttsAbort/isClosed and exits.
   session.ttsAbort = true;
   session.isSpeaking = false;
+  session.ttsGen++; // invalidate any in-flight TTS promise from before hangup
   const transcript = session.transcript.join("\n");
   if (!transcript || !session.callDbId) return;
 
@@ -503,12 +540,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     session.ttsAbort = false;
     session.bargeInCount = 0;
     session.speakingStartedAt = Date.now();
+    const myGen = ++session.ttsGen;
     let actuallyPlayed = false;
     try {
       const pcm = await synthesizeTts(fastReply, session.language); // phrase-cache hit
-      if (pcm && !session.ttsAbort && !session.isClosed && ws.readyState === WebSocket.OPEN) {
+      if (pcm && !session.ttsAbort && !session.isClosed && session.ttsGen === myGen && ws.readyState === WebSocket.OPEN) {
         await playPcm8k(ws, session.streamSid, pcm, session);
-        if (!session.ttsAbort) actuallyPlayed = true;
+        if (!session.ttsAbort && session.ttsGen === myGen) actuallyPlayed = true;
       }
     } finally {
       session.isSpeaking = false;
@@ -542,6 +580,11 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.ttsAbort = false;
   session.bargeInCount = 0;
   session.speakingStartedAt = Date.now();
+  // Capture this turn's generation token. Every queued playback task checks
+  // it before sending audio so a barge-in (which increments ttsGen) makes
+  // every still-in-flight TTS for THIS turn a no-op, regardless of when
+  // their Sarvam HTTP requests eventually return.
+  const myGen = ++session.ttsGen;
 
   // Track sentences that ACTUALLY made it to the customer's ear (TTS
   // succeeded + playback completed without abort). The transcript / LLM
@@ -553,6 +596,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   let transferText: string | null = null;
   let attemptedCount = 0;
   let ttsFailures = 0;
+
+  // Hard cap on how many sentences we'll actually pipeline to TTS, regardless
+  // of what the LLM decides to emit. max_tokens=70 is a soft hint and Hindi
+  // can fit 3+ sentences in 70 tokens (production showed a 24-second Zoom 125
+  // monologue that the customer couldn't interrupt fast enough). 2 sentences
+  // keeps every reply under ~6 s of audio so barge-in stays usable.
+  const MAX_REPLY_SENTENCES = 2;
 
   try {
     for await (const sentence of generateAgentReplyStream(correctedText, session.history, session.leadName, session.language)) {
@@ -570,12 +620,19 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         const pcm = await myTts;
         await prev;
         if (!pcm) { ttsFailures++; return; }
-        if (session.ttsAbort || ws.readyState !== WebSocket.OPEN) return;
+        // Generation guard: if barge-in / next turn / call-end bumped
+        // ttsGen since this task was queued, drop on the floor.
+        if (session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
         await playPcm8k(ws, session.streamSid, pcm, session);
-        if (!session.ttsAbort) played.push(sentence);
+        if (!session.ttsAbort && session.ttsGen === myGen) played.push(sentence);
       })();
+      if (attemptedCount >= MAX_REPLY_SENTENCES) break;
     }
-    await playChain;
+    // On barge-in we deliberately DO NOT wait for in-flight TTS promises to
+    // resolve — they'll finish in the background and become no-ops because
+    // ttsAbort is checked again before playback. Waiting here was the source
+    // of the dead-air window after barge-in.
+    if (!session.ttsAbort && !session.isClosed) await playChain;
   } finally {
     session.isSpeaking = false;
     session.ttsAbort = false;
@@ -756,15 +813,23 @@ async function playPcm8k(ws: WebSocket, streamSid: string, pcm8k: Int16Array, se
 // goodbye, sorry). Manages session.isSpeaking lifecycle.
 async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, language: string, session?: Session): Promise<void> {
   if (ws.readyState !== WebSocket.OPEN) return;
+  // Capture a generation token for this one-shot line. If a barge-in /
+  // next turn / hangup bumps ttsGen before our synth resolves, we drop
+  // the audio on the floor instead of replaying it over the customer.
+  let myGen = 0;
   if (session) {
     session.isSpeaking = true;
     session.ttsAbort = false;
     session.bargeInCount = 0;
     session.speakingStartedAt = Date.now();
+    myGen = ++session.ttsGen;
   }
   try {
     const pcm = await synthesizeTts(text, language);
-    if (pcm) await playPcm8k(ws, streamSid, pcm, session);
+    if (!pcm) return;
+    if (session && (session.ttsAbort || session.isClosed || session.ttsGen !== myGen)) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
+    await playPcm8k(ws, streamSid, pcm, session);
   } finally {
     if (session) {
       session.isSpeaking = false;
