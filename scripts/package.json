@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "transcribe": "tsx ./src/transcribe-audio.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "openai": "^6.38.0"
   },
   "devDependencies": {
     "@types/node": "catalog:",
