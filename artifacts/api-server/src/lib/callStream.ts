@@ -20,6 +20,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
+import { detectIntent, getCachedPhrasePcm, warmPhraseCache } from "./voiceFastPath";
 import { generateAgentReplyStream, analyzeCallIntent, learnFromTranscript, buildKnowledgeContext, getJaipurFuelPrice } from "./openai";
 import { sendCallSummaryWhatsApp } from "./whatsapp";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
@@ -272,6 +273,13 @@ async function warmGreetingCache(): Promise<void> {
 // real call falls back to a live TTS call automatically.
 void warmGreetingCache();
 
+// Warm the intent / phrase cache too — same idea, ~20 stock replies pre-
+// synthesized so the agent can respond to "haan", "address kya hai", etc.
+// in ~200 ms instead of ~1.5 s. Sequential inside warmPhraseCache to be
+// nice to Sarvam at boot. Failures are logged but non-fatal — uncached
+// phrases just fall through to a live TTS call.
+void warmPhraseCache((text) => synthesizeTts(text, "hi-IN"));
+
 async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, unknown>): Promise<void> {
   const media = (msg.media ?? {}) as Record<string, unknown>;
   const payload = String(media.payload ?? "");
@@ -474,17 +482,61 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     logger.info({ callSid: session.callSid, before: customerText, after: correctedText }, "STT alias corrected");
   }
 
+  // ── Intent fast-path ──────────────────────────────────────────────────────
+  // For short common replies ("haan", "theek hai", "address kya hai", "test
+  // ride", "EMI", "thanks", "busy", "callback") skip the LLM entirely and
+  // play a cached Sakshi response. Cuts those turns from ~10 s to ~1 s and
+  // also eliminates a class of hallucinations because there's no LLM in the
+  // loop. Skipped on turn 0 so the LLM still handles greeting + name capture.
+  const fastReply = detectIntent(correctedText, session.turn);
+  if (fastReply) {
+    // Push the user turn immediately (it really was said), but DEFER pushing
+    // the assistant turn until playback confirms — mirrors the LLM path's
+    // `played[]` discipline so a TTS failure / barge-in / call-end mid-turn
+    // never leaves the transcript claiming Sakshi said something the
+    // customer didn't actually hear.
+    session.history.push({ role: "user", content: customerText });
+    if (session.history.length > 12) {
+      session.history.splice(0, session.history.length - 12);
+    }
+    session.isSpeaking = true;
+    session.ttsAbort = false;
+    session.bargeInCount = 0;
+    session.speakingStartedAt = Date.now();
+    let actuallyPlayed = false;
+    try {
+      const pcm = await synthesizeTts(fastReply, session.language); // phrase-cache hit
+      if (pcm && !session.ttsAbort && !session.isClosed && ws.readyState === WebSocket.OPEN) {
+        await playPcm8k(ws, session.streamSid, pcm, session);
+        if (!session.ttsAbort) actuallyPlayed = true;
+      }
+    } finally {
+      session.isSpeaking = false;
+      session.ttsAbort = false;
+      session.bargeInCount = 0;
+      session.speakingStartedAt = undefined;
+    }
+    if (actuallyPlayed) {
+      session.history.push({ role: "assistant", content: fastReply });
+      session.transcript.push(`Agent: ${fastReply}`);
+    }
+    logger.info({ callSid: session.callSid, agentText: actuallyPlayed ? fastReply : "", played: actuallyPlayed ? 1 : 0, source: "fastpath" }, "Agent reply");
+    return;
+  }
+
   // ── Streaming LLM → pipelined TTS ─────────────────────────────────────────
   // We yield sentence-sized chunks from the LLM and start TTS on each as soon
   // as it arrives. While sentence N is being played, the synth for N+1 is
   // already in flight — this collapses end-to-end latency by ~3 s per turn.
   session.history.push({ role: "user", content: customerText });
-  // Cap conversation history at the last 16 messages (~8 exchanges). Every
-  // extra turn adds ~50–200 ms to LLM first-token latency because the model
-  // re-reads the whole call. The KB context + system prompt already give
-  // Sakshi all the long-term grounding she needs.
-  if (session.history.length > 16) {
-    session.history.splice(0, session.history.length - 16);
+  // Cap conversation history at the last 12 messages (6 exchanges). The
+  // legacy Python code trimmed to 6 exchanges and that was proven in
+  // production — going further than that just inflates the prompt without
+  // helping the model. Smaller prompt = faster first token + lower
+  // hallucination risk (the model can't drift into "remembering" facts from
+  // 10 turns ago that weren't actually said).
+  if (session.history.length > 12) {
+    session.history.splice(0, session.history.length - 12);
   }
   session.isSpeaking = true;
   session.ttsAbort = false;
@@ -621,6 +673,12 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 // requests — a single retry recovers most of them and prevents the customer
 // from hearing only some sentences of a multi-sentence reply).
 async function synthesizeTts(text: string, language: string): Promise<Int16Array | null> {
+  // Phrase-cache hit: skip Sarvam entirely. Cached PCM has already been gain-
+  // limited (it was synthesized via this same function during warm), so we
+  // return it directly. Cache is keyed by language to prevent serving Hindi
+  // audio inside an English call.
+  const cached = getCachedPhrasePcm(text, language);
+  if (cached) return cached;
   try {
     let ttsB64 = await textToSpeech(text, language);
     if (!ttsB64) {

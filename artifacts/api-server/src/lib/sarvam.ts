@@ -4,6 +4,15 @@ import { prepareTtsText } from "./ttsPrep";
 
 const SARVAM_BASE = "https://api.sarvam.ai";
 
+// Hard timeouts — production showed Sarvam occasionally hangs for 30+ s on
+// transient infrastructure issues. Without a tight cap the customer hears
+// dead air for the full hang. Sane defaults: STT 6 s, TTS 5 s, LID 3 s.
+// These match the legacy Python code's `*_TIMEOUT_SEC` constants which were
+// proven in production.
+const STT_TIMEOUT_MS = 6_000;
+const TTS_TIMEOUT_MS = 5_000;
+const LID_TIMEOUT_MS = 3_000;
+
 function key() {
   return process.env.SARVAM_API_KEY ?? "";
 }
@@ -44,7 +53,7 @@ export async function speechToText(
           "api-subscription-key": key(),
           // axios + FormData sets Content-Type automatically (multipart/form-data + boundary)
         },
-        timeout: 30000,
+        timeout: STT_TIMEOUT_MS,
       }
     );
 
@@ -92,7 +101,7 @@ export async function textToSpeech(
           "api-subscription-key": key(),
           "Content-Type": "application/json",
         },
-        timeout: 20000,
+        timeout: TTS_TIMEOUT_MS,
       }
     );
     const audios: string[] = response.data?.audios ?? [];
@@ -114,7 +123,7 @@ export async function detectLanguage(text: string): Promise<string> {
           "api-subscription-key": key(),
           "Content-Type": "application/json",
         },
-        timeout: 5000,
+        timeout: LID_TIMEOUT_MS,
       }
     );
     return response.data?.language_code ?? "hi-IN";
