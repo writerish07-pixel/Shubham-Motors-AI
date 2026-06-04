@@ -26,6 +26,11 @@ import { logger } from "./logger";
 const _outboundContext = new Map<string, { profile: OutboundLeadContext; expiresAt: number }>();
 const CONTEXT_TTL_MS = 5 * 60_000;
 
+// A follow-up sits in 'dialing' between placing the call and receiving the
+// Exotel status webhook. If no webhook arrives within this window the call has
+// certainly ended, so the due-query re-surfaces the row for retry/fallback.
+const STALE_DIALING_MS = 15 * 60_000;
+
 export interface OutboundLeadContext {
   name: string;
   interestedModel?: string | null;
@@ -49,6 +54,73 @@ export function getOutboundContext(phone: string): OutboundLeadContext | null {
 
 function setOutboundContext(phone: string, ctx: OutboundLeadContext): void {
   _outboundContext.set(ctxKey(phone), { profile: ctx, expiresAt: Date.now() + CONTEXT_TTL_MS });
+}
+
+/**
+ * Resolve the outcome of an outbound auto-dialer call, called by the Exotel
+ * status webhook when a call reaches a terminal state. This is the single
+ * owner of outbound follow-up retry policy.
+ *
+ *   answered === true   → mark the linked follow-up 'completed'
+ *   answered === false  → if attempts remain, reschedule 'pending' (+retryDelay);
+ *                         otherwise send a WhatsApp fallback and mark it.
+ *
+ * Finds the follow-up via callId (set to 'dialing' by the scheduler when it
+ * placed the call). A no-op if there is no matching 'dialing' follow-up
+ * (e.g. an inbound call, or one already resolved / re-dialed).
+ */
+export async function resolveOutboundFollowupOutcome(
+  callId: number,
+  answered: boolean,
+): Promise<void> {
+  const [fu] = await db
+    .select()
+    .from(followupsTable)
+    .where(and(eq(followupsTable.callId, callId), eq(followupsTable.status, "dialing")));
+
+  if (!fu) return;
+
+  const attemptCount = fu.attemptCount ?? 0;
+  const maxAttempts = fu.maxAttempts ?? defaultConfig.maxAttemptsPerFollowup;
+
+  // Decide the next state, then claim the row with a single guarded UPDATE
+  // (WHERE id AND status='dialing'). Exotel can deliver the same terminal
+  // webhook more than once and the scheduler may concurrently re-dial a stale
+  // row; the guard ensures exactly one caller wins the transition, so side
+  // effects (WhatsApp fallback) fire at most once.
+  let nextStatus: string;
+  let nextScheduledAt: Date | undefined;
+  if (answered) {
+    nextStatus = "completed";
+  } else if (attemptCount >= maxAttempts) {
+    nextStatus = "whatsapp_fallback";
+  } else {
+    nextStatus = "pending";
+    nextScheduledAt = new Date(Date.now() + defaultConfig.retryDelayMinutes * 60_000);
+  }
+
+  const claimed = await db.update(followupsTable)
+    .set(nextScheduledAt ? { status: nextStatus, scheduledAt: nextScheduledAt } : { status: nextStatus })
+    .where(and(eq(followupsTable.id, fu.id), eq(followupsTable.status, "dialing")))
+    .returning({ id: followupsTable.id });
+
+  if (claimed.length === 0) return; // a concurrent webhook already resolved it
+
+  if (answered) {
+    logger.info({ followupId: fu.id, callId }, "Outbound follow-up answered — marked completed");
+  } else if (nextStatus === "whatsapp_fallback") {
+    const [lead] = await db.select().from(leadsTable).where(eq(leadsTable.id, fu.leadId));
+    if (lead?.phone) {
+      const msg = `नमस्ते ${lead.name || ""} जी! 🙏 हमने कई बार call करने की कोशिश की लेकिन connect नहीं हो सका। अगर आप Hero bike या scooter के बारे में जानकारी चाहते हैं, तो हमें इस नंबर पर WhatsApp या call करें। — Shubham Motors, Jaipur 🏍️`;
+      await sendWhatsAppMessage(lead.phone, msg).catch(() => {});
+    }
+    logger.info({ followupId: fu.id, callId, attemptCount }, "Outbound follow-up exhausted retries — WhatsApp fallback");
+  } else {
+    logger.info(
+      { followupId: fu.id, callId, attempt: attemptCount, retryAt: nextScheduledAt?.toISOString() },
+      "Outbound follow-up not answered — rescheduled for retry",
+    );
+  }
 }
 
 // ─── IST helpers ──────────────────────────────────────────────────────────────
@@ -177,7 +249,9 @@ export async function runAutoDialer(): Promise<RunResult> {
         // NEW: retry tracking fields (will be null if columns not yet migrated — handled below)
         attemptCount: (followupsTable as any).attemptCount,
         maxAttempts: (followupsTable as any).maxAttempts,
+        lastAttemptAt: (followupsTable as any).lastAttemptAt,
         outboundContext: (followupsTable as any).outboundContext,
+        status: followupsTable.status,
         leadName: leadsTable.name,
         leadPhone: leadsTable.phone,
         leadStatus: leadsTable.status,
@@ -189,9 +263,19 @@ export async function runAutoDialer(): Promise<RunResult> {
       .from(followupsTable)
       .leftJoin(leadsTable, eq(followupsTable.leadId, leadsTable.id))
       .where(
-        and(
-          eq(followupsTable.status, "pending"),
-          lte(followupsTable.scheduledAt, now),
+        or(
+          // Normal due follow-ups
+          and(
+            eq(followupsTable.status, "pending"),
+            lte(followupsTable.scheduledAt, now),
+          ),
+          // Recovery: a 'dialing' row whose status webhook never arrived.
+          // After STALE_DIALING_MS the call has certainly terminated, so we
+          // re-surface it and let the attempt/retry logic dial again or fall back.
+          and(
+            eq(followupsTable.status, "dialing"),
+            lte((followupsTable as any).lastAttemptAt, new Date(now.getTime() - STALE_DIALING_MS)),
+          ),
         )
       )
       .limit(schedulerStatus.config.maxCallsPerRun);
@@ -237,6 +321,30 @@ export async function runAutoDialer(): Promise<RunResult> {
         continue;
       }
 
+      // Atomically claim this follow-up before dialing. A concurrent status
+      // webhook only ever moves a row OFF 'dialing', so guarding on the exact
+      // status we selected guarantees we never redial a row that was just
+      // resolved (prevents duplicate calls during stale-'dialing' recovery).
+      // The claim also records this attempt (status/attemptCount/lastAttemptAt),
+      // so the success/failure branches below must NOT increment again.
+      const claimed = await db.update(followupsTable)
+        .set({
+          status: "dialing",
+          attemptCount: attemptCount + 1,
+          lastAttemptAt: new Date(),
+        })
+        .where(and(
+          eq(followupsTable.id, followup.followupId),
+          eq(followupsTable.status, followup.status),
+        ))
+        .returning({ id: followupsTable.id });
+
+      if (claimed.length === 0) {
+        result.skipped++;
+        result.details.push({ followupId: followup.followupId, leadName: followup.leadName, phone: followup.leadPhone, success: false, reason: "Resolved by status webhook before dial — skipped" });
+        continue;
+      }
+
       result.attempted++;
 
       try {
@@ -255,23 +363,22 @@ export async function runAutoDialer(): Promise<RunResult> {
         const callSid = await makeOutboundCall(followup.leadPhone, callbackUrl);
 
         if (callSid) {
-          await db.insert(callsTable).values({
+          const [newCall] = await db.insert(callsTable).values({
             leadId: followup.leadId,
             direction: "outbound",
             status: "initiated",
             exotelCallSid: callSid,
-          });
+          }).returning();
 
-          // Record the attempt. Initiation succeeded, so mark the follow-up
-          // 'completed' (no answer-status webhook exists yet to drive no-answer
-          // retries — that is a tracked future gap). attemptCount/lastAttemptAt
-          // are still written so analytics and the retry-limit path stay accurate.
+          // Initiation succeeded — the call is now ringing. The claim above
+          // already set status='dialing' and recorded the attempt; here we only
+          // link the call so the Exotel status webhook can resolve the outcome:
+          //   answered            → resolveOutboundFollowupOutcome marks 'completed'
+          //   no-answer/busy/fail → retry (reschedule 'pending') or WhatsApp fallback
+          // A 'dialing' row is skipped by the due-query until the webhook resolves
+          // it, or until it goes stale (webhook never arrived) and is recovered.
           await db.update(followupsTable)
-            .set({
-              status: "completed",
-              attemptCount: attemptCount + 1,
-              lastAttemptAt: new Date(),
-            })
+            .set({ callId: newCall.id })
             .where(eq(followupsTable.id, followup.followupId));
 
           if (schedulerStatus.config.notifyWhatsApp) {
@@ -292,15 +399,15 @@ export async function runAutoDialer(): Promise<RunResult> {
         result.failed++;
         const errMsg = err instanceof Error ? err.message : String(err);
 
-        // Initiation failed — increment attempt count and reschedule the retry.
-        // Once attemptCount reaches maxAttempts, the retry-limit check at the top
-        // of the next run sends the WhatsApp fallback instead of dialing again.
+        // Initiation failed — the claim already incremented attemptCount and set
+        // status='dialing', so reset the row to 'pending' and reschedule. Once
+        // attemptCount reaches maxAttempts, the retry-limit check at the top of
+        // the next run sends the WhatsApp fallback instead of dialing again.
         const nextAttempt = new Date(Date.now() + schedulerStatus.config.retryDelayMinutes * 60_000);
         await db.update(followupsTable)
           .set({
+            status: "pending",
             scheduledAt: nextAttempt,
-            attemptCount: attemptCount + 1,
-            lastAttemptAt: new Date(),
           })
           .where(eq(followupsTable.id, followup.followupId));
 

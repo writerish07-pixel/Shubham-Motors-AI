@@ -1,2 +1,3 @@
 - [KB merge invariant](sakshi-kb-and-emi.md) — DEFAULT_HERO_KNOWLEDGE must ALWAYS be in the prompt; admin KB appends, never replaces. Also: LLM never does EMI math.
 - [Outbound personalization wiring](sakshi-outbound-context.md) — ExoML must pass `direction` Parameter; outbound-context map keyed by last-10 phone digits on BOTH sides.
+- [Outbound retry state machine](sakshi-outbound-retry.md) — follow-up pending→dialing→(completed|pending|whatsapp_fallback); status webhook drives retries via resolveOutboundFollowupOutcome; attemptCount incremented once by scheduler claim; guarded UPDATEs prevent duplicate calls/sends.

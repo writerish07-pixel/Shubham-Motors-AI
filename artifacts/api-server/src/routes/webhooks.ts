@@ -4,6 +4,7 @@ import { db, callsTable, leadsTable, followupsTable, campaignRecipientsTable, ca
 import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "../lib/openai";
 import { speechToText, detectLanguage } from "../lib/sarvam";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "../lib/whatsapp";
+import { resolveOutboundFollowupOutcome } from "../lib/scheduler";
 import { knowledgeTable } from "@workspace/db";
 import { logger } from "../lib/logger";
 import axios from "axios";
@@ -343,6 +344,18 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
     await db.update(callsTable)
       .set({ status: dbStatus, duration: Duration ? parseInt(Duration) : null })
       .where(eq(callsTable.exotelCallSid, CallSid));
+  }
+
+  // Resolve the auto-dialer follow-up that spawned this outbound call.
+  // Terminal statuses only: answered (completed) → done; missed/failed → retry
+  // or WhatsApp fallback. The resolver no-ops for inbound calls / already-resolved
+  // follow-ups, so it's safe to call unconditionally on terminal states.
+  if (callRecord.direction === "outbound" && ["completed", "missed", "failed"].includes(dbStatus)) {
+    try {
+      await resolveOutboundFollowupOutcome(callRecord.id, dbStatus === "completed");
+    } catch (err) {
+      req.log.error({ err, CallSid, callId: callRecord.id }, "Failed to resolve outbound follow-up outcome");
+    }
   }
 
   conversations.delete(CallSid);
