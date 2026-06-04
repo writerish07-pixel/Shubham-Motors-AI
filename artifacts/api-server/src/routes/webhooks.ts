@@ -1,7 +1,7 @@
 import { Router, type IRouter, type Request } from "express";
 import { eq, desc, and, gte } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, campaignRecipientsTable, campaignsTable } from "@workspace/db";
-import { generateAgentReply, analyzeCallIntent, learnFromTranscript } from "../lib/openai";
+import { generateAgentReply, analyzeCallIntent, learnFromTranscript, computeFollowupDate } from "../lib/openai";
 import { speechToText, detectLanguage } from "../lib/sarvam";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "../lib/whatsapp";
 import { resolveOutboundFollowupOutcome } from "../lib/scheduler";
@@ -167,7 +167,7 @@ router.all("/webhooks/exotel/recording", async (req, res): Promise<void> => {
   const recordingUrl = params.RecordingUrl ?? params.recordingUrl ?? "";
   const digits = params.Digits ?? "";
 
-  req.log.info({ callSid, recordingUrl }, "Recording received");
+  req.log.info({ callSid, recordingUrl, digits }, "Recording received");
 
   const convo = conversations.get(callSid);
   const host = getHost(req);
@@ -177,6 +177,32 @@ router.all("/webhooks/exotel/recording", async (req, res): Promise<void> => {
     const bye = "धन्यवाद! हम जल्द ही आपसे संपर्क करेंगे। शुभम मोटर्स में कॉल के लिए शुक्रिया।";
     res.set("Content-Type", "text/xml").send(exoml(sayTag(bye)));
     return;
+  }
+
+  // FIX: DTMF fallback — if customer pressed a key, handle it
+  // This fires when audio quality is too poor for STT or customer prefers keypress
+  if (digits) {
+    if (digits === "1") {
+      // Press 1 = transfer to sales
+      const salesNum = process.env.SALES_TRANSFER_NUMBER ?? "";
+      if (salesNum) {
+        const msg = "एक मिनट, मैं आपको हमारे sales expert से connect कर रही हूँ। Line पर रहिए।";
+        res.set("Content-Type", "text/xml").send(exoml(sayTag(msg) + `<Dial>${escapeXml(salesNum)}</Dial>`));
+      } else {
+        const msg = "एक मिनट, मैं आपकी details note कर लेती हूँ। हम 5 मिनट में call back करेंगे।";
+        res.set("Content-Type", "text/xml").send(exoml(sayTag(msg)));
+      }
+      return;
+    }
+    if (digits === "2") {
+      // Press 2 = schedule callback
+      const msg = "जी बिल्कुल! हम आपको जल्द ही call करेंगे। आपका दिन शुभ हो।";
+      res.set("Content-Type", "text/xml").send(exoml(sayTag(msg)));
+      return;
+    }
+    if (digits === "#") {
+      // End of recording marker — fall through to STT processing
+    }
   }
 
   convo.turn++;
@@ -279,7 +305,9 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
 
   if (dbStatus === "completed" && fullTranscript) {
     try {
-      const analysis = await analyzeCallIntent(fullTranscript);
+      // FIX: pass session language so summary is generated in Hindi for Hindi calls
+      const sessionLang = convo?.language ?? "hi-IN";
+      const analysis = await analyzeCallIntent(fullTranscript, sessionLang);
 
       await db.update(callsTable)
         .set({
@@ -294,6 +322,7 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
         .where(eq(callsTable.exotelCallSid, CallSid));
 
       const newStatus = analysis.score >= 80 ? "hot" : analysis.score >= 50 ? "interested" : "contacted";
+      // FIX: persist all new CRM intelligence fields extracted from this call
       await db.update(leadsTable)
         .set({
           score: analysis.score,
@@ -301,33 +330,49 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
           language: analysis.language,
           intentSummary: analysis.summary,
           lastCallId: callRecord.id,
-        })
+          // Only fill interestedModel when the lead doesn't already have one —
+          // never clobber a manually-set / previously-confirmed model with a
+          // weaker LLM inference. COALESCE keeps any existing value.
+          ...(analysis.preferredModel ? { interestedModel: sql`COALESCE(${leadsTable.interestedModel}, ${analysis.preferredModel})` } : {}),
+          ...(analysis.familyInfo ? { familyInfo: analysis.familyInfo } : {}),
+          ...(analysis.competitorMentioned ? { competitorMentioned: analysis.competitorMentioned } : {}),
+          ...(analysis.competitorReason ? { competitorReason: analysis.competitorReason } : {}),
+          ...(analysis.buyingTimeline ? { buyingTimeline: analysis.buyingTimeline } : {}),
+        } as any)
         .where(eq(leadsTable.id, callRecord.leadId));
 
-      if (analysis.followupDate && analysis.followupReason) {
+      // FIX: use computeFollowupDate() smart rules instead of raw LLM date
+      const followupSchedule = computeFollowupDate(
+        analysis.intent,
+        analysis.score,
+        analysis.buyingTimeline,
+        null,
+      );
+      if (followupSchedule) {
         await db.insert(followupsTable).values({
           leadId: callRecord.leadId,
-          scheduledAt: new Date(analysis.followupDate),
-          reason: analysis.followupReason,
+          scheduledAt: followupSchedule.date,
+          reason: followupSchedule.reason,
           intentLabel: analysis.intent,
           callId: callRecord.id,
           status: "pending",
-        });
+        } as any);
         await db.update(leadsTable)
-          .set({ nextFollowupAt: new Date(analysis.followupDate) })
+          .set({ nextFollowupAt: followupSchedule.date })
           .where(eq(leadsTable.id, callRecord.leadId));
       }
 
       const [lead] = await db.select().from(leadsTable).where(eq(leadsTable.id, callRecord.leadId));
       if (lead) {
-        const sent = await sendCallSummaryWhatsApp(lead.phone, lead.name, analysis.summary, lead.interestedModel);
+        // FIX: pass session language so WhatsApp summary is in Hindi for Hindi customers
+        const sent = await sendCallSummaryWhatsApp(lead.phone, lead.name, analysis.summary, lead.interestedModel, sessionLang);
         if (sent) {
           await db.update(callsTable).set({ whatsappSent: true }).where(eq(callsTable.id, callRecord.id));
         }
         if (lead.interestedModel) {
           const [brochure] = await db.select().from(knowledgeTable).where(eq(knowledgeTable.category, "brochure"));
           if (brochure?.fileUrl) {
-            await sendBrochureWhatsApp(lead.phone, lead.name, lead.interestedModel, brochure.fileUrl);
+            await sendBrochureWhatsApp(lead.phone, lead.name, lead.interestedModel, brochure.fileUrl, sessionLang);
           }
         }
       }

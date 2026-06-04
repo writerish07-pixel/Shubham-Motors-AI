@@ -13,7 +13,7 @@
  */
 
 import cron from "node-cron";
-import { and, eq, lte, or } from "drizzle-orm";
+import { and, eq, lte, or, sql } from "drizzle-orm";
 import { db, followupsTable, leadsTable, callsTable } from "@workspace/db";
 import { makeOutboundCall } from "./exotel";
 import { sendWhatsAppMessage } from "./whatsapp";
@@ -465,8 +465,60 @@ export function startScheduler(): void {
   });
   schedulerStatus.nextRun = computeNextRun(expr);
   logger.info({ expr, nextRun: schedulerStatus.nextRun }, "Auto-dialer scheduler started");
+
+  // Weekly KB digest — every Monday 9am IST (Monday 3:30am UTC)
+  cron.schedule("30 3 * * 1", async () => {
+    logger.info("Weekly KB digest cron triggered");
+    await sendWeeklyKbDigest();
+  });
 }
 
 export function stopScheduler(): void {
   if (cronTask) { cronTask.stop(); cronTask = null; logger.info("Auto-dialer scheduler stopped"); }
+}
+
+// ── Weekly KB self-learning digest ───────────────────────────────────────────
+// Every Monday 9am IST: counts pending review items and sends a WhatsApp
+// digest to the dealer admin (DEALER_ADMIN_PHONE env var).
+// Items sit in requiresReview=true state by default — this makes sure
+// the admin notices them instead of them piling up unseen.
+async function sendWeeklyKbDigest(): Promise<void> {
+  const adminPhone = process.env.DEALER_ADMIN_PHONE;
+  if (!adminPhone) {
+    logger.info("DEALER_ADMIN_PHONE not set — skipping weekly KB digest");
+    return;
+  }
+
+  try {
+    const rows = await db.execute(sql`
+      SELECT
+        COUNT(*) FILTER (WHERE content LIKE '%[agent_mistake]%') AS mistakes,
+        COUNT(*) FILTER (WHERE content LIKE '%[new_objection]%') AS objections,
+        COUNT(*) FILTER (WHERE content LIKE '%[missing_info]%') AS missing,
+        COUNT(*) FILTER (WHERE content LIKE '%[price_correction]%') AS prices,
+        COUNT(*) AS total
+      FROM knowledge WHERE requires_review = true AND is_active = false
+    `);
+    const r = (rows.rows[0] as any) ?? {};
+    const total = parseInt(r.total || "0");
+
+    if (total === 0) {
+      logger.info("Weekly KB digest: no pending items, skipping WhatsApp");
+      return;
+    }
+
+    const msg =
+      `📚 *Shubham Motors — Weekly Learning Report*\n\n` +
+      `Sakshi ने इस हफ्ते ${total} नई चीज़ें सीखीं जो आपके review का इंतज़ार कर रही हैं:\n\n` +
+      (parseInt(r.mistakes || "0") > 0 ? `⚠️ Agent mistakes: ${r.mistakes}\n` : "") +
+      (parseInt(r.objections || "0") > 0 ? `💬 New objections: ${r.objections}\n` : "") +
+      (parseInt(r.missing || "0") > 0 ? `❓ Missing info: ${r.missing}\n` : "") +
+      (parseInt(r.prices || "0") > 0 ? `💰 Price corrections: ${r.prices}\n` : "") +
+      `\nKnowledge tab में जाकर approve/reject करें ताकि Sakshi और बेहतर हो सके।`;
+
+    await sendWhatsAppMessage(adminPhone, msg);
+    logger.info({ total, adminPhone }, "Weekly KB digest sent");
+  } catch (err) {
+    logger.error({ err }, "Weekly KB digest failed");
+  }
 }

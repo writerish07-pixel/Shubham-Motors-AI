@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
-const STATUSES = ["", "pending", "completed", "cancelled", "failed"];
+const STATUSES = ["", "pending", "completed", "cancelled", "failed", "whatsapp_fallback", "dialing"];
 
 export default function Followups() {
   const [statusFilter, setStatusFilter] = useState("pending");
@@ -119,9 +119,15 @@ export default function Followups() {
                     </Link>
                     {f.leadPhone && <span className="text-xs text-muted-foreground">{f.leadPhone}</span>}
                     {isOverdue && <span className="text-xs text-red-400 font-medium">OVERDUE</span>}
+                    {(f.status as string) === "whatsapp_fallback" && <span className="text-xs text-purple-400 font-medium">WA FALLBACK</span>}
                   </div>
                   <div className="text-xs text-muted-foreground mt-0.5">{f.reason}</div>
                   {f.intentLabel && <div className="text-[10px] text-muted-foreground/70 mt-0.5">Intent: {f.intentLabel}</div>}
+                  {(f as any).attemptCount > 0 && (
+                    <div className="text-[10px] text-amber-500 mt-0.5">
+                      Attempt {(f as any).attemptCount}/{(f as any).maxAttempts ?? 3}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">

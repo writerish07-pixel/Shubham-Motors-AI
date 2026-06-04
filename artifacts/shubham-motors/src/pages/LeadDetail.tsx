@@ -110,7 +110,7 @@ export default function LeadDetail() {
                 {editing ? (
                   <Input value={editForm[key] ?? ""} onChange={(e) => setEditForm(f => ({ ...f, [key]: e.target.value }))} className="h-8 text-sm" />
                 ) : (
-                  <div className="text-sm text-foreground">{(lead as Record<string, unknown>)[key] as string || "—"}</div>
+                  <div className="text-sm text-foreground">{(lead as unknown as Record<string, unknown>)[key] as string || "—"}</div>
                 )}
               </div>
             ))}
@@ -150,6 +150,31 @@ export default function LeadDetail() {
             <div className="flex justify-between"><span className="text-muted-foreground text-xs">Next Follow-up</span><span>{lead.nextFollowupAt ? new Date(lead.nextFollowupAt).toLocaleDateString("en-IN") : "—"}</span></div>
             <div className="flex justify-between"><span className="text-muted-foreground text-xs">Created</span><span>{new Date(lead.createdAt).toLocaleDateString("en-IN")}</span></div>
           </div>
+
+          {/* CRM Intelligence — populated by Sakshi from calls */}
+          {((lead as any).dailyKm || (lead as any).budget || (lead as any).familyInfo || (lead as any).currentVehicle || (lead as any).competitorMentioned || (lead as any).buyingTimeline || (lead as any).occupation) && (
+            <div className="bg-card border border-card-border rounded-lg p-4 space-y-2 text-sm">
+              <div className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">What Sakshi Learned</div>
+              {(lead as any).dailyKm && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Daily km</span><span>{(lead as any).dailyKm} km/day</span></div>}
+              {(lead as any).budget && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Budget</span><span>₹{((lead as any).budget as number).toLocaleString("en-IN")}</span></div>}
+              {(lead as any).currentVehicle && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Current vehicle</span><span>{(lead as any).currentVehicle}</span></div>}
+              {(lead as any).occupation && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Occupation</span><span>{(lead as any).occupation}</span></div>}
+              {(lead as any).buyingTimeline && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Timeline</span><span className="capitalize">{(lead as any).buyingTimeline}</span></div>}
+              {(lead as any).competitorMentioned && (
+                <div className="pt-1 border-t border-border">
+                  <div className="text-muted-foreground text-xs mb-1">Comparing with</div>
+                  <div className="text-sm font-medium">{(lead as any).competitorMentioned}</div>
+                  {(lead as any).competitorReason && <div className="text-xs text-muted-foreground">Reason: {(lead as any).competitorReason}</div>}
+                </div>
+              )}
+              {(lead as any).familyInfo && (
+                <div className="pt-1 border-t border-border">
+                  <div className="text-muted-foreground text-xs mb-1">Family info</div>
+                  <div className="text-xs text-foreground">{(lead as any).familyInfo}</div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
