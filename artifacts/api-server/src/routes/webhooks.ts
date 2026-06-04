@@ -152,6 +152,7 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
       `<Parameter name="from" value="${escapeXml(From ?? "")}"/>` +
       `<Parameter name="call_sid" value="${escapeXml(CallSid)}"/>` +
       `<Parameter name="lead_name" value="${escapeXml(leadName)}"/>` +
+      `<Parameter name="direction" value="${escapeXml(Direction === "outbound" ? "outbound" : "inbound")}"/>` +
     `</Stream>`;
 
   req.log.info({ CallSid, wssUrl }, "Returning <Stream> ExoML — Voicebot WS will take over");

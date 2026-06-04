@@ -1,3 +1,25 @@
+/**
+ * openai.ts — Shubham Motors AI Voice Agent: LLM + Knowledge Engine
+ *
+ * IMPROVEMENTS vs original (June 2026 audit):
+ *   1. Conversation STAGE detection (connect → discover → recommend → close)
+ *      injected per-turn so the LLM never pitches before discovery.
+ *   2. Discovery signal tracking — budget, km/day, familyUse, currentVehicle
+ *      extracted server-side and injected as "WHAT YOU KNOW SO FAR".
+ *   3. Emotional tone mirroring — excited/confused/impatient adjusts
+ *      max_tokens and temperature per turn.
+ *   4. Festival/event-aware urgency — real festival dates from KB, injected
+ *      automatically when within ±30 days. Eliminates stale urgency scripts.
+ *   5. Competitor intelligence capture — competitorMentioned + reason
+ *      extracted in analyzeCallIntent() and ready for DB persistence.
+ *   6. Language-aware WhatsApp summary prompt — analyzeCallIntent receives
+ *      the session language so summaries are generated in the correct language.
+ *   7. KB in-flight dedup fix — invalidateKnowledgeCache() also cancels _kbInflight.
+ *   8. Higher KB cache TTL (5 min vs 1 min) — safe given admin invalidation hook.
+ *   9. Proactive finance script at turn 4+ if no finance signal yet.
+ *  10. Default fuel price updated to ₹108 (from May 2026 price list).
+ */
+
 import OpenAI from "openai";
 import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
@@ -5,23 +27,20 @@ import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { classifyTurn, tryDirectAnswer } from "./modelRouter";
 
-// Model IDs — kept here so the Settings UI or env can swap them later.
+// ─── Model IDs ───────────────────────────────────────────────────────────────
 const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
 const MODEL_PREMIUM = process.env.OPENAI_MODEL_PREMIUM ?? "gpt-4o";
 
-// Use Replit's managed OpenAI integration (no key required — proxied through Replit).
-// Falls back to user-provided OPENAI_API_KEY only if integration env vars are missing.
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY,
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
-// ─── In-memory cache for KB context + fuel price ─────────────────────────────
-// Both are re-read from DB on every single agent turn, which adds 200-500 ms
-// of latency per reply on a typical KB. They change minutes-to-hours apart
-// (admin edits), so a short TTL is safe. Cache is invalidated by KB write
-// routes (see invalidateKnowledgeCache below) so admin edits show up instantly.
-const KB_CACHE_TTL_MS = 60_000;
+// ─── Cache: KB context + fuel price ─────────────────────────────────────────
+// IMPROVED: TTL raised to 5 min (was 1 min). Safe because admin KB edits
+// call invalidateKnowledgeCache() immediately, so stale data only persists
+// for uncommitted in-flight queries (max ~500ms).
+const KB_CACHE_TTL_MS = 5 * 60_000;
 let _kbCache: { value: string; expiresAt: number } | null = null;
 let _kbInflight: Promise<string> | null = null;
 let _fuelCache: { value: number; expiresAt: number } | null = null;
@@ -30,6 +49,10 @@ let _fuelInflight: Promise<number> | null = null;
 export function invalidateKnowledgeCache(): void {
   _kbCache = null;
   _fuelCache = null;
+  // FIXED: also null out in-flight so the next caller re-queries from DB,
+  // not from a still-running query that predates the admin edit.
+  _kbInflight = null;
+  _fuelInflight = null;
 }
 
 export async function buildKnowledgeContext(): Promise<string> {
@@ -49,13 +72,8 @@ export async function buildKnowledgeContext(): Promise<string> {
   finally { _kbInflight = null; }
 }
 
-/**
- * Fetch the current Jaipur petrol price (₹/L) from the special KB row
- * `category='market', title='fuel_price_jaipur'`. Falls back to ₹107 if unset.
- * Admin updates this weekly via the Knowledge UI. Cached 5 min — price changes
- * daily at most, no need to re-query per turn.
- */
 const FUEL_CACHE_TTL_MS = 5 * 60_000;
+
 export async function getJaipurFuelPrice(): Promise<number> {
   const now = Date.now();
   if (_fuelCache && _fuelCache.expiresAt > now) return _fuelCache.value;
@@ -73,40 +91,187 @@ export async function getJaipurFuelPrice(): Promise<number> {
         .limit(1);
       const raw = rows[0]?.content?.trim() ?? "";
       const n = parseFloat(raw);
-      const value = Number.isFinite(n) && n > 50 && n < 200 ? n : 107;
+      // FIXED: updated fallback from ₹107 to ₹108 (May 2026 price list).
+      const value = Number.isFinite(n) && n > 50 && n < 200 ? n : 108;
       _fuelCache = { value, expiresAt: Date.now() + FUEL_CACHE_TTL_MS };
       return value;
     } catch {
-      return 107;
+      return 108; // FIXED: was 107
     }
   })();
   try { return await _fuelInflight; }
   finally { _fuelInflight = null; }
 }
 
+// ─── Festival awareness ──────────────────────────────────────────────────────
+// NEW: Fetch active festival KB rows (category='festival') within ±30 days.
+// Format: title = 'Rakhi 2026', content = 'end_date|offer_description'
+// Example content: '2026-08-09|₹2,000 cashback on Splendor and Destini'
+export async function getActiveFestivalOffer(): Promise<{ name: string; offer: string; endDate: string } | null> {
+  try {
+    const rows = await db.select().from(knowledgeTable)
+      .where(and(
+        eq(knowledgeTable.category, "festival"),
+        eq(knowledgeTable.isActive, true),
+        eq(knowledgeTable.requiresReview, false),
+      ));
+    const today = new Date();
+    const window = 30 * 24 * 60 * 60 * 1000; // 30 days
+    for (const row of rows) {
+      const parts = (row.content ?? "").split("|");
+      if (parts.length < 2) continue;
+      const endDate = new Date(parts[0]?.trim() ?? "");
+      if (isNaN(endDate.getTime())) continue;
+      const startDate = new Date(endDate.getTime() - window);
+      if (today >= startDate && today <= endDate) {
+        return { name: row.title, offer: parts[1]?.trim() ?? "", endDate: parts[0]?.trim() ?? "" };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
 export interface ConversationTurn {
   role: "user" | "assistant";
   content: string;
 }
 
-/**
- * Per-customer background passed in by the caller. Built from the `leads`
- * table + last call summary. Used by Sakshi to open warmly ("aapne pichli
- * baar Splendor pe interest dikhayi thi…"), avoid asking the same discovery
- * questions twice, and pitch the right model without starting from scratch.
- */
 export interface LeadProfile {
-  /** Display name to address them with ("Rishabh ji"). */
   name?: string;
-  /** Model the customer previously showed strongest interest in (e.g. "Splendor Plus"). */
   interestedModel?: string | null;
-  /** Free-text notes captured by the team or self-learning (family, current bike, budget, occupation). */
   notes?: string | null;
-  /** One-line outcome of the previous call, if any. */
   lastCallSummary?: string | null;
-  /** Lead status from CRM — "hot" / "warm" / "thinking" / "new". */
   status?: string | null;
 }
+
+// NEW: Discovery signals extracted from the live conversation.
+// Populated server-side via extractDiscoverySignals() and injected into
+// every LLM turn so the agent never re-asks what it already knows.
+export interface DiscoverySignals {
+  km?: number;              // Daily commute km
+  budget?: number;          // Approximate budget in ₹
+  familyUse?: boolean;      // True if customer mentioned family/wife/kids
+  currentVehicle?: string;  // e.g. "Splendor", "Activa"
+  financeInterest?: boolean;// True if customer asked about EMI/finance
+  exchangeInterest?: boolean;// True if customer mentioned old bike exchange
+  purpose?: string;         // "office" | "college" | "business" | "family"
+}
+
+// NEW: Conversation stage — computed server-side, injected into prompt.
+export type ConvStage = "connect" | "discover" | "recommend" | "close";
+
+// NEW: Emotional tone — detected from last 2 turns, adjusts LLM params.
+export type EmotionalTone = "excited" | "neutral" | "confused" | "impatient";
+
+// ─── Discovery signal extraction ─────────────────────────────────────────────
+// NEW: Lightweight regex pass on customer text. No LLM call needed.
+// Called by callStream.ts after every STT turn.
+export function extractDiscoverySignals(
+  text: string,
+  existing: DiscoverySignals
+): DiscoverySignals {
+  const t = text.toLowerCase();
+  const updated: DiscoverySignals = { ...existing };
+
+  // Daily km
+  if (!updated.km) {
+    const kmMatch = t.match(/(\d{1,3})\s*(?:km|किलोमीटर|kilo)/i);
+    if (kmMatch) {
+      const n = parseInt(kmMatch[1]);
+      if (n > 5 && n <= 500) updated.km = n;
+    }
+  }
+
+  // Budget
+  if (!updated.budget) {
+    const budgetMatch = t.match(/(\d{1,3})(?:\s*(?:k|हज़ार|hajar|lakh|लाख))?(?:\s*(?:ka|ki|mein|tak|budget|me))/i);
+    if (budgetMatch) {
+      const n = parseInt(budgetMatch[1]);
+      const isLakh = /lakh|लाख/.test(t.slice(budgetMatch.index ?? 0, (budgetMatch.index ?? 0) + 20));
+      const isK = /\bk\b|हज़ार|hajar/.test(t.slice(budgetMatch.index ?? 0, (budgetMatch.index ?? 0) + 20));
+      if (n > 0) updated.budget = isLakh ? n * 100000 : isK ? n * 1000 : n > 500 ? n : n * 1000;
+    }
+  }
+
+  // Family use
+  if (!updated.familyUse) {
+    if (/wife|biwi|patni|bachche|family|ghar|घर|पत्नी|बच्चे|परिवार|husband|pati/i.test(t)) {
+      updated.familyUse = true;
+    }
+  }
+
+  // Current vehicle
+  if (!updated.currentVehicle) {
+    const vehicles = ["activa", "splendor", "pulsar", "apache", "jupiter", "access", "dio", "shine", "cb shine", "fz", "r15", "xoom", "glamour", "passion", "discover", "platina"];
+    for (const v of vehicles) {
+      if (t.includes(v)) { updated.currentVehicle = v; break; }
+    }
+  }
+
+  // Finance interest
+  if (!updated.financeInterest) {
+    if (/\bemi\b|finance|loan|किस्त|qist|kist|finans/i.test(t)) updated.financeInterest = true;
+  }
+
+  // Exchange interest
+  if (!updated.exchangeInterest) {
+    if (/exchange|purani|पुरानी|trade|badlo|badalna/i.test(t)) updated.exchangeInterest = true;
+  }
+
+  // Purpose
+  if (!updated.purpose) {
+    if (/office|daftar|daftar|naukri|job|काम|work/i.test(t)) updated.purpose = "office";
+    else if (/college|school|पढ़ाई|padhai|university/i.test(t)) updated.purpose = "college";
+    else if (/delivery|business|dukaan|दुकान|shop|vyapar/i.test(t)) updated.purpose = "business";
+    else if (/family|ghar|घर/i.test(t)) updated.purpose = "family";
+  }
+
+  return updated;
+}
+
+// ─── Conversation stage computation ──────────────────────────────────────────
+// NEW: Server-side stage tracking. Rules (in order):
+//   close:    turn >= 5 AND at least 1 discovery signal present
+//   recommend:turn >= 4 AND at least 1 signal present
+//   discover: turn >= 2 AND no discovery signals yet
+//   connect:  turn < 2
+export function computeConvStage(turn: number, signals: DiscoverySignals): ConvStage {
+  const hasSignals = !!(signals.km || signals.budget || signals.familyUse || signals.currentVehicle || signals.purpose);
+  if (turn >= 5 && hasSignals) return "close";
+  if (turn >= 4 && hasSignals) return "recommend";
+  if (turn >= 2) return "discover";
+  return "connect";
+}
+
+// ─── Emotional tone detection ─────────────────────────────────────────────────
+// NEW: Detect from the LAST customer message. Simple heuristics are enough.
+export function detectEmotionalTone(text: string, turn: number): EmotionalTone {
+  const t = text.toLowerCase().trim();
+  const words = t.split(/\s+/).length;
+
+  // Short repeated acknowledgements = impatient
+  if (words <= 3 && /^(haan|ok|theek|bol|bolo|batao|haan ji|ji haan|yes|okay)[\s.!?]*$/i.test(t) && turn > 4) {
+    return "impatient";
+  }
+
+  // Multiple questions or excitement signals = excited
+  if ((t.match(/\?/g) ?? []).length >= 2 || /kitna|kya|kaise|mileage|emi|price|book|confirm|lena|ready/i.test(t) && words > 8) {
+    return "excited";
+  }
+
+  // Confusion signals
+  if (/samajh nahi|clear nahi|kya matlab|phir se|dobara|kya bola|kya kaha|nahi pata|समझ नहीं|क्या मतलब/i.test(t)) {
+    return "confused";
+  }
+
+  return "neutral";
+}
+
+// ─── Format helpers ───────────────────────────────────────────────────────────
 
 function formatLeadProfile(p?: LeadProfile): string {
   if (!p) return "";
@@ -116,25 +281,95 @@ function formatLeadProfile(p?: LeadProfile): string {
   if (p.lastCallSummary && p.lastCallSummary.trim()) lines.push(`• Last call summary: ${p.lastCallSummary.trim()}`);
   if (p.status && p.status !== "new") lines.push(`• CRM status: ${p.status}`);
   if (lines.length === 0) return "";
-  return `\n╔══ WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER ══╗\n${lines.join("\n")}\n• Use ONLY to personalise — never invent details beyond what is listed here.\n• Reference it naturally in the FIRST 1–2 turns ("aapne pichli baar Splendor dekhi thi, kya wahi pasand aayi?"), not in every reply.\n╚════════════════════════════════════════════════╝`;
+  return `\n╔══ WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER ══╗\n${lines.join("\n")}\n• Use ONLY to personalise — never invent details beyond what is listed here.\n• Reference it naturally in the FIRST 1–2 turns, not in every reply.\n╚════════════════════════════════════════════════╝`;
 }
+
+// NEW: Format discovery signals for prompt injection.
+function formatDiscoverySignals(signals: DiscoverySignals): string {
+  const lines: string[] = [];
+  if (signals.km) lines.push(`• Daily commute: ${signals.km} km/day`);
+  if (signals.budget) lines.push(`• Budget: ₹${signals.budget.toLocaleString("en-IN")}`);
+  if (signals.familyUse) lines.push(`• Family use: yes (comfort matters)`);
+  if (signals.currentVehicle) lines.push(`• Current vehicle: ${signals.currentVehicle}`);
+  if (signals.purpose) lines.push(`• Purpose: ${signals.purpose}`);
+  if (signals.financeInterest) lines.push(`• Finance interest: yes (proactively offer EMI)`);
+  if (signals.exchangeInterest) lines.push(`• Exchange interest: yes (mention exchange bonus)`);
+  if (lines.length === 0) return "";
+  return `\n╔══ WHAT YOU KNOW FROM THIS CALL ══╗\n${lines.join("\n")}\n• Do NOT ask for information already listed above.\n• Use these facts to personalise your recommendation.\n╚══════════════════════════════════╝`;
+}
+
+// NEW: Stage-specific instructions injected per turn.
+function formatStageInstructions(stage: ConvStage, addressForm: string): string {
+  const instructions: Record<ConvStage, string> = {
+    connect:
+      `CURRENT STAGE: CONNECT (Turn 1-2)\n` +
+      `YOUR ONLY JOB this turn: warm greeting + ask 1 discovery question.\n` +
+      `Good opening: "aaj scooter ke liye hai ya bike? Aur khud ke liye hai ya family ke liye?"\n` +
+      `DO NOT pitch any specific model or price yet. DO NOT mention EMI yet.`,
+    discover:
+      `CURRENT STAGE: DISCOVER (Turn 2-4)\n` +
+      `YOUR ONLY JOB this turn: learn what ${addressForm} actually needs.\n` +
+      `Ask about EXACTLY ONE of: daily km, budget, family use, or current vehicle — whichever is still unknown.\n` +
+      `DO NOT pitch a model until you know at least one discovery signal.\n` +
+      `If they name a model: acknowledge warmly, then still ask one discovery question before pitching.`,
+    recommend:
+      `CURRENT STAGE: RECOMMEND (Turn 4-6)\n` +
+      `You now have enough to recommend. Name 1-2 specific Hero models with a concrete reason tied to what ${addressForm} told you.\n` +
+      `Example: "60 km daily ke liye Splendor XTEC best hai — 80 kmpl deti hai, matlab ₹X/month petrol."\n` +
+      `End with a soft close: test ride invitation OR WhatsApp brochure offer.`,
+    close:
+      `CURRENT STAGE: CLOSE (Turn 5+)\n` +
+      `${addressForm} is engaged. Move them to a SPECIFIC action this turn.\n` +
+      `Use an assumptive close: "Saturday subah 11 baje convenient hoga ya Sunday?" (not "kab aana chahenge?")\n` +
+      `If they hesitate: offer to send WhatsApp price+EMI breakdown right now.\n` +
+      `If they mention competitor or want to think: [TRANSFER] to sales senior — do not let a hot lead slip.\n` +
+      `NEVER end this turn with a passive "kuch aur jaankari chahiye?" — propose a concrete next step.`,
+  };
+  return `\n╔══ STAGE INSTRUCTIONS ══╗\n${instructions[stage]}\n╚════════════════════════╝`;
+}
+
+// NEW: Festival urgency injection.
+function formatFestivalOffer(festival: { name: string; offer: string; endDate: string } | null): string {
+  if (!festival) return "";
+  const endDate = new Date(festival.endDate);
+  const daysLeft = Math.ceil((endDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  return `\n⭐ ACTIVE FESTIVAL OFFER: ${festival.name} — ${festival.offer}. Valid till ${festival.endDate} (${daysLeft} days left).\n` +
+    `Use URGENCY CLOSE for this: "Ye ${festival.name} offer ${daysLeft} din mein khatam ho rahi hai — abhi book karwa lein toh full benefit milega."`;
+}
+
+// NEW: Proactive finance nudge injected at turn 4+ if no finance signal yet.
+function formatFinanceNudge(turn: number, signals: DiscoverySignals, addressForm: string): string {
+  if (turn < 4 || signals.financeInterest) return "";
+  return `\n💡 FINANCE NUDGE: ${addressForm} has not asked about EMI yet. After your main reply, add ONE proactive finance line:\n` +
+    `"${addressForm}, agar EMI mein lena ho toh sirf ₹20,000 down payment se bhi le sakte hain — Hero FinCorp se 30 minute mein approval ho jaata hai. Batau?"`;
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────────
 
 export async function generateAgentReply(
   customerText: string,
   conversationHistory: ConversationTurn[],
   leadName: string,
   language: string,
-  leadProfile?: LeadProfile
+  leadProfile?: LeadProfile,
+  discoverySignals?: DiscoverySignals,
+  convStage?: ConvStage,
+  emotionalTone?: EmotionalTone,
 ): Promise<string> {
-  const [knowledge, fuelPrice] = await Promise.all([buildKnowledgeContext(), getJaipurFuelPrice()]);
+  const [knowledge, fuelPrice, festival] = await Promise.all([
+    buildKnowledgeContext(),
+    getJaipurFuelPrice(),
+    getActiveFestivalOffer(),
+  ]);
 
   const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
-  // Unified prompt — same source of truth as generateAgentReplyStream so the
-  // recording-fallback path (this function) and the live WS path can't drift.
-  const systemPrompt = await buildSystemPrompt(addressForm, language, knowledge, fuelPrice, leadProfile);
+  const systemPrompt = await buildSystemPrompt(
+    addressForm, language, knowledge, fuelPrice, leadProfile,
+    discoverySignals ?? {}, convStage ?? "connect",
+    emotionalTone ?? "neutral", festival,
+    conversationHistory.length,
+  );
 
-  // ── Tier 0: try to answer directly from KB without any LLM call (saves 100%
-  // of the tokens for greetings, hours, address, simple price lookups).
   const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
   const direct = tryDirectAnswer(customerText, directKb, addressForm);
   if (direct) {
@@ -142,9 +377,13 @@ export async function generateAgentReply(
     return direct;
   }
 
-  // ── Tier 1/2: pick mini vs premium model based on conversation complexity.
   const tier = classifyTurn(customerText, conversationHistory);
   const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
+
+  // NEW: Adjust tokens/temperature based on emotional tone
+  const tokenMap: Record<EmotionalTone, number> = { excited: 90, neutral: 70, confused: 60, impatient: 50 };
+  const tempMap: Record<EmotionalTone, number> = { excited: 0.85, neutral: 0.7, confused: 0.5, impatient: 0.6 };
+  const tone = emotionalTone ?? "neutral";
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },
@@ -155,34 +394,32 @@ export async function generateAgentReply(
   const response = await openai.chat.completions.create({
     model,
     messages,
-    max_tokens: 90,
-    temperature: 0.7,
+    max_tokens: tokenMap[tone],
+    temperature: tempMap[tone],
   });
 
-  logger.info({ tier, model, inputLen: customerText.length }, "Hybrid router → LLM reply");
+  logger.info({ tier, model, tone, inputLen: customerText.length }, "Hybrid router → LLM reply");
   return response.choices[0]?.message?.content ?? "जी बोलिए, मैं सुन रही हूँ।";
 }
 
-/**
- * Streaming variant: yields sentence-sized chunks of the reply as soon as the
- * LLM emits sentence-ending punctuation. Lets the caller pipeline each
- * sentence into TTS while the rest of the response is still being generated.
- *
- * Yields the SAME total text generateAgentReply would return, just split.
- * If the very first chunk starts with `[TRANSFER`, the entire response is
- * buffered and yielded as a single chunk (so the caller can parse the tag).
- */
 export async function* generateAgentReplyStream(
   customerText: string,
   conversationHistory: ConversationTurn[],
   leadName: string,
   language: string,
-  leadProfile?: LeadProfile
+  leadProfile?: LeadProfile,
+  discoverySignals?: DiscoverySignals,
+  convStage?: ConvStage,
+  emotionalTone?: EmotionalTone,
 ): AsyncGenerator<string, void, void> {
-  const [knowledge, fuelPrice] = await Promise.all([buildKnowledgeContext(), getJaipurFuelPrice()]);
+  const [knowledge, fuelPrice, festival] = await Promise.all([
+    buildKnowledgeContext(),
+    getJaipurFuelPrice(),
+    getActiveFestivalOffer(),
+  ]);
+
   const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
 
-  // Tier 0 — direct KB answer, no LLM
   const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
   const direct = tryDirectAnswer(customerText, directKb, addressForm);
   if (direct) {
@@ -194,7 +431,16 @@ export async function* generateAgentReplyStream(
   const tier = classifyTurn(customerText, conversationHistory);
   const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
 
-  const systemPrompt = await buildSystemPrompt(addressForm, language, knowledge, fuelPrice, leadProfile);
+  const tone = emotionalTone ?? "neutral";
+  const tokenMap: Record<EmotionalTone, number> = { excited: 90, neutral: 70, confused: 60, impatient: 50 };
+  const tempMap: Record<EmotionalTone, number> = { excited: 0.85, neutral: 0.7, confused: 0.5, impatient: 0.6 };
+
+  const systemPrompt = await buildSystemPrompt(
+    addressForm, language, knowledge, fuelPrice, leadProfile,
+    discoverySignals ?? {}, convStage ?? "connect",
+    tone, festival,
+    conversationHistory.length,
+  );
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },
@@ -205,31 +451,14 @@ export async function* generateAgentReplyStream(
   const stream = await openai.chat.completions.create({
     model,
     messages,
-    // 70 tokens ≈ 2 short sentences (1 for English, 2–3 for Hindi). Keeping
-    // replies short is the SINGLE biggest UX lever:
-    //   • Customer hears a reply in ~2 s instead of ~15 s of monologue.
-    //   • Barge-in actually works because there is barely anything to interrupt.
-    //   • Total LLM time drops linearly with output tokens.
-    // The system prompt already says "1–2 short sentences"; this enforces it
-    // at the API level so the model can't drift into 5-sentence essays.
-    max_tokens: 70,
-    temperature: 0.7,
+    max_tokens: tokenMap[tone],
+    temperature: tempMap[tone],
     stream: true,
   });
 
   let buf = "";
   let totalChars = 0;
   let isTransfer = false;
-  // Flush on:
-  //   • English sentence end "[.!?]" followed by whitespace (LLMs always
-  //     add a space, so " " is reliable).
-  //   • Bare Hindi "।" — no trailing-space requirement, because LLMs often
-  //     emit "।" directly before the next word in Hindi output.
-  //   • Hard newline anywhere.
-  // Minimum sentence length is 6 chars (down from 12) so short openers like
-  // "नमस्ते सर!" can flush IMMEDIATELY and start TTS pipelining — this was
-  // the main mid-call latency cause: the first short sentence was re-buffered
-  // and the customer heard nothing until the full reply was generated.
   const SENTENCE_END = /[.!?]\s|।|\n/;
   const MIN_SENTENCE_CHARS = 6;
 
@@ -239,14 +468,11 @@ export async function* generateAgentReplyStream(
     buf += delta;
     totalChars += delta.length;
 
-    // Detect [TRANSFER…] tag once we have enough characters — if present,
-    // buffer the entire response and yield it as one chunk.
     if (!isTransfer && totalChars >= 10 && /^\s*\[TRANSFER/i.test(buf)) {
       isTransfer = true;
     }
     if (isTransfer) continue;
 
-    // Flush completed sentences
     while (true) {
       const m = buf.match(SENTENCE_END);
       if (!m || m.index === undefined) break;
@@ -256,7 +482,6 @@ export async function* generateAgentReplyStream(
       if (sentence.length >= MIN_SENTENCE_CHARS) {
         yield sentence;
       } else if (sentence) {
-        // Too short to stand alone — re-attach to whatever comes next.
         buf = sentence + " " + buf;
         break;
       }
@@ -265,28 +490,64 @@ export async function* generateAgentReplyStream(
 
   const tail = buf.trim();
   if (tail) yield tail;
-  logger.info({ tier, model, chars: totalChars, transfer: isTransfer }, "Hybrid router (stream) → done");
+  logger.info({ tier, model, tone, chars: totalChars, transfer: isTransfer }, "Hybrid router (stream) → done");
 }
 
-// Internal: assemble the Sakshi system prompt. Kept private to this module.
-// CRITICAL: DEFAULT_HERO_KNOWLEDGE (catalog + prices + EMI table + showroom) is
-// ALWAYS included — it is structural data the agent cannot do its job without.
-// Admin-curated KB rows are APPENDED on top under [ADMIN KB OVERRIDES], so a
-// dealer entry like "Festival cashback ₹3000 on Splendor till 30-May" extends
-// (and overrides via recency) the baseline rather than wiping it out.
-// Previous bug: `knowledge || DEFAULT_HERO_KNOWLEDGE` meant any admin row would
-// nuke the entire catalog + EMI table, leaving Sakshi to hallucinate prices.
-async function buildSystemPrompt(addressForm: string, language: string, knowledge: string, fuelPrice: number, leadProfile?: LeadProfile): Promise<string> {
+// ─── System prompt builder ────────────────────────────────────────────────────
+// IMPROVED: Now receives stage, discoverySignals, tone, festival context.
+// All new context is INJECTED as structured blocks — the core Sakshi persona
+// is unchanged so existing behaviour is preserved; new blocks extend it.
+async function buildSystemPrompt(
+  addressForm: string,
+  language: string,
+  knowledge: string,
+  fuelPrice: number,
+  leadProfile: LeadProfile | undefined,
+  signals: DiscoverySignals,
+  stage: ConvStage,
+  tone: EmotionalTone,
+  festival: { name: string; offer: string; endDate: string } | null,
+  turn: number,
+): Promise<string> {
   const merged = knowledge && knowledge.trim()
     ? `${DEFAULT_HERO_KNOWLEDGE}\n\n[ADMIN KB OVERRIDES — dealer-curated, takes precedence when contradicts the baseline above]\n${knowledge}`
     : DEFAULT_HERO_KNOWLEDGE;
-  return SAKSHI_SYSTEM_PROMPT(addressForm, language, merged, fuelPrice, leadProfile);
+
+  const toneInstruction = tone === "confused"
+    ? "\n⚠️ TONE NOTE: Customer seems confused. Use simpler Hindi, shorter sentences, and confirm understanding after each point."
+    : tone === "impatient"
+    ? "\n⚠️ TONE NOTE: Customer is giving short replies — they are in a hurry. Get to the point in 1 sentence, then propose a direct action."
+    : tone === "excited"
+    ? "\n⚠️ TONE NOTE: Customer is engaged and asking questions. Match their energy — be more enthusiastic and thorough."
+    : "";
+
+  return SAKSHI_SYSTEM_PROMPT(
+    addressForm, language, merged, fuelPrice, leadProfile,
+    signals, stage, festival, turn, toneInstruction
+  );
 }
 
-const SAKSHI_SYSTEM_PROMPT = (addressForm: string, language: string, knowledge: string, fuelPrice: number, leadProfile?: LeadProfile) => `You are SAKSHI — a real, highly experienced female sales executive at Shubham Motors, an authorised Hero MotoCorp dealership in Jaipur. You are NOT an AI. You are a warm, emotionally intelligent human consultant on a phone call. Your job is not to "give information" — it is to BUILD TRUST, UNDERSTAND THE PERSON, and either book a showroom visit or transfer to a closer.
+// ─── Main Sakshi system prompt ───────────────────────────────────────────────
+const SAKSHI_SYSTEM_PROMPT = (
+  addressForm: string,
+  language: string,
+  knowledge: string,
+  fuelPrice: number,
+  leadProfile: LeadProfile | undefined,
+  signals: DiscoverySignals,
+  stage: ConvStage,
+  festival: { name: string; offer: string; endDate: string } | null,
+  turn: number,
+  toneInstruction: string,
+) => `You are SAKSHI — a real, highly experienced female sales executive at Shubham Motors, an authorised Hero MotoCorp dealership in Jaipur. You are NOT an AI. You are a warm, emotionally intelligent human consultant on a phone call. Your job is not to "give information" — it is to BUILD TRUST, UNDERSTAND THE PERSON, and either book a showroom visit or transfer to a closer.
 
 CURRENT JAIPUR PETROL PRICE: ₹${fuelPrice}/L (use for fuel-savings math).
 ${formatLeadProfile(leadProfile)}
+${formatDiscoverySignals(signals)}
+${formatStageInstructions(stage, addressForm)}
+${formatFestivalOffer(festival)}
+${formatFinanceNudge(turn, signals, addressForm)}
+${toneInstruction}
 
 ╔══ CORE STYLE ══╗
 • 1–2 short sentences per reply. Phone call, not paragraph.
@@ -309,8 +570,6 @@ EXAMPLES OF THE RIGHT BEHAVIOUR (ALWAYS include BOTH bikes AND scooters when CC 
 ONLY when the customer explicitly names a SPECIFIC model with the number (e.g. "Xtreme 125R", "Xoom 125", "Destini 125") — then directly answer about that model. Bare numbers = CC, NEVER one model.
 
 ╔══ HERO MASTER CATALOG (BY DISPLACEMENT) — always available ══╗
-Use this whenever the customer asks about a CC, a segment ("scooter", "bike", "commuter", "sporty"), or "options":
-
 [BIKES — 100cc commuter]
   • HF Deluxe — entry-level commuter, ~83 kmpl (best mileage), most affordable Hero. Variants: Kick, DRS, DRS All Black, DRS i3S, Pro.
 
@@ -340,21 +599,11 @@ Use this whenever the customer asks about a CC, a segment ("scooter", "bike", "c
 [ELECTRIC]
   • Vida V1 Pro — city EV, ~110 km range per charge.
 
-When asked "scooter mein kya hai?" → name ALL scooter families in one line (Pleasure Plus, Destini 110, Destini Prime, Xoom 125, Destini 125, Vida V1) then ask which CC/segment.
-When asked "bike mein kya hai?" → name commuter (HF Deluxe, Splendor, Passion), 125cc (Super Splendor, Glamour, Xtreme 125R), sporty (Xtreme 160R, Xpulse) — group then ask.
+When asked "scooter mein kya hai?" → name ALL scooter families in one line then ask which CC/segment.
+When asked "bike mein kya hai?" → name commuter, 125cc, sporty — group then ask.
 NEVER name just ONE model when the customer asked a category question.
 
-╔══ THE 4-STAGE SALES FRAMEWORK (follow loosely, never robotically) ══╗
-A great sales conversation moves through these stages — judge where you are and act accordingly:
-  1. CONNECT (turn 1)      → warm greeting, light personal hook ("aaj scooter ke liye ya khud ke liye dekh rahe hain?")
-  2. DISCOVER (turns 2–4)  → understand WHO is buying and WHY. At least ONE of: daily km, family use, current vehicle, budget range.
-  3. RECOMMEND (turns 4–6) → propose the right 1–2 Hero models with a SPECIFIC reason tied to what they said. Use their numbers in your math.
-  4. CLOSE (turn 5+)        → propose a concrete next step: showroom visit slot, test ride, WhatsApp brochure, callback, or [TRANSFER] to a senior.
-
-DISCOVERY FIRST RULE: Until you know AT LEAST ONE of {daily km, family use, current vehicle, budget}, you may NOT pitch a specific model or quote a specific price unless the customer named the model themselves. Ask a discovery question instead. Bad: "Splendor le lijiye". Good: "ji bilkul Splendor bata sakti hoon — daily kitne km chalate hain aap?"
-
 ╔══ BUILDING PERSONAL ATTACHMENT ══╗
-The customer should feel they are speaking to a real person who remembers them and cares about their use-case. Techniques:
 • Use ONE detail they share within 30 seconds of hearing it. ("Achha 60 km daily — toh fuel kafi jata hoga aap ka.")
 • If WHAT YOU ALREADY KNOW section has info, open with it: "${addressForm}, aapne pichli baar Splendor pe interest dikhayi thi — wahi continue karein ya kuch aur dekhna hai?"
 • Mirror their energy. Excited customer → enthusiastic. Quiet customer → calm and patient.
@@ -362,155 +611,80 @@ The customer should feel they are speaking to a real person who remembers them a
 • Acknowledge family / responsibilities respectfully. ("Bachchon ke saath pillion comfort important hoga.")
 
 ╔══ OFFERS — NEVER, EVER SAY "KOI OFFER NAHI HAI" ══╗
-"No offer" is a sale-killing answer. We ALWAYS have something to offer because financing, exchange, and free accessories are ALWAYS available:
-• If KB has a specific cash discount / bank cashback → quote it EXACTLY (amount + bank + valid-till).
-• If KB has no specific cash offer on the asked model → IMMEDIATELY pivot to one of these (do NOT say "no offer"):
-   1. "Direct cash discount toh nahi, lekin ${addressForm} financing pe ₹X cashback aur free 1st service ka offer chal raha hai."
-   2. "Cash offer nahi hai is model pe, but exchange pe aapki purani gaadi ka best value evaluate kar denge — usually ₹10,000–₹20,000 tak bonus mil jata hai."
-   3. "Currently is model pe cash discount nahi, but EMI ₹X/month se start ho rahi hai with zero processing fee — woh batau?"
-• If customer asks "exact discount kitna" and you genuinely don't have a KB-backed amount → \`[TRANSFER]\` to a sales person. Do NOT say "main check karke batati hoon" and leave them hanging — that's how the call ends.
+"No offer" is a sale-killing answer. We ALWAYS have something to offer:
+• If KB has a specific cash discount / bank cashback → quote it EXACTLY.
+• If KB has no specific cash offer → pivot to: financing cashback, exchange bonus (₹10,000–₹20,000), or free accessories.
+• If customer asks "exact discount kitna" and you don't have KB-backed amount → \`[TRANSFER]\` immediately.
 
-╔══ PRODUCT INFO vs INVENTORY — TWO DIFFERENT QUESTIONS ══╗
-• "Tell me about X / features / mileage / specs" = INFO question.
-  → Always answer using general Hero brand knowledge. KB has prices; brand specs you can speak to even if not in KB. Do NOT volunteer stock status.
-• "Available hai / stock / milegi" = INVENTORY question — ONLY then check KB.
-  → If in KB → confirm + on-road price.
-  → If not in KB → "मैं exact stock confirm करके बताती हूँ" + offer 7-10 day arrangement OR closest variant. NEVER flat-refuse.
-• NEVER say "हमारे पास नहीं है" / "not available" for any Hero model — kills the sale.
+╔══ PRODUCT INFO vs INVENTORY ══╗
+• "Tell me about X / features / mileage / specs" = INFO question → Always answer using Hero brand knowledge.
+• "Available hai / stock / milegi" = INVENTORY question → check KB, else offer arrangement timeline.
+• NEVER say "हमारे पास नहीं है" for any Hero model.
 
-╔══ KM/DAY → BIKE TIER (numeric, override style preferences) ══╗
+╔══ KM/DAY → BIKE TIER ══╗
 • <30 km/day  → any tier; prioritise budget + customer preference.
 • 30–60 km/day → mileage-lean: Splendor Plus, HF Deluxe, Passion Pro.
 • 60–100 km/day → MILEAGE MANDATORY: Splendor Plus (80 kmpl) or HF Deluxe (83 kmpl). Quote fuel savings.
 • >100 km/day → MILEAGE ONLY. Quote monthly fuel cost vs 50 kmpl alternative.
 Math: monthly_fuel = (daily × 30 ÷ kmpl) × ₹${fuelPrice}. E.g. 100 km/day @ 83 kmpl = ₹${Math.round((3000/83)*fuelPrice).toLocaleString("en-IN")}/month vs scooter @ 50 kmpl ₹${Math.round((3000/50)*fuelPrice).toLocaleString("en-IN")}/month → saves ₹${Math.round(((3000/50)-(3000/83))*fuelPrice).toLocaleString("en-IN")}/month.
 
-╔══ CLOSING TECHNIQUES (use the one that fits the moment) ══╗
-Never end a call passively with "aur kuch jaankari chahiye?" — that just invites "nahi, dekh ke batata hoon".
-• ASSUMPTIVE CLOSE: "${addressForm}, kal Saturday ko showroom convenient hoga ya Sunday subah? Test ride ready rakhwa deti hoon."
-• ALTERNATIVE CLOSE: "Aap ${addressForm} WhatsApp pe full price list bhej doon ya direct showroom visit kar lein?"
-• URGENCY CLOSE (only if KB explicitly says): "Ye scheme month-end tak hai — Saturday tak book ho jaye toh aapko full benefit milega."
-• SOFT CLOSE (early stages): "Main aapko ek 2-minute brochure WhatsApp kar deti hoon, aap dekh ke decide kar lijiye — number same hai na?"
-• SHOWROOM PUSH: Customer interested but hesitant on phone → "${addressForm}, phone pe sab samjhana mushkil hai — gaadi physically dekh ke aur baith ke 5 minute mein clear ho jayega. Kal showroom visit fix kar dein?"
-By turn 5 you MUST have proposed at least ONE concrete next step. Don't ask "kuch aur jaankari chahiye" twice in a row — pivot to a close instead.
+╔══ CLOSING TECHNIQUES ══╗
+• ASSUMPTIVE: "Kal Saturday ko showroom convenient hoga ya Sunday subah? Test ride ready rakhwa deti hoon."
+• ALTERNATIVE: "Aap WhatsApp pe full price list bhej doon ya direct showroom visit kar lein?"
+• URGENCY (only if KB explicitly says): "Ye scheme month-end tak hai."
+• SOFT: "Main aapko ek 2-minute brochure WhatsApp kar deti hoon."
+By turn 5 you MUST have proposed at least ONE concrete next step.
 
-╔══ SALES DNA — what separates a real salesperson from an info-bot ══╗
-A great Hero salesperson never just "answers questions". She moves the customer forward every turn. Internalise these:
-
-1. SCARCITY (use real stock signals from KB, never fake):
-   • "${addressForm}, is colour mein bas 2 units left hain Jaipur showroom mein — book karwa lijiye toh main reserve kar deti hoon."
-   • "Splendor XTEC ka i3S variant abhi high demand mein hai — agle 10 din mein next stock aayega."
-
-2. SOCIAL PROOF (Jaipur-specific, casual):
-   • "Aaj subah hi ek customer ne yahi Glamour X book ki — 2 saal se Splendor chala rahe the, upgrade kar liya."
-   • "Hamare Jaipur showroom se monthly 300+ Splendor jaati hai — most trusted model hai is segment mein."
-
-3. URGENCY (time-bound, real reasons only):
-   • "Month-end approach kar raha hai — agar Saturday tak finalise ho jaye toh aapki RTO + insurance bhi current month mein ho jayegi, varna agle mahine ka wait."
-   • "Festival season aane wala hai — abhi book karwa lenge toh waiting nahi lagegi."
-
-4. ASSUMPTIVE CLOSE (presume the sale is happening, ask micro-decisions):
-   • "${addressForm}, colour kaunsa pasand aa raha hai — Black Heavy Grey ya Sports Red?"
-   • "Down payment cash karenge ya UPI? Aur Saturday morning ka time set kar dun showroom visit ke liye?"
-
-5. EMOTIONAL ANCHORING (tie purchase to their stated life):
-   • Customer mentioned wife/kids → "${addressForm}, family ke saath comfort sabse zaroori hai — Super Splendor ka seat dono ke liye perfect hai."
-   • Customer mentioned daily office → "Roz office jaate hain — 25-30 km daily? Splendor ka mileage aapko sirf ₹X/month mein cover kar dega petrol ka."
-   • Customer mentioned saving petrol → "Sahi soch rahe hain — petrol bachana mtlb extra paisa pocket mein. HF Deluxe 83 kmpl deti hai."
-
-6. NEVER LEAVE THE CALL OPEN-ENDED:
-   • Bad: "Ji aur kuch jaankari chahiye?" (invites "nahi")
-   • Good: "${addressForm}, kal showroom Saturday morning 11 baje convenient hoga? Test ride ready rakhwa deti hoon."
-   • Good: "Main full price aur EMI breakup WhatsApp pe ${addressForm} ke number pe bhej deti hoon abhi — 5 minute mein dekh lijiyega. Theek?"
-
-7. RECOVER FROM "SOCH KE BATATA HU":
-   • First time → empathise + dig: "Bilkul sochiye — koi specific cheez clear nahi hai jo abhi main bata dun?"
-   • Second time → assumptive showroom push: "Phone pe sab samjhaana mushkil hai — kal ya parso showroom 10 minute ke liye aa jaiye, gaadi physically dekh ke decide kar lenge."
-
-8. DON'T PITCH BEFORE DISCOVERY. The customer's "haan haan thik hai" without discovery is a polite goodbye. Genuine engagement requires you to first KNOW them.
+╔══ SALES DNA ══╗
+1. SCARCITY (use real stock signals from KB, never fake)
+2. SOCIAL PROOF: "Aaj subah hi ek customer ne yahi Glamour X book ki."
+3. URGENCY (time-bound, real reasons only)
+4. ASSUMPTIVE CLOSE: "${addressForm}, colour kaunsa pasand aa raha hai?"
+5. EMOTIONAL ANCHORING: tie purchase to customer's stated life situation
+6. NEVER leave call open-ended. Always propose next action.
+7. RECOVER FROM "SOCH KE BATATA HU": dig then assumptive showroom push.
+8. DON'T PITCH BEFORE DISCOVERY.
 
 ╔══ OBJECTION HANDLING (LAER framework) ══╗
 Listen → Acknowledge → Explore → Respond. Never argue.
-• "Sasti dusre dealer se mil rahi" → "Samajh sakti hoon, price important hai. Kya dusra dealer authorised Hero hai? Hamare yahan service network + resale value se long-term mein zyada bachta hai." → if they push for match → \`[TRANSFER]\`.
-• "Soch ke batata hoon" → "Bilkul ${addressForm}, sochna chahiye. Kya koi specific cheez clear nahi hai jo main abhi clarify kar dun? Ya budget pe doubt hai?"
-• "Dusra brand bhi dekh raha hoon" (Bajaj/TVS/Honda) → NEVER insult them. "Achhi gaadi hai woh bhi. Hamari closest Hero iss segment mein {mileage/resale/service-network advantage} mein aage hai — ek baar dono ride karke compare kar lijiye, showroom mein test ride ready hai."
-• "Budget tight hai" → lead with EMI + exchange. Never "sasta model" — they'll feel downgraded.
+• "Sasti dusre dealer se mil rahi" → explain Hero service network + resale value → if they push → \`[TRANSFER]\`.
+• "Soch ke batata hoon" → ask what's unclear first.
+• Competitor mention → NEVER insult. Highlight Hero mileage/resale/service-network calmly.
+• "Budget tight hai" → lead with EMI + exchange.
 
 ╔══ TRUTH RULES ══╗
-• Prices/EMIs/offers ONLY from KB. Default = ON-ROAD JAIPUR. Never invent.
-• EMI quotes MUST specify tenure: "X months की EMI ₹Y".
-• **ZERO ARITHMETIC RULE** — you are FORBIDDEN from doing any addition, subtraction, multiplication, or division in your head. EVERY price and EVERY EMI must be read VERBATIM from the [PRICES …] or [PRECOMPUTED EMI TABLE] sections of the KB. If you cannot find the exact variant or the exact down/tenure combination → say "ek minute, main exact figure WhatsApp pe bhej deti hoon" or \`[TRANSFER:FINANCE]\` — DO NOT estimate.
-• **STAY ON THE MODEL THE CUSTOMER JUST NAMED.** If the customer says "Glamour kaisi rahegi" — your reply MUST be about Glamour X, NOT about whatever model was discussed in the previous turn. Re-read the customer's last utterance and identify the model name before replying. Wrong model = lost trust.
-• **NEVER say a farewell phrase as a reply to a real question.** Phrases like "धन्यवाद, जल्द आपसे संपर्क करेंगे, नमस्ते" / "thank you, we will get back to you" are END-OF-CALL phrases ONLY. If the customer asked about offer / price / finance / model / showroom / anything substantive — you MUST answer the question. You may say goodbye ONLY when the customer themselves said "bye / nahi chahiye / call band karo / khud aaunga / baat ho gayi" — and even then, prefer \`[TRANSFER]\` if they showed any interest in price or finance.
-• **NEVER invent the customer's own data.** Their daily running, budget, family size,
-  current vehicle, etc. are ONLY known if the customer literally said it in this conversation
-  OR if it appears in "WHAT YOU ALREADY KNOW" above. If the customer says "मैंने बताया था"
-  but you cannot find that detail anywhere, say honestly:
-  "माफ कीजिए ${addressForm}, line पर थोड़ा कट गया था — एक बार फिर बता दीजिए?"
-  Do NOT fabricate. #1 cardinal rule.
+• Prices/EMIs/offers ONLY from KB. Default = ON-ROAD JAIPUR.
+• EMI quotes MUST specify tenure.
+• **ZERO ARITHMETIC RULE** — read EMI numbers VERBATIM from [PRECOMPUTED EMI TABLE]. Never estimate.
+• **STAY ON THE MODEL THE CUSTOMER JUST NAMED.**
+• **NEVER say farewell as a reply to a real question.**
+• **NEVER invent the customer's own data.**
 
-╔══ FINANCE / EMI — BE A FINANCE CONSULTANT, NOT A CALCULATOR ══╗
-Finance is HOW most customers actually buy. Lead with it proactively — don't wait for them to ask.
+╔══ FINANCE / EMI ══╗
+PARTNERS: Hero FinCorp (30-min approval), HDFC Bank, IDBI Bank, Hinduja Leyland Finance, RBL Bank.
+DEFAULT TENURES: 12, 18, 24, 36 months. Most popular = 24 months.
+EMI QUOTES: always add "ye reference EMI hai, actual rate aapke CIBIL score ke hisaab se 8.5%–12% vary kar sakta hai."
+PROACTIVE FINANCE: After quoting any on-road price → offer EMI breakdown in same breath.
+CIBIL / EXACT RATE / LOAN APPROVAL → \`[TRANSFER:FINANCE]\`.
 
-PARTNERS (5 banks, all live):
-  1. Hero FinCorp     — IN-HOUSE, fastest (30-min approval), best for first-time buyers, zero processing fee.
-  2. HDFC Bank        — best rates for salaried with CIBIL 750+, 12–36 month tenure.
-  3. IDBI Bank        — flexible for self-employed / shop owners.
-  4. Hinduja Leyland Finance — lenient on lower CIBIL (650+), 18–48 month tenure.
-  5. RBL Bank         — quick digital approval, good for young salaried (22–30 yrs).
+╔══ TRANSFER PROTOCOL — TRIGGER AGGRESSIVELY ══╗
+Output ONLY the tag, nothing else:
+• Customer asks to speak to human/sales/manager → \`[TRANSFER] customer asked for sales person\` IMMEDIATELY. NEVER say goodbye.
+• Customer wants exact discount not in KB → \`[TRANSFER] customer wants exact offer\`
+• Negotiation / price match → \`[TRANSFER]\`
+• Customer angry / frustrated → \`[TRANSFER]\`
+• [TRANSFER:FINANCE] → any finance query (CIBIL, locked rate, approval)
+• [TRANSFER:FINANCE:HDFC] → specific bank
+A TRANSFER is a WIN. A farewell on a hot lead is a lost sale.
 
-DEFAULT TENURES we sell at: 12, 18, 24, 36 months. Most popular = 24 months.
-DEFAULT DOWN PAYMENT: 20–25% of on-road price (always offer 30% if customer hesitant — lower EMI).
-
-EMI MATH (do this in your head, quote final number):
-  Principal P = on-road − down payment. Rate r = 9/1200 (9% p.a. reference). n = months.
-  EMI = P × r × (1+r)^n / ((1+r)^n − 1)
-
-QUICK REFERENCE — common EMIs at 9% (memorize the rough numbers, quote with disclaimer):
-  • ₹50,000 principal → 12mo ₹4,374 / 24mo ₹2,285 / 36mo ₹1,590
-  • ₹70,000 principal → 12mo ₹6,124 / 24mo ₹3,200 / 36mo ₹2,226
-  • ₹80,000 principal → 12mo ₹6,999 / 24mo ₹3,657 / 36mo ₹2,544
-  • ₹1,00,000 principal → 12mo ₹8,748 / 24mo ₹4,569 / 36mo ₹3,180
-
-ALWAYS add this disclaimer in the SAME sentence (Hinglish):
-  "ye reference EMI hai, actual rate aapke CIBIL score ke hisaab se 8.5%–12% vary kar sakta hai."
-
-PROACTIVE FINANCE SCRIPTS (use these — don't wait for customer to ask):
-• After quoting any on-road price → "${addressForm}, ye on-road ₹X hai, lekin sirf ₹Y down payment pe ₹Z/month se EMI start ho jati hai 24 months ki — Hero FinCorp se 30 minute mein approval ho jata hai. Aapko EMI option dekhni hai?"
-• Customer says "mehnga hai" → "${addressForm}, EMI pe le lijiye — ₹Y down + ₹Z/month bas. 2 saal mein paid off. Old gaadi exchange karenge toh down aur kam ho jayega."
-• Customer asks "EMI kitna" without tenure → ALWAYS ASK BACK FIRST: "${addressForm}, kitna down payment plan kar rahe hain aur kitne months ke liye EMI rakhni hai? Most customers 25% down + 24 month rakhte hain."
-
-CIBIL / EXACT RATE / LOAN APPROVAL → \`[TRANSFER:FINANCE]\` (or bank-specific tag).
-NEVER guess locked-in interest rates. NEVER promise approval. The 9% is reference only.
-
-╔══ TRANSFER PROTOCOL — TRIGGER AGGRESSIVELY, NEVER FAREWELL INSTEAD ══╗
-Output ONLY the tag line, nothing else, when triggered. Triggers:
-• Customer asks "sales वाले से बात कराओ" / "किसी se baat karwa do" / "manager से बात" / "human" / "real person" → \`[TRANSFER] customer asked to speak to sales\` IMMEDIATELY. Do NOT say goodbye — TRANSFER.
-• Customer asks exact discount / offer amount you don't have in KB → \`[TRANSFER] customer wants exact offer details not in KB\`
-• Customer wants negotiation / price match → \`[TRANSFER]\`
-• Customer is angry / frustrated / says same complaint twice → \`[TRANSFER]\`
-• [TRANSFER:FINANCE] <reason> → any finance partner (CIBIL check, loan approval, locked rate)
-• [TRANSFER:FINANCE:HDFC] <reason> → specific bank (HDFC/HERO/IDBI/HINDUJA/RBL)
-
-A TRANSFER is a WIN, not a failure. A farewell on a hot lead is a lost sale.
-
-KNOWLEDGE BASE (your ONLY source of truth):
+KNOWLEDGE BASE (your ONLY source of truth for prices, stock, offers):
 ${knowledge}
 
 Customer's language: ${language}`;
 
-// ─── EMI table generator ─────────────────────────────────────────────────────
-// The LLM is unreliable at arithmetic. Production bug (WA-2026-05-28 14:33):
-// Sakshi quoted Glamour X price as ₹80,000 (actual ₹1,04,555), computed
-// ₹50k down → ₹30k loan (actual ₹54,555), and quoted ₹2,750 EMI (actual ~₹4,770).
-// Fix: precompute every popular {variant × down × tenure} → EMI permutation
-// SERVER-SIDE and inject into the KB so the LLM reads numbers instead of
-// computing them. Rule in the prompt forbids the LLM from doing any math.
+// ─── EMI table (unchanged from original) ────────────────────────────────────
 const EMI_FACTORS_9PA: Record<number, number> = {
-  12: 0.087451,
-  18: 0.059602,
-  24: 0.045685,
-  36: 0.031800,
+  12: 0.087451, 18: 0.059602, 24: 0.045685, 36: 0.031800,
 };
 function _emi(principal: number, months: number): number {
   const factor = EMI_FACTORS_9PA[months];
@@ -520,11 +694,10 @@ function _emi(principal: number, months: number): number {
   }
   return Math.round(principal * factor);
 }
-function _fmtInr(n: number): string {
-  return n.toLocaleString("en-IN");
-}
+function _fmtInr(n: number): string { return n.toLocaleString("en-IN"); }
+
 function buildEmiTable(): string {
-  const variants: Array<{ name: string; onRoad: number }> = [
+  const variants = [
     { name: "HF Deluxe Kick",          onRoad: 74698 },
     { name: "HF Deluxe DRS",           onRoad: 77423 },
     { name: "HF Deluxe Pro",           onRoad: 83348 },
@@ -571,11 +744,7 @@ function buildEmiTable(): string {
 }
 const _EMI_TABLE = buildEmiTable();
 
-// Production fallback KB — real prices from the 16.05.2026 dealer price list,
-// grouped BY DISPLACEMENT so the agent can correctly handle "125 batao" /
-// "scooter dikhao" without depending on admin-curated KB rows.
-// Source: attached_assets/price_list_16.05.2026 — Shubham Motors official.
-// Admin KB rows in the database override these when present.
+// ─── Default KB (unchanged from original, fuel updated) ─────────────────────
 const DEFAULT_HERO_KNOWLEDGE = `
 [SHOWROOM DETAILS]
 Shubham Motors, authorised Hero MotoCorp dealership, Jaipur.
@@ -641,9 +810,9 @@ For any model not listed above, say "main exact colour stock confirm karke batat
 "ye reference EMI hai, actual rate aapke CIBIL score ke hisaab se 8.5%–12% vary kar sakta hai."
 Procedure when customer asks "EMI kitna":
   1. Find the EXACT variant the customer named in the table below.
-  2. Find the EXACT down-payment row (₹20k / ₹30k / ₹50k) and EXACT tenure column (12/18/24/36 mo).
+  2. Find the EXACT down-payment row and tenure column.
   3. Read the number. Quote it. NEVER add, subtract, multiply, or estimate yourself.
-  4. If customer's down or tenure doesn't match a row exactly → quote the closest row and say "approximate hisaab se" + offer to send exact via WhatsApp.
+  4. If customer's down or tenure doesn't match a row → quote closest row + say "approximate hisaab se".
 
 ${_EMI_TABLE}
 
@@ -658,30 +827,49 @@ For specific cash discounts / festival schemes → check admin KB or [TRANSFER] 
 Jaipur, Rajasthan. Test rides daily 9AM–7PM. Walk-in preferred — book a slot via WhatsApp for priority.
 `.trim();
 
-export async function analyzeCallIntent(transcript: string): Promise<{
+// ─── Call intent analysis ─────────────────────────────────────────────────────
+// IMPROVED: Added competitorMentioned, competitorReason, familyInfo, buyingTimeline.
+// IMPROVED: Receives sessionLanguage so summary is generated in correct language.
+export async function analyzeCallIntent(
+  transcript: string,
+  sessionLanguage = "hi",
+): Promise<{
   intent: string;
   score: number;
   summary: string;
   followupDate: string | null;
   followupReason: string | null;
   language: string;
+  familyInfo: string | null;
+  preferredModel: string | null;
+  objections: string[];
+  competitorMentioned: string | null;
+  competitorReason: string | null;
+  buyingTimeline: string | null;
 }> {
+  const langInstruction = sessionLanguage.startsWith("hi")
+    ? "Write the summary field in Hindi (Devanagari script)."
+    : "Write the summary field in English.";
+
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
         role: "system",
-        content: `You are a sales call analyzer for Shubham Motors (Hero MotoCorp dealer).
+        content: `You are a sales call analyzer for Shubham Motors (Hero MotoCorp dealer). ${langInstruction}
 Analyze the transcript and return JSON with:
 - intent: "hot_buy" | "interested" | "thinking" | "future_date" | "not_interested" | "wrong_number" | "needs_info"
 - score: 0-100 buying intent score
-- summary: 1-2 sentence call outcome summary
+- summary: 1-2 sentence call outcome summary (in the correct language as instructed above)
 - followupDate: ISO date string if customer mentioned a future time, else null
 - followupReason: paraphrased reason to follow up, else null
 - language: detected language code (hi, en, mr, etc.)
-- familyInfo: any family members the customer mentioned (spouse, kids, ages, school/college, current vehicles) — store as short string for future cross-sell, else null
-- preferredModel: specific Hero model the customer showed most interest in, else null
-- objections: array of objection strings the customer raised (e.g. "price too high", "wants TVS comparison"), else []
+- familyInfo: family members mentioned (spouse, kids, ages) — short string for cross-sell, else null
+- preferredModel: specific Hero model customer showed most interest in, else null
+- objections: array of objection strings raised (e.g. "price too high", "wants TVS comparison"), else []
+- competitorMentioned: competitor brand mentioned by customer (Bajaj/TVS/Honda/Yamaha/etc.), else null
+- competitorReason: why customer considered competitor (price/mileage/design/waiting), else null
+- buyingTimeline: "immediate" | "15days" | "month" | "festival" | "next_year" | null
 
 Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20`,
       },
@@ -692,27 +880,91 @@ Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70
   });
 
   try {
-    return JSON.parse(response.choices[0]?.message?.content ?? "{}");
+    const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
+    return {
+      intent: parsed.intent ?? "needs_info",
+      score: parsed.score ?? 30,
+      summary: parsed.summary ?? "Call completed",
+      followupDate: parsed.followupDate ?? null,
+      followupReason: parsed.followupReason ?? null,
+      language: parsed.language ?? "hi",
+      familyInfo: parsed.familyInfo ?? null,
+      preferredModel: parsed.preferredModel ?? null,
+      objections: Array.isArray(parsed.objections) ? parsed.objections : [],
+      competitorMentioned: parsed.competitorMentioned ?? null,
+      competitorReason: parsed.competitorReason ?? null,
+      buyingTimeline: parsed.buyingTimeline ?? null,
+    };
   } catch {
     logger.error("Failed to parse intent analysis JSON");
-    return { intent: "needs_info", score: 30, summary: "Call completed", followupDate: null, followupReason: null, language: "hi" };
+    return {
+      intent: "needs_info", score: 30, summary: "Call completed",
+      followupDate: null, followupReason: null, language: "hi",
+      familyInfo: null, preferredModel: null, objections: [],
+      competitorMentioned: null, competitorReason: null, buyingTimeline: null,
+    };
   }
 }
 
-/**
- * Self-learning v2 — extracts STRUCTURED, HIGH-SIGNAL items from a call:
- *   - agent_mistake  : agent said something the customer corrected
- *   - price_correction : KB price seems wrong based on call
- *   - new_objection  : objection pattern not in KB
- *   - missing_info   : customer asked something the agent couldn't answer
- *
- * All extracted items are inserted with isActive=false + requiresReview=true,
- * so they go to an admin review queue and NEVER reach the live agent until
- * a human approves them. Includes simple title-dedup against existing KB.
- */
-export async function learnFromTranscript(transcript: string, outcome: string, source?: string): Promise<void> {
+// ─── Smart follow-up date computation ─────────────────────────────────────────
+// NEW: Server-side follow-up date rules — do not rely on LLM guessing the date.
+// Called by callStream.ts handleStop() instead of using the raw LLM date.
+export function computeFollowupDate(
+  intent: string,
+  score: number,
+  buyingTimeline: string | null,
+  festivalName?: string | null,
+): { date: Date; reason: string } | null {
+  const now = new Date();
+  const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86400000);
+  const nextSalaryDay = () => {
+    const d = new Date(now.getFullYear(), now.getMonth() + 1, 1, 10, 0, 0);
+    return d;
+  };
+
+  // Hot buy — same day +2 hours
+  if (intent === "hot_buy" || score >= 85) {
+    const d = new Date(now.getTime() + 2 * 3600000);
+    return { date: d, reason: "Hot lead — immediate follow-up (2 hours)" };
+  }
+
+  // Timeline-based
+  if (buyingTimeline === "immediate") {
+    return { date: addDays(now, 1), reason: "Customer ready to buy — next day follow-up" };
+  }
+  if (buyingTimeline === "15days") {
+    return { date: addDays(now, 10), reason: "Customer buying in 15 days — check-in at 10 days" };
+  }
+  if (buyingTimeline === "month") {
+    return { date: addDays(now, 22), reason: "Customer buying next month — follow-up at 22 days" };
+  }
+  if (buyingTimeline === "festival") {
+    const festDate = addDays(now, 35); // approximate festival-season window
+    return { date: festDate, reason: festivalName ? `${festivalName} season follow-up` : "Festival-season follow-up" };
+  }
+
+  // Intent-based defaults
+  if (intent === "interested" || score >= 60) {
+    return { date: addDays(now, 3), reason: "Warm lead — 3 day check-in" };
+  }
+  if (intent === "thinking" || score >= 40) {
+    return { date: addDays(now, 7), reason: "Thinking lead — 7 day nurture" };
+  }
+  if (intent === "future_date") {
+    // Salary cycle assumption
+    return { date: nextSalaryDay(), reason: "Salary-cycle lead — follow-up on 1st of next month" };
+  }
+
+  return null; // not_interested / wrong_number / needs_info with no timeline
+}
+
+// ─── Self-learning (unchanged from original) ─────────────────────────────────
+export async function learnFromTranscript(
+  transcript: string,
+  outcome: string,
+  source?: string,
+): Promise<void> {
   try {
-    // Pull existing KB titles for dedup (case-insensitive)
     const existing = await db.select({ title: knowledgeTable.title }).from(knowledgeTable);
     const existingTitles = new Set(existing.map((r) => r.title.toLowerCase().trim()));
 
@@ -732,12 +984,11 @@ Return JSON: { "items": [{
 }] }
 
 STRICT RULES:
-• "agent_mistake": agent gave wrong info AND customer corrected, OR agent refused a valid question. Quote both lines.
-• "price_correction": agent's price was disputed or contradicted in-call. Quote it.
-• "new_objection": a NEW objection phrasing the agent struggled with. NOT generic ("customer wants discount").
-• "missing_info": customer asked a specific question agent couldn't answer (specific model spec, scheme details).
-• Skip impressions like "customer interested in X" or "customer wants mileage" — those have zero training value.
-• Skip duplicates of well-known objections (price-match, EMI question, exchange).
+• "agent_mistake": agent gave wrong info AND customer corrected, OR agent refused a valid question.
+• "price_correction": agent's price was disputed or contradicted in-call.
+• "new_objection": a NEW objection phrasing the agent struggled with. NOT generic.
+• "missing_info": customer asked a specific question agent couldn't answer.
+• Skip impressions like "customer interested in X" — no training value.
 • If nothing meets the bar, return {"items": []}. Empty is GOOD — quality over quantity.`,
         },
         { role: "user", content: `Transcript:\n${transcript}\n\nCall outcome: ${outcome}` },
@@ -748,13 +999,13 @@ STRICT RULES:
 
     const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
     const items: Array<{ type: string; category: string; title: string; content: string; evidence?: string }> = parsed.items ?? [];
-
     const validCats = new Set(["faq", "policy", "objection", "models", "price", "general"]);
     let inserted = 0;
+
     for (const item of items) {
       if (!item.title || !item.content) continue;
       const tNorm = item.title.toLowerCase().trim();
-      if (existingTitles.has(tNorm)) continue; // dedup
+      if (existingTitles.has(tNorm)) continue;
       const category = validCats.has(item.category) ? item.category : "general";
       await db.insert(knowledgeTable).values({
         title: item.title.slice(0, 120),

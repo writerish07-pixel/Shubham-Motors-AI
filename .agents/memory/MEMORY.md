@@ -1,0 +1,2 @@
+- [KB merge invariant](sakshi-kb-and-emi.md) — DEFAULT_HERO_KNOWLEDGE must ALWAYS be in the prompt; admin KB appends, never replaces. Also: LLM never does EMI math.
+- [Outbound personalization wiring](sakshi-outbound-context.md) — ExoML must pass `direction` Parameter; outbound-context map keyed by last-10 phone digits on BOTH sides.

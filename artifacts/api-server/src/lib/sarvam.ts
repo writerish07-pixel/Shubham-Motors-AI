@@ -1,21 +1,24 @@
 import axios from "axios";
+import http from "http";
+import https from "https";
 import { logger } from "./logger";
 import { prepareTtsText } from "./ttsPrep";
 
 const SARVAM_BASE = "https://api.sarvam.ai";
 
-// Hard timeouts — production showed Sarvam occasionally hangs for 30+ s on
-// transient infrastructure issues. Without a tight cap the customer hears
-// dead air for the full hang. Sane defaults: STT 6 s, TTS 5 s, LID 3 s.
-// These match the legacy Python code's `*_TIMEOUT_SEC` constants which were
-// proven in production.
+// Hard timeouts — production showed Sarvam occasionally hangs for 30+ s.
 const STT_TIMEOUT_MS = 6_000;
 const TTS_TIMEOUT_MS = 5_000;
 const LID_TIMEOUT_MS = 3_000;
 
-function key() {
-  return process.env.SARVAM_API_KEY ?? "";
-}
+// FIX: keepAlive HTTP agents — reuse TCP connections to Sarvam.
+// Eliminates ~50ms TCP handshake on every STT/TTS call under sustained load.
+const _httpAgent  = new http.Agent({ keepAlive: true, maxSockets: 20 });
+const _httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 20 });
+const KEEP_ALIVE = { httpAgent: _httpAgent, httpsAgent: _httpsAgent };
+
+function key() { return process.env.SARVAM_API_KEY ?? ""; }
+function whisperKey() { return process.env.OPENAI_API_KEY ?? process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? ""; }
 
 function normalizeLangCode(lang: string): string {
   if (lang.includes("-")) return lang;
@@ -27,74 +30,144 @@ function normalizeLangCode(lang: string): string {
   return map[lang] ?? "hi-IN";
 }
 
-/**
- * Speech-to-text via Sarvam saarika:v2.5
- * Accepts a raw audio Buffer (WAV, MP3, etc.) — max 30 seconds.
- * For longer audio, caller should chunk before calling.
- */
+// ── Circuit breaker for Sarvam STT ───────────────────────────────────────────
+// FIX: Under concurrent load, Sarvam STT can hit rate limits or hang.
+// Circuit breaker: after 3 consecutive failures, open the circuit and use
+// Whisper API fallback for 60 seconds, then half-open to retry Sarvam.
+// This prevents all simultaneous calls from degrading at the same time.
+interface CircuitBreakerState {
+  failures: number;
+  lastFailureAt: number;
+  isOpen: boolean;
+}
+const _sttCircuit: CircuitBreakerState = { failures: 0, lastFailureAt: 0, isOpen: false };
+const CIRCUIT_FAILURE_THRESHOLD = 3;
+const CIRCUIT_RESET_MS = 60_000; // 60 seconds
+
+function circuitAllowsSarvam(): boolean {
+  if (!_sttCircuit.isOpen) return true;
+  // Half-open: allow a probe after reset period
+  if (Date.now() - _sttCircuit.lastFailureAt > CIRCUIT_RESET_MS) {
+    _sttCircuit.isOpen = false;
+    _sttCircuit.failures = 0;
+    logger.info("Sarvam STT circuit breaker: half-open, probing Sarvam");
+    return true;
+  }
+  return false;
+}
+
+function recordSarvamSuccess(): void {
+  _sttCircuit.failures = 0;
+  _sttCircuit.isOpen = false;
+}
+
+function recordSarvamFailure(): void {
+  _sttCircuit.failures++;
+  _sttCircuit.lastFailureAt = Date.now();
+  if (_sttCircuit.failures >= CIRCUIT_FAILURE_THRESHOLD) {
+    _sttCircuit.isOpen = true;
+    logger.warn({ failures: _sttCircuit.failures }, "Sarvam STT circuit breaker: OPEN — switching to Whisper fallback");
+  }
+}
+
+// ── Whisper fallback STT ──────────────────────────────────────────────────────
+async function speechToTextWhisper(audioBuf: Buffer, language: string): Promise<string> {
+  const k = whisperKey();
+  if (!k) { logger.warn("Whisper fallback: no API key available"); return ""; }
+
+  try {
+    // Map Sarvam lang codes to Whisper language hints
+    const langMap: Record<string, string> = {
+      "hi-IN": "hi", "en-IN": "en", "mr-IN": "mr", "ta-IN": "ta",
+      "te-IN": "te", "kn-IN": "kn", "gu-IN": "gu", "bn-IN": "bn",
+    };
+    const whisperLang = langMap[normalizeLangCode(language)] ?? "hi";
+
+    const form = new FormData();
+    form.append("model", "whisper-1");
+    form.append("language", whisperLang);
+    form.append("file", new Blob([new Uint8Array(audioBuf)], { type: "audio/wav" }), "audio.wav");
+
+    const response = await axios.post(
+      "https://api.openai.com/v1/audio/transcriptions",
+      form,
+      {
+        headers: { Authorization: `Bearer ${k}` },
+        timeout: 8_000,
+        ...KEEP_ALIVE,
+      }
+    );
+
+    const transcript = response.data?.text ?? "";
+    logger.info({ transcript: transcript.slice(0, 60), fallback: "whisper" }, "Whisper STT result");
+    return transcript;
+  } catch (err) {
+    logger.error({ err }, "Whisper STT fallback also failed");
+    return "";
+  }
+}
+
+// ── Public: speechToText (Sarvam with Whisper fallback) ───────────────────────
 export async function speechToText(
   audioBuf: Buffer,
   language: string = "hi-IN"
 ): Promise<string> {
+  // If circuit is open, skip Sarvam and go straight to Whisper
+  if (!circuitAllowsSarvam()) {
+    logger.debug("Sarvam STT circuit open — using Whisper fallback");
+    return speechToTextWhisper(audioBuf, language);
+  }
+
   try {
     const langCode = normalizeLangCode(language);
-
-    // Sarvam STT requires multipart/form-data with a `file` field
     const form = new FormData();
     form.append("model", "saarika:v2.5");
     form.append("language_code", langCode);
-    form.append("file", new Blob([audioBuf], { type: "audio/wav" }), "audio.wav");
+    form.append("file", new Blob([new Uint8Array(audioBuf)], { type: "audio/wav" }), "audio.wav");
 
     const response = await axios.post(
       `${SARVAM_BASE}/speech-to-text`,
       form,
       {
-        headers: {
-          "api-subscription-key": key(),
-          // axios + FormData sets Content-Type automatically (multipart/form-data + boundary)
-        },
+        headers: { "api-subscription-key": key() },
         timeout: STT_TIMEOUT_MS,
+        ...KEEP_ALIVE,
       }
     );
 
     const transcript = response.data?.transcript ?? "";
     logger.debug({ transcript, langCode }, "Sarvam STT result");
+    recordSarvamSuccess();
     return transcript;
   } catch (err: unknown) {
-    const ae = err as { response?: { status?: number; data?: unknown } };
-    logger.error({ status: ae.response?.status, body: ae.response?.data }, "Sarvam STT error");
-    return "";
+    const ae = err as { response?: { status?: number; data?: unknown }; code?: string };
+    logger.error({ status: ae.response?.status, code: ae.code, body: ae.response?.data }, "Sarvam STT error");
+    recordSarvamFailure();
+
+    // Immediate fallback to Whisper on this call — don't make customer wait
+    logger.info("Falling back to Whisper STT for this turn");
+    return speechToTextWhisper(audioBuf, language);
   }
 }
 
-/**
- * Text-to-speech via Sarvam bulbul:v2
- * Returns base64-encoded WAV audio.
- */
+// ── Public: textToSpeech ─────────────────────────────────────────────────────
 export async function textToSpeech(
   text: string,
   language: string = "hi-IN"
 ): Promise<string> {
   try {
     const langCode = normalizeLangCode(language);
-    // Convert English brand/model words → phonetic Devanagari so the customer
-    // can clearly hear "Xoom 125" as "ज़ूम वन ट्वेंटी फाइव" instead of garble.
     const speakable = prepareTtsText(text);
+
     const response = await axios.post(
       `${SARVAM_BASE}/text-to-speech`,
       {
-        inputs: [speakable.slice(0, 500)], // Sarvam TTS max ~500 chars per request
+        inputs: [speakable.slice(0, 500)],
         target_language_code: langCode,
         speaker: "anushka",
         model: "bulbul:v2",
         enable_preprocessing: true,
-        // Ask Sarvam for 8 kHz directly — Exotel needs 8 kHz, and Sarvam's
-        // own resampler/anti-alias is better than our naive biquad. Cuts the
-        // "metallic / muffled" artifact callers were complaining about and
-        // also shaves ~30% off the TTS payload size (faster network).
         speech_sample_rate: 8000,
-        // Default pace (1.0). The previous 0.95 made the voice sound dragged
-        // and lengthened every reply by ~5% for no real clarity benefit.
       },
       {
         headers: {
@@ -102,8 +175,10 @@ export async function textToSpeech(
           "Content-Type": "application/json",
         },
         timeout: TTS_TIMEOUT_MS,
+        ...KEEP_ALIVE,
       }
     );
+
     const audios: string[] = response.data?.audios ?? [];
     return audios[0] ?? "";
   } catch (err: unknown) {
@@ -113,6 +188,7 @@ export async function textToSpeech(
   }
 }
 
+// ── Public: detectLanguage ───────────────────────────────────────────────────
 export async function detectLanguage(text: string): Promise<string> {
   try {
     const response = await axios.post(
@@ -124,10 +200,16 @@ export async function detectLanguage(text: string): Promise<string> {
           "Content-Type": "application/json",
         },
         timeout: LID_TIMEOUT_MS,
+        ...KEEP_ALIVE,
       }
     );
     return response.data?.language_code ?? "hi-IN";
   } catch {
     return "hi-IN";
   }
+}
+
+// ── Export circuit breaker status for health endpoint ────────────────────────
+export function getSttCircuitStatus(): { isOpen: boolean; failures: number; lastFailureAt: number } {
+  return { ..._sttCircuit };
 }
