@@ -355,6 +355,7 @@ export async function generateAgentReply(
   discoverySignals?: DiscoverySignals,
   convStage?: ConvStage,
   emotionalTone?: EmotionalTone,
+  pendingQuestion?: string,
 ): Promise<string> {
   const [knowledge, fuelPrice, festival] = await Promise.all([
     buildKnowledgeContext(),
@@ -367,7 +368,7 @@ export async function generateAgentReply(
     addressForm, language, knowledge, fuelPrice, leadProfile,
     discoverySignals ?? {}, convStage ?? "connect",
     emotionalTone ?? "neutral", festival,
-    conversationHistory.length,
+    conversationHistory.length, pendingQuestion,
   );
 
   const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
@@ -411,6 +412,7 @@ export async function* generateAgentReplyStream(
   discoverySignals?: DiscoverySignals,
   convStage?: ConvStage,
   emotionalTone?: EmotionalTone,
+  pendingQuestion?: string,
 ): AsyncGenerator<string, void, void> {
   const [knowledge, fuelPrice, festival] = await Promise.all([
     buildKnowledgeContext(),
@@ -439,7 +441,7 @@ export async function* generateAgentReplyStream(
     addressForm, language, knowledge, fuelPrice, leadProfile,
     discoverySignals ?? {}, convStage ?? "connect",
     tone, festival,
-    conversationHistory.length,
+    conversationHistory.length, pendingQuestion,
   );
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
@@ -508,6 +510,7 @@ async function buildSystemPrompt(
   tone: EmotionalTone,
   festival: { name: string; offer: string; endDate: string } | null,
   turn: number,
+  pendingQuestion?: string,
 ): Promise<string> {
   const merged = knowledge && knowledge.trim()
     ? `${DEFAULT_HERO_KNOWLEDGE}\n\n[ADMIN KB OVERRIDES — dealer-curated, takes precedence when contradicts the baseline above]\n${knowledge}`
@@ -521,9 +524,13 @@ async function buildSystemPrompt(
     ? "\n⚠️ TONE NOTE: Customer is engaged and asking questions. Match their energy — be more enthusiastic and thorough."
     : "";
 
+  const topicInterrupt = pendingQuestion
+    ? `\n╔══ TOPIC INTERRUPT — HIGHEST PRIORITY ══╗\n⚡ The customer just changed topic mid-conversation and asked: "${pendingQuestion}"\nEven if you were in the middle of another point, answer THIS new question FIRST in your opening sentence, THEN continue. Never ignore the new question.`
+    : "";
+
   return SAKSHI_SYSTEM_PROMPT(
     addressForm, language, merged, fuelPrice, leadProfile,
-    signals, stage, festival, turn, toneInstruction
+    signals, stage, festival, turn, toneInstruction, topicInterrupt
   );
 }
 
@@ -539,8 +546,9 @@ const SAKSHI_SYSTEM_PROMPT = (
   festival: { name: string; offer: string; endDate: string } | null,
   turn: number,
   toneInstruction: string,
+  topicInterrupt: string,
 ) => `You are SAKSHI — a real, highly experienced female sales executive at Shubham Motors, an authorised Hero MotoCorp dealership in Jaipur. You are NOT an AI. You are a warm, emotionally intelligent human consultant on a phone call. Your job is not to "give information" — it is to BUILD TRUST, UNDERSTAND THE PERSON, and either book a showroom visit or transfer to a closer.
-
+${topicInterrupt}
 CURRENT JAIPUR PETROL PRICE: ₹${fuelPrice}/L (use for fuel-savings math).
 ${formatLeadProfile(leadProfile)}
 ${formatDiscoverySignals(signals)}

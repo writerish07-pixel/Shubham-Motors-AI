@@ -110,7 +110,7 @@ const INTENTS: Record<string, Intent> = {
       "ठीक है", "हाँ जी", "जी हाँ", "हाँ हाँ",
     ],
     words: ["haan", "ok", "okay", "हाँ", "हां", "achha", "accha", "अच्छा"],
-    response: "जी! बताइए — कोई particular bike देखी है, या मैं options बताऊँ?",
+    response: "Bilkul! Ek baat batayein — bike sirf aap chalenge ya ghar mein koi aur bhi chalata hai? Family ke hisaab se recommend karungi.",
   },
 };
 
@@ -156,13 +156,30 @@ export function detectIntent(text: string, turn: number): string | null {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// THINKING FILLERS — short phrases played INSTANTLY after STT while the LLM is
+// still generating its first token. Eliminates the multi-second dead air the
+// customer would otherwise hear between speaking and getting a reply. Rotated
+// round-robin per turn. Pre-cached below so playback needs no live TTS call.
+// ─────────────────────────────────────────────────────────────────────────────
+export const THINKING_FILLERS: string[] = [
+  "जी, समझ रही हूँ।",
+  "अच्छा जी, एक second।",
+  "हाँ जी, देखती हूँ।",
+  "बिल्कुल, बताती हूँ।",
+  "जी बिल्कुल, सोच रही हूँ।",
+  "हाँ, समझ गयी।",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PHRASE CACHE — pre-synthesized PCM for stock replies
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Every intent response, plus a few catch-all acknowledgements Sakshi falls
-// back to. If the LLM emits any of these verbatim, we skip the Sarvam call.
+// Every intent response, plus the thinking fillers and a few catch-all
+// acknowledgements Sakshi falls back to. If the LLM (or filler path) emits any
+// of these verbatim, we skip the Sarvam call.
 const CACHED_PHRASES: string[] = [
   ...Object.values(INTENTS).map((i) => i.response),
+  ...THINKING_FILLERS,
   // Common AI fallback / stalling phrases
   "जी, समझ रही हूँ। थोड़ा detail दीजिए?",
   "जी? एक बार फिर से बताइए?",

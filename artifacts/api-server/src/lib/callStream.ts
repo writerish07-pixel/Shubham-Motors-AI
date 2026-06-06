@@ -22,7 +22,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
-import { detectIntent, getCachedPhrasePcm, warmPhraseCache } from "./voiceFastPath";
+import { detectIntent, getCachedPhrasePcm, warmPhraseCache, THINKING_FILLERS } from "./voiceFastPath";
 import {
   generateAgentReplyStream,
   analyzeCallIntent,
@@ -104,6 +104,9 @@ interface Session {
   emotionalTone: EmotionalTone;
   /** Whether this is an outbound (auto-dialer) call */
   isOutbound: boolean;
+  /** A NEW question the customer asked mid-answer (topic interrupt) — the LLM
+   *  is told to answer it first. Cleared after each LLM turn. */
+  pendingQuestion: string | null;
 }
 
 // ── WebSocket server ─────────────────────────────────────────────────────────
@@ -246,6 +249,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     discoverySignals: {},
     convStage: "connect",
     emotionalTone: "neutral",
+    pendingQuestion: null,
   };
 
   // Greeting — personalised for outbound calls referencing previous interest
@@ -550,6 +554,17 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     return;
   }
 
+  // ── TOPIC INTERRUPT DETECTION ──────────────────────────────────────────────
+  // If the agent was talking about topic A and the customer suddenly asks about
+  // topic B, capture the new question so the LLM answers it FIRST this turn.
+  const lastAgentTurn = session.history.filter(h => h.role === "assistant").slice(-1)[0]?.content ?? "";
+  if (session.turn > 1 && detectTopicShift(lastAgentTurn, correctedText)) {
+    session.pendingQuestion = correctedText;
+    logger.info({ callSid: session.callSid, pendingQ: correctedText.slice(0, 60) }, "Topic interrupt detected");
+  }
+  const currentPendingQ = session.pendingQuestion;
+  session.pendingQuestion = null;
+
   // FIX #3: Pass discoverySignals, convStage, emotionalTone to LLM
   session.history.push({ role: "user", content: customerText });
   if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
@@ -560,8 +575,21 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.speakingStartedAt = Date.now();
   const myGen = ++session.ttsGen;
 
+  // ── THINKING FILLER — kill the LLM first-token dead air ────────────────────
+  // Play a short cached phrase in parallel with LLM generation. The first real
+  // sentence is chained AFTER this promise (playChain starts as fillerDone) so
+  // audio never overlaps. Guarded by myGen + ttsAbort so barge-in cancels it
+  // like any other playback.
+  const fillerText = THINKING_FILLERS[session.turn % THINKING_FILLERS.length]!;
+  const fillerDone: Promise<void> = (async () => {
+    const pcm = getCachedPhrasePcm(fillerText, session.language) ?? await synthesizeTts(fillerText, session.language);
+    if (pcm && !session.ttsAbort && !session.isClosed && session.ttsGen === myGen && ws.readyState === WebSocket.OPEN) {
+      await playPcm8k(ws, session.streamSid, pcm, session);
+    }
+  })().catch(() => {});
+
   const played: string[] = [];
-  let playChain: Promise<void> = Promise.resolve();
+  let playChain: Promise<void> = fillerDone;
   let transferText: string | null = null;
   let attemptedCount = 0;
   let ttsFailures = 0;
@@ -577,6 +605,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       session.discoverySignals,   // NEW
       session.convStage,           // NEW
       session.emotionalTone,       // NEW
+      currentPendingQ ?? undefined, // NEW: topic interrupt
     )) {
       if (session.ttsAbort || session.isClosed) break;
       if (/^\s*\[TRANSFER/i.test(sentence)) { transferText = sentence; break; }
@@ -623,6 +652,37 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   if (["buy", "book", "lena hai", "chahiye", "confirm", "ready", "le lunga"].some(s => lower.includes(s))) {
     await db.update(leadsTable).set({ status: "hot", score: 90 }).where(eq(leadsTable.id, session.leadId));
   }
+}
+
+// ── detectTopicShift ──────────────────────────────────────────────────────────
+// Detects when the customer asks about something clearly different from what the
+// agent was just talking about — used to flag a topic interrupt so the LLM
+// answers the new question first.
+function detectTopicShift(lastAgentText: string, customerText: string): boolean {
+  // High-signal buckets only. Bare generic Hindi tokens (kitna / kab / kahan /
+  // monthly / cost / rupee) are deliberately excluded — they match almost any
+  // question and would fire spurious topic-interrupts on nearly every turn.
+  const topics: Record<string, RegExp> = {
+    scooter: /scooter|scooty|destini|pleasure|xoom|vida/i,
+    bike: /\bbike\b|splendor|glamour|xtreme|hf deluxe|passion|xpulse|bullet/i,
+    price: /\bprice\b|on.?road|ex.?showroom|kitne ka|kitne ki|kimat|qeemat|कीमत/i,
+    emi: /\bemi\b|finance|\bloan\b|kist|किस्त|down ?payment|installment/i,
+    address: /\baddress\b|showroom kahan|\blocation\b|kahan hai|kahan ho|jagah/i,
+    compare: /honda|bajaj|\btvs\b|yamaha|suzuki|compare|versus|\bvs\b/i,
+    mileage: /mileage|kmpl|average|kitna deti|\bfuel\b/i,
+    timing: /timing|kitne baje|kab khulta|kab tak|\bopen\b|band hota/i,
+  };
+
+  const topicOf = (text: string): string | null => {
+    for (const [topic, regex] of Object.entries(topics)) {
+      if (regex.test(text)) return topic; // first strong match wins
+    }
+    return null;
+  };
+
+  const agentTopic = topicOf(lastAgentText.toLowerCase());
+  const customerTopic = topicOf(customerText.toLowerCase());
+  return customerTopic !== null && agentTopic !== null && customerTopic !== agentTopic;
 }
 
 // ── isCustomerAskingForHuman (unchanged from original) ────────────────────────

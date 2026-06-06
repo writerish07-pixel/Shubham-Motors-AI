@@ -2,3 +2,4 @@
 - [Outbound personalization wiring](sakshi-outbound-context.md) — ExoML must pass `direction` Parameter; outbound-context map keyed by last-10 phone digits on BOTH sides.
 - [Outbound retry state machine](sakshi-outbound-retry.md) — follow-up pending→dialing→(completed|pending|whatsapp_fallback); status webhook drives retries via resolveOutboundFollowupOutcome; attemptCount incremented once by scheduler claim; guarded UPDATEs prevent duplicate calls/sends.
 - [CRM-field persistence](sakshi-crm-persistence.md) — status webhook fills lead CRM fields from call analysis; `interestedModel` is COALESCE-filled only (never clobber a confirmed model with an LLM inference); other CRM fields are last-write-wins.
+- [Voice pipeline: fillers, topic-interrupt, forks](sakshi-voice-pipeline.md) — never copy uploaded "_v3" wholesale (older fork); thinking-fillers must chain via playChain=fillerDone (no parallel = overlap); topic-shift buckets use high-signal terms only.
