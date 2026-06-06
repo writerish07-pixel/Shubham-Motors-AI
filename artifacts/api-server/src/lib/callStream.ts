@@ -575,17 +575,21 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.speakingStartedAt = Date.now();
   const myGen = ++session.ttsGen;
 
-  // ── THINKING FILLER — kill the LLM first-token dead air ────────────────────
-  // Play a short cached phrase in parallel with LLM generation. The first real
-  // sentence is chained AFTER this promise (playChain starts as fillerDone) so
-  // audio never overlaps. Guarded by myGen + ttsAbort so barge-in cancels it
-  // like any other playback.
+  // ── THINKING FILLER (conditional) — kill the LLM first-token dead air ───────
+  // Only speak a filler if the first real sentence is NOT ready within
+  // FILLER_DELAY_MS. Fast turns (instant direct-KB answers) skip it entirely, so
+  // Sakshi doesn't say "ek second" before every quick reply. When it does fire,
+  // the first real sentence is chained AFTER it (playChain starts as fillerDone)
+  // so audio never overlaps. Guarded by myGen + ttsAbort so barge-in cancels it.
+  const FILLER_DELAY_MS = 650;
   const fillerText = THINKING_FILLERS[session.turn % THINKING_FILLERS.length]!;
+  let firstSentenceReady = false;
   const fillerDone: Promise<void> = (async () => {
+    await new Promise((r) => setTimeout(r, FILLER_DELAY_MS));
+    if (firstSentenceReady || session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
     const pcm = getCachedPhrasePcm(fillerText, session.language) ?? await synthesizeTts(fillerText, session.language);
-    if (pcm && !session.ttsAbort && !session.isClosed && session.ttsGen === myGen && ws.readyState === WebSocket.OPEN) {
-      await playPcm8k(ws, session.streamSid, pcm, session);
-    }
+    if (firstSentenceReady || !pcm || session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
+    await playPcm8k(ws, session.streamSid, pcm, session);
   })().catch(() => {});
 
   const played: string[] = [];
@@ -610,10 +614,12 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       if (session.ttsAbort || session.isClosed) break;
       if (/^\s*\[TRANSFER/i.test(sentence)) { transferText = sentence; break; }
       attemptedCount++;
+      const isFirstSentence = attemptedCount === 1;
       const myTts = synthesizeTts(sentence, session.language);
       const prev = playChain;
       playChain = (async () => {
         const pcm = await myTts;
+        if (isFirstSentence) firstSentenceReady = true; // real audio ready → suppress pending filler
         await prev;
         if (!pcm) { ttsFailures++; return; }
         if (session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
