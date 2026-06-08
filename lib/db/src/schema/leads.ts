@@ -30,6 +30,12 @@ export const leadsTable = pgTable("leads", {
   /** Daily commute distance in km — drives mileage model recommendation */
   dailyKm: integer("daily_km"),
 
+  /** Vehicle segment the customer wants — the single most important discovery
+   *  signal. Recommendations are scoped to this; persisted so the agent never
+   *  re-asks it on a later call. One of: 100cc | 125cc | 160cc+ | scooter_110 |
+   *  scooter_125 | electric */
+  segment: text("segment"),
+
   /** Approximate budget discussed in ₹ */
   budget: integer("budget"),
 

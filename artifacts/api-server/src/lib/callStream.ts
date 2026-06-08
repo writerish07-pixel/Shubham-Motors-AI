@@ -236,6 +236,16 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     ? leadProfile.name
     : "Sir";
 
+  // Seed discovery signals from prior calls so the agent never re-asks what it
+  // already knows (segment → km → budget → current vehicle carry forward).
+  const priorSignals: DiscoverySignals = {};
+  if (lead) {
+    if (lead.segment) priorSignals.segment = lead.segment as DiscoverySignals["segment"];
+    if (lead.dailyKm) priorSignals.km = lead.dailyKm;
+    if (lead.budget) priorSignals.budget = lead.budget;
+    if (lead.currentVehicle) priorSignals.currentVehicle = lead.currentVehicle;
+  }
+
   const session: Session = {
     callSid, streamSid,
     leadId: lead?.id ?? 0,
@@ -253,8 +263,8 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     ttsGen: 0,
     leadProfile,
     isOutbound,
-    // NEW: initialise sales intelligence
-    discoverySignals: {},
+    // NEW: initialise sales intelligence (seeded from prior-call CRM data)
+    discoverySignals: priorSignals,
     convStage: "connect",
     emotionalTone: "neutral",
     pendingQuestion: null,
@@ -426,6 +436,7 @@ async function handleStop(session: Session): Promise<void> {
         ...(analysis.competitorReason ? { competitorReason: analysis.competitorReason } : {}),
         ...(analysis.buyingTimeline ? { buyingTimeline: analysis.buyingTimeline } : {}),
         // discoverySignals from live session (more reliable than LLM extraction)
+        ...(session.discoverySignals.segment ? { segment: session.discoverySignals.segment } : {}),
         ...(session.discoverySignals.km ? { dailyKm: session.discoverySignals.km } : {}),
         ...(session.discoverySignals.budget ? { budget: session.discoverySignals.budget } : {}),
         ...(session.discoverySignals.currentVehicle ? { currentVehicle: session.discoverySignals.currentVehicle } : {}),
