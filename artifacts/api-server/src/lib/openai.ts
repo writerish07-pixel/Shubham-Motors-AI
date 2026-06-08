@@ -159,6 +159,11 @@ export interface DiscoverySignals {
   financeInterest?: boolean;// True if customer asked about EMI/finance
   exchangeInterest?: boolean;// True if customer mentioned old bike exchange
   purpose?: string;         // "office" | "college" | "business" | "family"
+  // SEGMENT INTEREST — what category the customer actually wants.
+  // MUST be known before recommending any model. Never suggest Splendor
+  // to someone who asked about 125cc or scooters.
+  segment?: "100cc" | "125cc" | "160cc+" | "scooter_110" | "scooter_125" | "electric";
+  interestedModel?: string; // Specific model named e.g. "Xtreme 125R"
 }
 
 // NEW: Conversation stage — computed server-side, injected into prompt.
@@ -230,6 +235,38 @@ export function extractDiscoverySignals(
     else if (/family|ghar|घर/i.test(t)) updated.purpose = "family";
   }
 
+  // ── SEGMENT INTEREST — MOST IMPORTANT signal for recommendations ───────────
+  if (!updated.segment) {
+    const modelMap: Array<[RegExp, NonNullable<DiscoverySignals["segment"]>]> = [
+      [/xtreme\s*125|glamour|super\s*splendor/i, "125cc"],
+      [/xtreme\s*160|xtreme\s*160r|xpulse/i, "160cc+"],
+      [/splendor|hf\s*deluxe|passion/i, "100cc"],
+      [/destini\s*125|xoom\s*125/i, "scooter_125"],
+      [/destini\s*110|pleasure|destini\s*prime/i, "scooter_110"],
+      [/vida|electric|ev\b/i, "electric"],
+    ];
+    for (const [rx, seg] of modelMap) { if (rx.test(t)) { updated.segment = seg; break; } }
+
+    if (!updated.segment) {
+      if (/\b100\s*cc\b|\b100cc\b/i.test(t)) updated.segment = "100cc";
+      else if (/\b125\s*cc\b|\b125cc\b/i.test(t)) updated.segment = "125cc";
+      else if (/\b160\s*cc\b|\b160cc\b|\b150\s*cc\b|\b150cc\b/i.test(t)) updated.segment = "160cc+";
+    }
+    if (!updated.segment && /scooter|scooty|scooti/i.test(t)) {
+      updated.segment = /125/i.test(t) ? "scooter_125" : "scooter_110";
+    }
+  } else if (updated.segment === "scooter_110" && /125/i.test(t)) {
+    updated.segment = "scooter_125";
+  }
+
+  // Specific model
+  if (!updated.interestedModel) {
+    const models = ["Xtreme 125R","Xtreme 160R","Xpulse 200","Splendor Plus","Splendor XTEC",
+      "HF Deluxe","Glamour X","Super Splendor","Passion Plus","Destini 125","Destini 110",
+      "Destini Prime","Xoom 125","Pleasure Plus","Vida V1 Pro"];
+    for (const m of models) { if (t.includes(m.toLowerCase())) { updated.interestedModel = m; break; } }
+  }
+
   return updated;
 }
 
@@ -287,15 +324,81 @@ function formatLeadProfile(p?: LeadProfile): string {
 // NEW: Format discovery signals for prompt injection.
 function formatDiscoverySignals(signals: DiscoverySignals): string {
   const lines: string[] = [];
-  if (signals.km) lines.push(`• Daily commute: ${signals.km} km/day`);
+
+  // SEGMENT — most critical, always first
+  if (signals.segment) {
+    const seg: Record<string, string> = {
+      "100cc": "100cc BIKE (Splendor / HF Deluxe range)",
+      "125cc": "125cc BIKE (Super Splendor / Glamour / Xtreme 125R)",
+      "160cc+": "160cc+ BIKE (Xtreme 160R / Xpulse)",
+      "scooter_110": "110cc SCOOTER (Pleasure+ / Destini 110)",
+      "scooter_125": "125cc SCOOTER (Xoom 125 / Destini 125)",
+      "electric": "ELECTRIC (Vida V1 Pro)",
+    };
+    lines.push(`• ⭐ SEGMENT INTEREST: ${seg[signals.segment] ?? signals.segment}`);
+    lines.push(`  → Recommend ONLY within this segment. NEVER suggest Splendor if they want 125cc/scooter.`);
+  } else {
+    lines.push(`• ⚠️ SEGMENT UNKNOWN — ASK before recommending: "Scooter ya bike? Kitne CC?"`);
+  }
+  if (signals.interestedModel) lines.push(`• Named model: ${signals.interestedModel}`);
+  if (signals.km) {
+    lines.push(`• Daily commute: ${signals.km} km/day`);
+    if (signals.segment) {
+      const best = getBestModelForSegmentAndKm(signals.segment, signals.km);
+      if (best) lines.push(`• ✅ BEST MATCH (${signals.segment} + ${signals.km}km): ${best}`);
+    }
+  }
   if (signals.budget) lines.push(`• Budget: ₹${signals.budget.toLocaleString("en-IN")}`);
-  if (signals.familyUse) lines.push(`• Family use: yes (comfort matters)`);
-  if (signals.currentVehicle) lines.push(`• Current vehicle: ${signals.currentVehicle}`);
+  if (signals.familyUse) lines.push(`• Family use: YES — pillion comfort, seat, easy handling matter`);
+  if (signals.currentVehicle) lines.push(`• Current vehicle: ${signals.currentVehicle} (offer exchange bonus)`);
   if (signals.purpose) lines.push(`• Purpose: ${signals.purpose}`);
-  if (signals.financeInterest) lines.push(`• Finance interest: yes (proactively offer EMI)`);
-  if (signals.exchangeInterest) lines.push(`• Exchange interest: yes (mention exchange bonus)`);
+  if (signals.financeInterest) lines.push(`• Finance interest: YES — proactively offer EMI`);
+  if (signals.exchangeInterest) lines.push(`• Exchange interest: YES — mention ₹10,000-20,000 bonus`);
+
   if (lines.length === 0) return "";
-  return `\n╔══ WHAT YOU KNOW FROM THIS CALL ══╗\n${lines.join("\n")}\n• Do NOT ask for information already listed above.\n• Use these facts to personalise your recommendation.\n╚══════════════════════════════════╝`;
+  return `\n╔══ CUSTOMER PROFILE (KNOWN THIS CALL) ══╗\n${lines.join("\n")}\n• NEVER recommend outside customer segment. NEVER re-ask known info.\n╚════════════════════════════════════════╝`;
+}
+
+// Server-side recommendation engine — returns the BEST model for a segment + km.
+// Eliminates the LLM defaulting to Splendor for everything.
+function getBestModelForSegmentAndKm(segment: string, km: number): string | null {
+  const m: Record<string, { high: string; low: string; mid: string }> = {
+    "100cc": {
+      high: "HF Deluxe (83 kmpl — highest mileage, best for 50+ km/day)",
+      mid:  "Splendor+ XTEC (80 kmpl, better features)",
+      low:  "Splendor+ XTEC or Passion+ (budget + preference)",
+    },
+    "125cc": {
+      high: "Super Splendor XTEC (65 kmpl — best 125cc mileage, smooth power)",
+      mid:  "Super Splendor XTEC or Glamour X (efficiency vs style)",
+      low:  "Glamour X (style) or Xtreme 125R (sporty, 60 kmpl)",
+    },
+    "160cc+": {
+      high: "Xtreme 160R 2V (45 kmpl — best segment mileage, daily sport)",
+      mid:  "Xtreme 160R 2V (daily) or 4V (more power)",
+      low:  "Xtreme 160R 4V (premium feel, weekend + city)",
+    },
+    "scooter_110": {
+      high: "Pleasure+ XTEC (55 kmpl — best 110cc scooter mileage)",
+      mid:  "Pleasure+ XTEC (mileage) or Destini 110 (family comfort)",
+      low:  "Destini 110 (family, wide seat, comfortable)",
+    },
+    "scooter_125": {
+      high: "Xoom 125 VX (50 kmpl, sporty, efficient for longer commute)",
+      mid:  "Destini 125 (family/premium) or Xoom 125 (sporty)",
+      low:  "Destini 125 ZX (premium, storage, family comfort)",
+    },
+    "electric": {
+      high: "Vida V1 Pro (110km range — fixed daily route up to 60km)",
+      mid:  "Vida V1 Pro (zero petrol cost)",
+      low:  "Vida V1 Pro (city EV — confirm home charging first)",
+    },
+  };
+  const e = m[segment];
+  if (!e) return null;
+  if (km >= 60) return e.high;
+  if (km <= 30) return e.low;
+  return e.mid;
 }
 
 // NEW: Stage-specific instructions injected per turn.
@@ -547,7 +650,17 @@ const SAKSHI_SYSTEM_PROMPT = (
   turn: number,
   toneInstruction: string,
   topicInterrupt: string,
-) => `You are SAKSHI — a real, highly experienced female sales executive at Shubham Motors, an authorised Hero MotoCorp dealership in Jaipur. You are NOT an AI. You are a warm, emotionally intelligent human consultant on a phone call. Your job is not to "give information" — it is to BUILD TRUST, UNDERSTAND THE PERSON, and either book a showroom visit or transfer to a closer.
+) => `You are SAKSHI — Shubham Motors (Hero MotoCorp, Jaipur) ki top sales executive. You are a REAL person, NOT an AI. Your job is NOT to answer questions — it is to MAKE SALES and push showroom visits.
+
+━━━ NON-NEGOTIABLE RULES ━━━
+1. You are a SALESPERSON, not an information desk. Every reply must MOVE THE SALE FORWARD.
+2. EVERY single reply ends with EITHER a discovery question OR a showroom/test-ride push. NEVER just answer and stop.
+3. NEVER recommend a model until you know the customer's SEGMENT (bike/scooter + CC). If unknown, ask it.
+4. Recommend the RIGHT model for their segment + km — NEVER default to Splendor for everyone.
+5. Drive the conversation. Fill silence. Ask follow-ups. Convince. Close.
+
+BAD (info-bot — FORBIDDEN): "Splendor ki mileage 80 kmpl hai." [stops]
+GOOD (salesperson): "Splendor 80 kmpl deti hai — par pehle batayein, aap bike dekh rahe hain ya scooter? Aur daily kitne km? Taaki main aapke liye exact best model bata sakoon. Test ride toh free hai hi!"
 ${topicInterrupt}
 CURRENT JAIPUR PETROL PRICE: ₹${fuelPrice}/L (use for fuel-savings math).
 ${formatLeadProfile(leadProfile)}
@@ -629,12 +742,50 @@ NEVER name just ONE model when the customer asked a category question.
 • "Available hai / stock / milegi" = INVENTORY question → check KB, else offer arrangement timeline.
 • NEVER say "हमारे पास नहीं है" for any Hero model.
 
-╔══ KM/DAY → BIKE TIER ══╗
-• <30 km/day  → any tier; prioritise budget + customer preference.
-• 30–60 km/day → mileage-lean: Splendor Plus, HF Deluxe, Passion Pro.
-• 60–100 km/day → MILEAGE MANDATORY: Splendor Plus (80 kmpl) or HF Deluxe (83 kmpl). Quote fuel savings.
-• >100 km/day → MILEAGE ONLY. Quote monthly fuel cost vs 50 kmpl alternative.
-Math: monthly_fuel = (daily × 30 ÷ kmpl) × ₹${fuelPrice}. E.g. 100 km/day @ 83 kmpl = ₹${Math.round((3000/83)*fuelPrice).toLocaleString("en-IN")}/month vs scooter @ 50 kmpl ₹${Math.round((3000/50)*fuelPrice).toLocaleString("en-IN")}/month → saves ₹${Math.round(((3000/50)-(3000/83))*fuelPrice).toLocaleString("en-IN")}/month.
+RECOMMENDATION RULES — READ EVERY TIME BEFORE SUGGESTING A MODEL:
+
+STEP 1: Customer ka SEGMENT pata hai? (100cc/125cc/160cc/scooter/electric)
+  NO  → Pehle puchho: "Scooter ya bike? Aur kitne CC — 100cc, 125cc, ya zyada?"
+        Segment jaane bina koi specific model suggest MAT karo.
+  YES → Step 2.
+STEP 2: Daily km pata hai?
+  NO  → Puchho: "Daily roughly kitne km chalate hain?"
+  YES → Neeche matrix se best model nikalo — customer ke segment ke ANDAR.
+STEP 3: Recommendation do WITH reason + close:
+  GALAT: "Splendor lelo." (har case mein Splendor — yeh BAND)
+  SAHI: "125cc mein 60km daily ke liye Super Splendor XTEC best hai — 65 kmpl, ₹2991/month petrol. Test ride kab aayenge?"
+
+SEGMENT x KM MATRIX (CUSTOMER PROFILE section already shows BEST MATCH — use it):
+
+100cc BIKE:
+  60+ km/day  → HF Deluxe (83 kmpl, highest mileage)
+  30-60 km/day → Splendor+ XTEC (80 kmpl, better features)
+  <30 km/day  → Splendor+ XTEC / Passion+
+
+125cc BIKE:
+  60+ km/day  → Super Splendor XTEC (65 kmpl, best 125cc mileage)
+  30-60 km/day → Super Splendor XTEC / Glamour X
+  <30 km/day  → Glamour X (style) / Xtreme 125R (sporty)
+
+160cc+ BIKE:
+  60+ km/day  → Xtreme 160R 2V (45 kmpl)
+  any         → Xtreme 160R 4V (power) / 2V (value)
+
+110cc SCOOTER:
+  50+ km/day  → Pleasure+ XTEC (55 kmpl)
+  family/<50  → Destini 110 (comfort) / Pleasure+ (mileage)
+
+125cc SCOOTER:
+  50+ km/day  → Xoom 125 (50 kmpl, sporty)
+  family      → Destini 125 ZX (wide seat, storage) ALWAYS for family
+
+ELECTRIC:
+  <110km/day  → Vida V1 Pro (zero petrol)
+
+FUEL SAVINGS (use to convince — never push Splendor blindly, push the RIGHT model):
+  25km/day: HF Deluxe (83kmpl)=₹976/mo vs scooter (50kmpl)=₹1620/mo
+  50km/day: Super Splendor (65kmpl)=₹2492/mo vs Glamour (55kmpl)=₹2945/mo
+  70km/day: HF Deluxe (83kmpl)=₹2733/mo vs Pulsar (45kmpl)=₹5040/mo
 
 ╔══ CLOSING TECHNIQUES ══╗
 • ASSUMPTIVE: "Kal Saturday ko showroom convenient hoga ya Sunday subah? Test ride ready rakhwa deti hoon."

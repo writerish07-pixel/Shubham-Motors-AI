@@ -107,6 +107,14 @@ interface Session {
   /** A NEW question the customer asked mid-answer (topic interrupt) — the LLM
    *  is told to answer it first. Cleared after each LLM turn. */
   pendingQuestion: string | null;
+
+  // ── PROACTIVE SALES ENGINE ──────────────────────────────────────────────────
+  /** Timer that fires when customer is silent — agent proactively speaks */
+  proactiveTimer: ReturnType<typeof setTimeout> | null;
+  /** Number of proactive nudges fired this call (capped at 4) */
+  proactiveCount: number;
+  /** Timestamp of last agent speech — prevents nudge firing during TTS */
+  lastAgentSpokeAt: number;
 }
 
 // ── WebSocket server ─────────────────────────────────────────────────────────
@@ -250,6 +258,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     convStage: "connect",
     emotionalTone: "neutral",
     pendingQuestion: null,
+    proactiveTimer: null,
+    proactiveCount: 0,
+    lastAgentSpokeAt: Date.now(),
   };
 
   // Greeting — personalised for outbound calls referencing previous interest
@@ -269,6 +280,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
 
   session.transcript.push(`Agent: ${greeting}`);
   session.history.push({ role: "assistant", content: greeting });
+  session.lastAgentSpokeAt = Date.now();
+  // PROACTIVE: if customer doesn't respond within 8s of greeting, Sakshi speaks first
+  scheduleProactiveNudge(ws, session, 8000);
 
   const cachedPcm = GREETING_CACHE.get(greeting);
   if (cachedPcm) {
@@ -343,6 +357,7 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
   }
 
   if (energy > SILENCE_RMS) {
+    if (session.speechCount === 0) cancelProactiveTimer(session); // speech onset — never nudge over the customer
     session.speechCount++;
     session.silenceCount = 0;
     session.audioBuf.push(chunk);
@@ -370,6 +385,7 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
 
 // ── handleStop ────────────────────────────────────────────────────────────────
 async function handleStop(session: Session): Promise<void> {
+  cancelProactiveTimer(session);
   logger.info({ callSid: session.callSid }, "Call stream stopped — analysing");
   session.ttsAbort = true;
   session.isSpeaking = false;
@@ -462,6 +478,7 @@ async function handleStop(session: Session): Promise<void> {
 
 // ── runPipeline ───────────────────────────────────────────────────────────────
 async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): Promise<void> {
+  cancelProactiveTimer(session); // customer is speaking — cancel any pending nudge
   if (ws.readyState !== WebSocket.OPEN) return;
   if (session.isClosed) return;
 
@@ -653,11 +670,142 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     return;
   }
 
+  // PROACTIVE: re-arm — if customer is silent 6s after agent finishes, Sakshi continues
+  session.lastAgentSpokeAt = Date.now();
+  scheduleProactiveNudge(ws, session, 6000);
+
   // Hot-lead detection
   const lower = customerText.toLowerCase();
   if (["buy", "book", "lena hai", "chahiye", "confirm", "ready", "le lunga"].some(s => lower.includes(s))) {
     await db.update(leadsTable).set({ status: "hot", score: 90 }).where(eq(leadsTable.id, session.leadId));
   }
+}
+
+// ── PROACTIVE SALES ENGINE ───────────────────────────────────────────────────
+// Core fix for the "reactive bot" problem. A real salesperson never sits
+// silent — they fill silence with discovery questions, pitches, and closes.
+//
+//   • After greeting          → scheduleProactiveNudge(8s)
+//   • After every agent reply  → scheduleProactiveNudge(6s)
+//   • Customer speaks          → cancelProactiveTimer()
+//   • Timer fires              → getProactiveMessage() picks the smartest line
+//     based on what we still don't know (segment → km → family → budget),
+//     then pitches/closes once enough is known.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function cancelProactiveTimer(session: Session): void {
+  if (session.proactiveTimer) {
+    clearTimeout(session.proactiveTimer);
+    session.proactiveTimer = null;
+  }
+}
+
+function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number): void {
+  cancelProactiveTimer(session);
+  if (session.isClosed || session.proactiveCount >= 4) return;
+
+  session.proactiveTimer = setTimeout(async () => {
+    session.proactiveTimer = null;
+    if (session.isClosed || session.isSpeaking || session.isProcessing) return;
+    if (session.speechCount > 0) return; // customer is mid-utterance — do not talk over them
+    if (Date.now() - session.lastAgentSpokeAt < 2000) return; // TTS may still be playing
+
+    const msg = getProactiveMessage(session);
+    if (!msg) return;
+
+    session.proactiveCount++;
+    logger.info({ callSid: session.callSid, count: session.proactiveCount, msg: msg.slice(0, 60) }, "Proactive nudge");
+
+    session.isSpeaking = true;
+    session.ttsAbort = false;
+    session.speakingStartedAt = Date.now();
+    const myGen = ++session.ttsGen;
+    try {
+      const pcm = await synthesizeTts(msg, session.language);
+      if (!pcm || session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
+      await playPcm8k(ws, session.streamSid, pcm, session);
+      if (!session.ttsAbort && session.ttsGen === myGen) {
+        session.history.push({ role: "assistant", content: msg });
+        session.transcript.push(`Agent[proactive]: ${msg}`);
+        session.lastAgentSpokeAt = Date.now();
+        scheduleProactiveNudge(ws, session, 10000); // nudge again in 10s if still silent
+      }
+    } catch (err) {
+      logger.error({ err }, "Proactive nudge TTS failed");
+    } finally {
+      session.isSpeaking = false;
+      session.ttsAbort = false;
+      session.speakingStartedAt = undefined;
+    }
+  }, delayMs);
+}
+
+// Picks the most valuable proactive line. Priority: segment → km → family →
+// budget → current vehicle → segment-specific pitch → close.
+function getProactiveMessage(session: Session): string | null {
+  const s = session.discoverySignals;
+  const name = session.leadName === "Sir" ? "Ji" : `${session.leadName} ji`;
+  const turn = session.turn;
+  const count = session.proactiveCount;
+
+  // Customer hasn't said anything yet
+  if (turn <= 1) {
+    return `${name}, aap sun pa rahe hain? Main Shubham Motors se Sakshi bol rahi hoon — koi bhi Hero bike ya scooter ke baare mein jaanna ho toh batayein!`;
+  }
+
+  // ── DISCOVERY — segment FIRST (cannot recommend without it) ────────────────
+  if (!s.segment && count <= 2) {
+    return `${name}, ek quick sawaal — scooter dekh rahe hain ya bike? Aur roughly kitne CC ka — 100cc, 125cc, ya kuch aur? Isse main exact best model bata sakti hoon.`;
+  }
+  if (!s.km && count <= 3) {
+    return `${name}, daily roughly kitne km chalate hain? Isse pata chalta hai kaunsa model sabse zyada fuel-efficient rahega aapke liye.`;
+  }
+  if (s.segment?.startsWith("scooter") && s.familyUse === undefined && count <= 3) {
+    return `${name}, scooter sirf aap chalenge ya family ke liye bhi? Wife ya bachche baithein toh seat size aur comfort matter karta hai.`;
+  }
+  if (!s.budget && count <= 4) {
+    return `${name}, roughly kitna budget soch rahe hain? EMI mein lena ho toh ₹3,000 mahine se shuru hota hai — Hero FinCorp 30 minute mein approve karta hai.`;
+  }
+  if (!s.currentVehicle && count <= 4) {
+    return `${name}, abhi kya chala rahe hain? Purani vehicle ho toh exchange mein ₹10,000-20,000 tak mil jaata hai.`;
+  }
+
+  // ── SEGMENT-SPECIFIC PITCH ─────────────────────────────────────────────────
+  const fuel = (km: number, kmpl: number) => Math.round((km * 30 / kmpl) * 108).toLocaleString("en-IN");
+
+  if (s.segment === "100cc" && s.km) {
+    const rec = s.km >= 60 ? "HF Deluxe — 83 kmpl, sabse zyada mileage" : "Splendor+ XTEC — 80 kmpl, India ka #1";
+    return `${name}, 100cc mein ${s.km} km daily ke liye ${rec} best hai. Sirf ₹${fuel(s.km, 80)} mahine petrol. Test ride ke liye kab aayenge?`;
+  }
+  if (s.segment === "125cc" && s.km) {
+    const rec = s.km >= 60 ? "Super Splendor XTEC — 65 kmpl, best 125cc mileage" : "Glamour X (style) ya Xtreme 125R (sporty)";
+    return `${name}, 125cc mein aur ${s.km} km daily ke hisaab se ${rec} perfect hai. Saturday subah test ride karwa doon ya Sunday?`;
+  }
+  if (s.segment === "160cc+") {
+    return `${name}, 160cc mein Xtreme 160R 2V daily commute ke liye perfect — 45 kmpl, sporty look. 4V version aur powerful hai. Dono ka test ride karwa deti hoon — kab aana suit karega?`;
+  }
+  if (s.segment === "scooter_110") {
+    const rec = s.km && s.km >= 50 ? "Pleasure+ XTEC — 55 kmpl, best mileage" : s.familyUse ? "Destini 110 — family-friendly, wide seat" : "Pleasure+ XTEC — lightweight, easy";
+    return `${name}, 110cc scooter mein ${rec} aapke liye best hai. Showroom aake ek baar dekh lein — test ride free hai. Kab convenient hai?`;
+  }
+  if (s.segment === "scooter_125") {
+    const rec = s.familyUse ? "Destini 125 ZX — wide seat, family ke liye perfect" : "Xoom 125 — sporty, 50 kmpl, youth-friendly";
+    return `${name}, 125cc scooter mein ${rec}. Test ride book kar deti hoon — Saturday ya Sunday, kab aayenge?`;
+  }
+  if (s.segment === "electric") {
+    return `${name}, Vida V1 Pro 110 km range deta hai ek charge mein — petrol ka kharcha bilkul zero. Ghar pe charging point hai? Test ride karwa deti hoon, aap khud feel karenge.`;
+  }
+
+  // ── CLOSE — push showroom visit ────────────────────────────────────────────
+  if (turn >= 3) {
+    const closes = [
+      `${name}, ek kaam karein — Saturday subah 11 baje showroom aa jaayein, main personally test ride ready rakhwa deti hoon. Plan ban sakta hai?`,
+      `${name}, WhatsApp pe full price list aur EMI details bhej deti hoon abhi — number same hai na aapka?`,
+      `${name}, abhi month-end pe special offers chal rahe hain — showroom aake dekh lein, 15-20 minute mein clear ho jaayega. Kab aayenge?`,
+    ];
+    return closes[count % closes.length] ?? closes[0]!;
+  }
+  return null;
 }
 
 // ── detectTopicShift ──────────────────────────────────────────────────────────
