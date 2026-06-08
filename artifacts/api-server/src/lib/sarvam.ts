@@ -167,7 +167,14 @@ export async function textToSpeech(
         speaker: "anushka",
         model: "bulbul:v2",
         enable_preprocessing: true,
-        speech_sample_rate: 8000,
+        // ── Clarity tuning — customer feedback: voice was fast / fumbled ──
+        // pace < 1 slows delivery so every word is distinct; loudness lifts it
+        // above phone-line noise. Generate at full 22.05 kHz and let the
+        // anti-aliased resampler downsample to 8 kHz — far clearer than
+        // synthesising natively at 8 kHz (which sounds thin and slurred).
+        pace: 0.85,
+        loudness: 1.2,
+        speech_sample_rate: 22050,
       },
       {
         headers: {
