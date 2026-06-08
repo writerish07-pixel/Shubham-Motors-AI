@@ -2,7 +2,6 @@ import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
-import { requireApiAuth } from "./middlewares/auth";
 import { logger } from "./lib/logger";
 
 const app: Express = express();
@@ -36,10 +35,6 @@ app.use(cors(corsOrigins.length ? { origin: corsOrigins, credentials: true } : {
 app.use("/api/knowledge/import", express.json({ limit: "25mb" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Token gate for all /api/* routes EXCEPT /healthz and the telephony webhooks
-// (Exotel callbacks carry no token). Accepts X-Admin-Token or Bearer.
-app.use("/api", requireApiAuth);
 
 app.use("/api", router);
 

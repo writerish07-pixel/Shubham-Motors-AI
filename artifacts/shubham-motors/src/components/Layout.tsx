@@ -19,7 +19,6 @@ const navItems = [
 export default function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const hasToken = typeof window !== "undefined" && !!localStorage.getItem("shubham_admin_token");
 
   return (
     <div className="flex h-screen bg-background overflow-hidden">
@@ -98,13 +97,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
         {/* Page */}
         <main className="flex-1 overflow-y-auto scrollbar-thin">
-          {!hasToken && (
-            <div className="bg-yellow-500/15 border-b border-yellow-500/30 px-4 py-2.5 text-xs text-yellow-300 flex items-center gap-2 flex-wrap">
-              <span className="font-semibold">Admin token not set.</span>
-              <span className="text-yellow-200/80">The dashboard's API requests will be rejected until you add it.</span>
-              <Link href="/settings"><span className="underline cursor-pointer font-medium">Open Settings →</span></Link>
-            </div>
-          )}
           {children}
         </main>
       </div>
