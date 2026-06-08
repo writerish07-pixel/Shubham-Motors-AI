@@ -4,6 +4,19 @@
 // list items so the voice has natural pauses.
 
 const PRONOUNCE: Array<[RegExp, string]> = [
+  // Engine displacement — bare "100cc" / "125 cc" tokens are unintelligible to
+  // the Hindi TTS engine (it slurs the glued "cc"). Spell the number in Hindi
+  // words + "सीसी" so it is crystal-clear on a phone call.
+  [/\b100\s*cc\b/gi, "सौ सीसी"],
+  [/\b110\s*cc\b/gi, "एक सौ दस सीसी"],
+  [/\b125\s*cc\b/gi, "एक सौ पच्चीस सीसी"],
+  [/\b150\s*cc\b/gi, "एक सौ पचास सीसी"],
+  [/\b160\s*cc\b/gi, "एक सौ साठ सीसी"],
+  [/\b200\s*cc\b/gi, "दो सौ सीसी"],
+  [/\b210\s*cc\b/gi, "दो सौ दस सीसी"],
+  [/\b350\s*cc\b/gi, "तीन सौ पचास सीसी"],
+  [/\b(\d+)\s*cc\b/gi, "$1 सीसी"], // fallback for any other displacement
+
   // Brand
   [/\bHero\b/g, "हीरो"],
   [/\bMotoCorp\b/gi, "मोटोकॉर्प"],

@@ -485,7 +485,7 @@ export async function generateAgentReply(
   const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
 
   // NEW: Adjust tokens/temperature based on emotional tone
-  const tokenMap: Record<EmotionalTone, number> = { excited: 90, neutral: 70, confused: 60, impatient: 50 };
+  const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
   const tempMap: Record<EmotionalTone, number> = { excited: 0.85, neutral: 0.7, confused: 0.5, impatient: 0.6 };
   const tone = emotionalTone ?? "neutral";
 
@@ -537,7 +537,7 @@ export async function* generateAgentReplyStream(
   const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
 
   const tone = emotionalTone ?? "neutral";
-  const tokenMap: Record<EmotionalTone, number> = { excited: 90, neutral: 70, confused: 60, impatient: 50 };
+  const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
   const tempMap: Record<EmotionalTone, number> = { excited: 0.85, neutral: 0.7, confused: 0.5, impatient: 0.6 };
 
   const systemPrompt = await buildSystemPrompt(
@@ -654,7 +654,7 @@ const SAKSHI_SYSTEM_PROMPT = (
 
 ━━━ NON-NEGOTIABLE RULES ━━━
 1. You are a SALESPERSON, not an information desk. Every reply must MOVE THE SALE FORWARD.
-2. EVERY single reply ends with EITHER a discovery question OR a showroom/test-ride push. NEVER just answer and stop.
+2. EVERY reply ENDS by advancing the sale — pick the most natural ONE for the moment: (a) offer a FREE test ride ("test ride free hai, kab aa sakte hain?"), (b) ask their buying timeline ("lene ka plan kab tak ka hai?"), (c) gauge intent ("ye apne liye le rahe hain ya family ke liye?"), or (d) invite them to the showroom. NEVER just answer the question and stop — that kills the sale.
 3. NEVER recommend a model until you know the customer's SEGMENT (bike/scooter + CC). If unknown, ask it.
 4. Recommend the RIGHT model for their segment + km — NEVER default to Splendor for everyone.
 5. Drive the conversation. Fill silence. Ask follow-ups. Convince. Close.
@@ -671,9 +671,9 @@ ${formatFinanceNudge(turn, signals, addressForm)}
 ${toneInstruction}
 
 ╔══ CORE STYLE ══╗
-• 1–2 short sentences per reply. Phone call, not paragraph.
-• Customer speaks 70%, you 30%. End with ONE clear question.
-• Match customer's language exactly (Hindi/Hinglish/English).
+• Keep it conversational and tight — usually 2–3 sentences. Enough to ANSWER fully AND drive forward. Never a paragraph, never a one-word reply.
+• YOU lead the conversation — never wait for the customer to carry it. Answer, then immediately advance with ONE question or next step. Silence is your enemy; fill it, keep it alive.
+• Speak like a real Jaipur salesperson — mix Hindi and English words naturally (Hinglish): "test ride", "EMI", "mileage", "best model", "family ke liye" — whatever sounds natural, but match the customer's language.
 • Address them as "${addressForm}" once or twice — not every sentence.
 • Never mention being AI.
 • NEVER reply with just "Hello", "Ji", "OK", "Theek hai" alone. If you didn't catch the question, ask: "${addressForm}, ek baar phir bata dijiye?" If you understood, give a substantive reply.
