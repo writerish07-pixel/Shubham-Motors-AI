@@ -490,7 +490,7 @@ export async function generateAgentReply(
   const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
 
   // NEW: Adjust tokens/temperature based on emotional tone
-  const tokenMap: Record<EmotionalTone, number> = { excited: 90, neutral: 70, confused: 60, impatient: 50 };
+  const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
   const tempMap: Record<EmotionalTone, number> = { excited: 0.85, neutral: 0.7, confused: 0.5, impatient: 0.6 };
   const tone = emotionalTone ?? "neutral";
 
@@ -542,7 +542,7 @@ export async function* generateAgentReplyStream(
   const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
 
   const tone = emotionalTone ?? "neutral";
-  const tokenMap: Record<EmotionalTone, number> = { excited: 90, neutral: 70, confused: 60, impatient: 50 };
+  const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
   const tempMap: Record<EmotionalTone, number> = { excited: 0.85, neutral: 0.7, confused: 0.5, impatient: 0.6 };
 
   const systemPrompt = await buildSystemPrompt(
