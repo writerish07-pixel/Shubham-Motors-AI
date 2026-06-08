@@ -68,7 +68,7 @@ export async function makeOutboundCall(
 }
 
 // Exotel's call-modify API expects a public URL that RETURNS ExoML — passing
-// raw XML inline is not supported. We host `/api/exotel/dial-agent.xml` which
+// raw XML inline is not supported. We host `/api/webhooks/exotel/dial-agent.xml` which
 // emits the Dial XML, and we point Exotel at that URL. The base URL must be
 // publicly reachable (production domain or REPLIT_DOMAINS).
 function publicBaseUrl(): string {
@@ -85,7 +85,7 @@ export async function transferCallToAgent(callSid: string, agentNumber: string):
     logger.error({ callSid }, "Cannot transfer — REPLIT_DOMAINS / PUBLIC_BASE_URL not set");
     return false;
   }
-  const xmlUrl = `${pub}/api/exotel/dial-agent.xml?to=${encodeURIComponent(agentNumber)}`;
+  const xmlUrl = `${pub}/api/webhooks/exotel/dial-agent.xml?to=${encodeURIComponent(agentNumber)}`;
   try {
     await axios.post(
       `${base}/Calls/${callSid}.json`,

@@ -16,6 +16,7 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\b210\s*cc\b/gi, "दो सौ दस सीसी"],
   [/\b350\s*cc\b/gi, "तीन सौ पचास सीसी"],
   [/\b(\d+)\s*cc\b/gi, "$1 सीसी"], // fallback for any other displacement
+  [/\bcc\b/gi, "सीसी"],            // stray "cc" with no leading number
 
   // Brand
   [/\bHero\b/g, "हीरो"],
@@ -58,21 +59,6 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\bXoom\b/gi, "ज़ूम"],
   [/\bMaestro\b/gi, "मेस्ट्रो"],
   [/\bVida\b/gi, "विडा"],
-
-  // Engine displacement (CC) + mileage — spoken clearly. Without this the Hindi
-  // TTS slurs "100cc"/"125cc" into an unintelligible blur. Specific numbers
-  // first, then the bare "cc"/"kmpl" fallbacks.
-  [/\b100\s*cc\b/gi, "वन हंड्रेड सी सी"],
-  [/\b110\s*cc\b/gi, "वन टेन सी सी"],
-  [/\b125\s*cc\b/gi, "वन ट्वेंटी फाइव सी सी"],
-  [/\b150\s*cc\b/gi, "वन फिफ्टी सी सी"],
-  [/\b160\s*cc\b/gi, "वन सिक्सटी सी सी"],
-  [/\b200\s*cc\b/gi, "टू हंड्रेड सी सी"],
-  [/\b210\s*cc\b/gi, "टू टेन सी सी"],
-  [/\b350\s*cc\b/gi, "थ्री फिफ्टी सी सी"],
-  [/\bcc\b/gi, "सी सी"],
-  [/\bkmpl\b/gi, "किलोमीटर प्रति लीटर"],
-  [/\bkm\s*\/\s*l\b/gi, "किलोमीटर प्रति लीटर"],
 
   // Variant codes
   [/\bIBS\b/g, "आई बी एस"],

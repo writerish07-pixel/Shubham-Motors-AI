@@ -130,7 +130,7 @@ router.post("/followups/:id/execute", async (req, res): Promise<void> => {
     ? `https://${process.env.REPLIT_DEV_DOMAIN}`
     : "http://localhost:5000";
 
-  const callSid = await makeOutboundCall(lead.phone, `${host}/api/webhooks/exotel/inbound`);
+  const callSid = await makeOutboundCall(lead.phone, host);
 
   await db.update(followupsTable)
     .set({ status: "completed" })

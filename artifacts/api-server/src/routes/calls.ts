@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable } from "@workspace/db";
 import {
   GetCallParams,
@@ -35,7 +35,7 @@ router.get("/calls", async (req, res): Promise<void> => {
   })
     .from(callsTable)
     .leftJoin(leadsTable, eq(callsTable.leadId, leadsTable.id))
-    .orderBy(callsTable.createdAt);
+    .orderBy(desc(callsTable.createdAt));
 
   let filtered = calls;
   if (params.success && params.data.leadId) {

@@ -163,6 +163,10 @@ export interface DiscoverySignals {
   // MUST be known before recommending any model. Never suggest Splendor
   // to someone who asked about 125cc or scooters.
   segment?: "100cc" | "125cc" | "160cc+" | "scooter_110" | "scooter_125" | "electric";
+  // STYLE PREFERENCE — the feel the customer wants, independent of CC.
+  // A "sporty" customer wants the Xtreme/Xpulse lineup even before naming a CC,
+  // so we must recommend models, not just ask "kitne CC?".
+  stylePreference?: "sporty" | "family" | "commuter";
   interestedModel?: string; // Specific model named e.g. "Xtreme 125R"
 }
 
@@ -259,6 +263,18 @@ export function extractDiscoverySignals(
     updated.segment = "scooter_125";
   }
 
+  // ── STYLE PREFERENCE — sporty vs commuter(mileage) vs family ──────────────
+  // "sporty mein?" must lead to the sporty lineup, not a generic CC list.
+  if (!updated.stylePreference) {
+    if (/\bsporty\b|\bsport\b|stylish|\bstyle\b|racing|powerful|\bpower\b|pickup|\bfast\b|दमदार|स्पोर्टी|स्पोर्ट|स्टाइलिश|रेसिंग/i.test(t)) {
+      updated.stylePreference = "sporty";
+    } else if (/mileage|average|kitna deti|kitni deti|माइलेज|एवरेज|कम खर्च|petrol bachat/i.test(t)) {
+      updated.stylePreference = "commuter";
+    } else if (/family|wife|biwi|patni|bachche|परिवार|पत्नी|बच्चे|comfort|आराम/i.test(t)) {
+      updated.stylePreference = "family";
+    }
+  }
+
   // Specific model
   if (!updated.interestedModel) {
     const models = ["Xtreme 125R","Xtreme 160R","Xpulse 200","Splendor Plus","Splendor XTEC",
@@ -341,9 +357,14 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
     };
     lines.push(`• ⭐ SEGMENT INTEREST: ${seg[signals.segment] ?? signals.segment}`);
     lines.push(`  → Recommend ONLY within this segment. NEVER suggest Splendor if they want 125cc/scooter.`);
+  } else if (signals.stylePreference === "sporty") {
+    lines.push(`• ⭐ STYLE: SPORTY — recommend the sporty lineup right away: Xtreme 125R, Xtreme 160R 2V/4V, Xpulse 200 4V. Use budget/CC only to pick BETWEEN them — do NOT just list "100/125/160cc" categories.`);
   } else {
     lines.push(`• ⚠️ SEGMENT UNKNOWN — ASK before recommending: "Scooter ya bike? Kitne CC?"`);
   }
+  if (signals.stylePreference === "sporty" && signals.segment) lines.push(`• Style: SPORTY — favour Xtreme / Xpulse within the segment.`);
+  if (signals.stylePreference === "commuter") lines.push(`• Style: COMMUTER — emphasise mileage (kmpl) + low running cost.`);
+  if (signals.stylePreference === "family") lines.push(`• Style: FAMILY — pillion comfort, wide seat, easy handling.`);
   if (signals.interestedModel) lines.push(`• Named model: ${signals.interestedModel}`);
   if (signals.km) {
     lines.push(`• Daily commute: ${signals.km} km/day`);

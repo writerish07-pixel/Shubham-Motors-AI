@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, boolean, text, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, boolean, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { campaignsTable } from "./campaigns";
 import { leadsTable } from "./leads";
 
@@ -13,6 +13,10 @@ export const campaignRecipientsTable = pgTable("campaign_recipients", {
   leadScoreAtSend: integer("lead_score_at_send"),
   leadStatusAfter: text("lead_status_after"),
   leadScoreAfter: integer("lead_score_after"),
-});
+}, (t) => ({
+  // Makes the existing onConflictDoNothing() in campaigns.ts actually work —
+  // one recipient row per (campaign, lead).
+  campaignLeadUniq: uniqueIndex("campaign_recipients_campaign_lead_uniq").on(t.campaignId, t.leadId),
+}));
 
 export type CampaignRecipient = typeof campaignRecipientsTable.$inferSelect;
