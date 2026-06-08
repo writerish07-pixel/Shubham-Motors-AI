@@ -82,7 +82,23 @@ const PRICE_QUERY_RE = /(?:price|कीमत|दाम|kitne ka|kitne ki|kya ra
 const VARIANT_QUERY_RE = /(?:variant|variants|कौन सी|kaunsi|kaun si|model|वेरिएंट|version)/i;
 const FEATURE_QUERY_RE = /(?:feature|features|specs|mileage|माइलेज|engine|cc|warranty|वारंटी)/i;
 const HOURS_QUERY_RE = /(?:timing|kab khulta|kab khulte|open|close|hours|शोरूम कब)/i;
-const ADDRESS_QUERY_RE = /(?:address|पता|location|kahan hai|कहाँ है|कैसे आऊं|directions)/i;
+// "pata"/"पता" is a homonym: पता = address, BUT "pata karna/lagana/chalana" = to find out.
+// FIND_OUT_RE catches the "find out / inquire" sense so it never triggers the address reply.
+const FIND_OUT_RE = /(?:पता|pata)\s*(?:करन|कर\b|लग|चल|karn|kar\b|laga|chal)/i;
+// Address intent in the ADDRESS sense only. "kahan/कहाँ" is matched ONLY with a
+// place cue (showroom/dealer/shop) so "Xoom kahan hai?" routes to model lookup, not address.
+const ADDRESS_QUERY_RE = new RegExp(
+  [
+    "address", "location", "directions",
+    "रास्ता", "raasta", "rasta",
+    "कैसे आऊं", "kaise aau",
+    "पता\\s*(?:क्या|बता|भेज|दे|दो)", "pata\\s*(?:kya|bata|bhej|de|do)",
+    "(?:showroom|dealer|shop|store|दुकान|शोरूम)\\s*(?:ka|ki|का|की)?\\s*(?:पता|pata|address)",
+    "(?:showroom|dealer|shop|store|शोरूम)\\s*(?:kahan|कहाँ)",
+    "(?:kahan|कहाँ)\\s*(?:hai|par|pe|है|पर|पे)?\\s*(?:showroom|dealer|shop|store|शोरूम)",
+  ].join("|"),
+  "i",
+);
 const YESNO_RE = /^(?:haan|han|ji|yes|ok|okay|theek|sahi|nahi|no|nope)[\s.!?]*$/i;
 const GREETING_RE = /^(?:hello|hi|namaste|namaskaar|namaskar|नमस्ते|jai mata di|salaam|salam)[\s.!?]*$/i;
 
@@ -114,7 +130,7 @@ export function tryDirectAnswer(
   if (HOURS_QUERY_RE.test(text)) {
     return `Shubham Motors सोमवार से शनिवार सुबह 9 से शाम 7 बजे तक, और रविवार सुबह 10 से शाम 5 तक खुला रहता है. आप कब आना चाहेंगे ${addressForm}?`;
   }
-  if (ADDRESS_QUERY_RE.test(text)) {
+  if (ADDRESS_QUERY_RE.test(text) && !FIND_OUT_RE.test(text)) {
     return `हमारा showroom जयपुर में है ${addressForm}, मैं exact location WhatsApp पर अभी भेज देती हूँ. क्या आज शाम का test ride book कर लूँ?`;
   }
 

@@ -168,6 +168,7 @@ export async function textToSpeech(
         model: "bulbul:v2",
         enable_preprocessing: true,
         speech_sample_rate: 8000,
+        pace: 0.9, // slightly slower for crystal-clear phone delivery
       },
       {
         headers: {

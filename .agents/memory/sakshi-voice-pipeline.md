@@ -37,3 +37,17 @@ description: Design rules for thinking-fillers and topic-interrupt in the Exotel
 ## TTS: bare "<N>cc" displacement must be spelled in Hindi words in ttsPrep
 **Rule:** ttsPrep.PRONOUNCE must normalize bare engine-displacement tokens ("100cc", "125 cc", "160cc") to Hindi number words + "सीसी" (e.g. सौ सीसी, एक सौ पच्चीस सीसी). Anchor on `\b(\d+)\s*cc\b` so it only touches literal "cc" — it will NOT clobber model names like Xtreme 160R / Xpulse 200 4V / Xoom 125 (no literal "cc"). Place CC rules before model-name rules; they're independent.
 **Why:** Sarvam Hindi TTS slurs the glued Latin "cc", so "100cc/125cc" was unintelligible on a live call. All TTS text (LLM, direct-KB, fillers, proactive nudges) flows through prepareTtsText() in sarvam.ts, so fixing it there covers every path.
+
+## TTS speaks Markdown aloud — strip it in ttsPrep AND forbid it in the prompt
+**Rule:** The LLM sometimes emits markdown (`**bold**`, numbered lists "1./2.", bullets) and the Sarvam engine reads the symbols literally — a live call had Sakshi saying "asterisk asterisk" and reading "one… two…". Two-layer fix: (1) `stripMarkdown()` in ttsPrep runs BEFORE the pronunciation map (strips emphasis/headings/code/list markers; keep `_` out of the final stray-symbol wipe so it can't corrupt control tokens); (2) a CORE STYLE prompt rule forbidding markdown/lists since the reply is spoken out loud, plus "name at most 2–3 options woven into one sentence, no brochure-style spec recitation".
+**Why:** Belt-and-suspenders: the prompt rule reduces markdown at the source, the strip is the guaranteed safety net for every TTS path. The [TRANSFER...] sentinel is extracted before TTS in callStream so stripMarkdown never sees it — but keep the stray-symbol wipe narrow regardless.
+**How to apply:** Any new TTS-bound text path still goes through prepareTtsText, so it's covered. If you add control tags that contain `*`/`#`/`>`, extract them before TTS.
+
+## Clarity ("agent talks too fast / fumbles") → Sarvam `pace` + unit pronunciation
+**Rule:** For "make it clearer so anyone understands", set `pace` on the Sarvam bulbul:v2 TTS payload (0.9 = ~10% slower, clearly more intelligible on a phone) and expand spoken units in ttsPrep (kmpl→किलोमीटर प्रति लीटर, kmph→…प्रति घंटा, "<N>km"→"<N> किलोमीटर"). Order unit rules kmpl/km-slash-l/kmph BEFORE the bare "<N>km" rule to avoid collisions.
+**Why:** Default pace + un-expanded "kmpl"/"km" (read as letters) made delivery feel rushed/garbled. `pace` lives only on the TTS payload — it does not affect STT/LID.
+
+## "pata"/पता is a homonym — guard the address direct-answer
+**Rule:** पता = address AND "pata karna/lagana/chalana" = to find out. The Tier-0 address direct-answer (tryDirectAnswer in modelRouter) must NOT fire on the "find out" sense, and must NOT fire on "<model> kahan hai". Guard: `ADDRESS_QUERY_RE.test(text) && !FIND_OUT_RE.test(text)`; match bare "kahan/कहाँ" ONLY with a place cue (showroom/dealer/shop) so model-availability questions route to model lookup.
+**Why:** A live call: customer said "Hero bikes ke baare mein pata karna hai" → old regex matched bare पता → fired the showroom-address canned reply + premature test-ride push; customer had to correct twice. Address check runs BEFORE model lookup, so a false-positive short-circuits the whole turn.
+**How to apply:** Keep a node regex test table (find-out vs address vs "<model> kahan hai") when touching these patterns — there are many Hinglish/Devanagari spellings.

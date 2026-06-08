@@ -75,6 +75,12 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\bCIBIL\b/gi, "सिबिल"],
   [/\bWhatsApp\b/gi, "वॉट्सऐप"],
 
+  // Mileage / speed units — read as letters otherwise ("k m p l")
+  [/\bkmpl\b/gi, "किलोमीटर प्रति लीटर"],
+  [/\bkm\s*\/\s*l\b/gi, "किलोमीटर प्रति लीटर"],
+  [/\bkmph\b/gi, "किलोमीटर प्रति घंटा"],
+  [/\b(\d+)\s*km\b/gi, "$1 किलोमीटर"],
+
   // Bank names
   [/\bHDFC\b/g, "एच डी एफ सी"],
   [/\bIDBI\b/g, "आई डी बी आई"],
@@ -98,8 +104,24 @@ function softenLists(text: string): string {
   return t;
 }
 
-export function prepareTtsText(text: string): string {
+// Strip Markdown/formatting so the TTS engine never speaks symbols aloud.
+// The LLM sometimes emits **bold**, numbered lists ("1.", "2.") or bullets;
+// without this the voice literally said "asterisk asterisk" on a live call.
+function stripMarkdown(text: string): string {
   let t = text;
+  t = t.replace(/\*\*([^*]+)\*\*/g, "$1");        // **bold**
+  t = t.replace(/\*([^*\n]+)\*/g, "$1");           // *italic*
+  t = t.replace(/__([^_]+)__/g, "$1");             // __bold__
+  t = t.replace(/`([^`]+)`/g, "$1");               // `code`
+  t = t.replace(/(^|\n)\s*#{1,6}\s*/g, "$1");      // # headings
+  t = t.replace(/(^|\n)\s*\d+[.)]\s+/g, "$1");     // "1." / "2)" list markers
+  t = t.replace(/(^|\n)\s*[-•·*]\s+/g, "$1");      // "- " / "• " / "* " bullets
+  t = t.replace(/[*`#>]/g, " ");                    // any stray symbols left (keep _ to not corrupt tokens)
+  return t;
+}
+
+export function prepareTtsText(text: string): string {
+  let t = stripMarkdown(text);
   for (const [re, rep] of PRONOUNCE) t = t.replace(re, rep);
   t = softenLists(t);
   return t.trim();
