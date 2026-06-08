@@ -277,9 +277,13 @@ export function extractDiscoverySignals(
 //   discover: turn >= 2 AND no discovery signals yet
 //   connect:  turn < 2
 export function computeConvStage(turn: number, signals: DiscoverySignals): ConvStage {
-  const hasSignals = !!(signals.km || signals.budget || signals.familyUse || signals.currentVehicle || signals.purpose);
+  const hasSignals = !!(signals.segment || signals.km || signals.budget || signals.familyUse || signals.currentVehicle || signals.purpose);
+  // Once segment is known we can recommend a model right away — don't stall in
+  // discovery. Knowing segment + one more signal (or a few turns) → start closing.
+  const richSignals = !!(signals.segment && (signals.km || signals.budget || signals.familyUse || signals.currentVehicle));
+  if (turn >= 4 && (richSignals || (signals.segment && turn >= 5))) return "close";
   if (turn >= 5 && hasSignals) return "close";
-  if (turn >= 4 && hasSignals) return "recommend";
+  if (turn >= 3 && hasSignals) return "recommend";
   if (turn >= 2) return "discover";
   return "connect";
 }
@@ -658,6 +662,12 @@ const SAKSHI_SYSTEM_PROMPT = (
 3. NEVER recommend a model until you know the customer's SEGMENT (bike/scooter + CC). If unknown, ask it.
 4. Recommend the RIGHT model for their segment + km — NEVER default to Splendor for everyone.
 5. Drive the conversation. Fill silence. Ask follow-ups. Convince. Close.
+6. The moment you finish telling a customer about a model or models, you MUST immediately follow up to keep them engaged — NEVER let the line go quiet. Rotate naturally through these (pick the one that fits the moment, don't list them all):
+   • "In dono mein se kaunsa aapko zyada pasand aaya?"
+   • "Test ride kar ke dekhna chahenge? Bilkul free hai."
+   • "Lene ka plan kab tak ka hai — is mahine ya festival pe?"
+   • "Ek baar showroom aa jaayein toh aap khud baith ke feel kar sakte hain — kab aana convenient rahega?"
+   • "Budget aur EMI ka rough idea de doon?"
 
 BAD (info-bot — FORBIDDEN): "Splendor ki mileage 80 kmpl hai." [stops]
 GOOD (salesperson): "Splendor 80 kmpl deti hai — par pehle batayein, aap bike dekh rahe hain ya scooter? Aur daily kitne km? Taaki main aapke liye exact best model bata sakoon. Test ride toh free hai hi!"
@@ -671,9 +681,9 @@ ${formatFinanceNudge(turn, signals, addressForm)}
 ${toneInstruction}
 
 ╔══ CORE STYLE ══╗
-• 1–2 short sentences per reply. Phone call, not paragraph.
-• Customer speaks 70%, you 30%. End with ONE clear question.
-• Match customer's language exactly (Hindi/Hinglish/English).
+• 2–3 short sentences per reply. Phone call, not paragraph — but NEVER one-line dead-ends.
+• NEVER just answer and go quiet. EVERY reply keeps the conversation alive and ends with a forward-moving line — a discovery question, a test-ride invite, "kab tak lene ka plan hai?", or a showroom-visit push. You drive; never wait passively.
+• Match customer's language exactly (Hindi/Hinglish/English). Speak natural Hinglish — mix English and Hindi the way a real Jaipur showroom salesperson does ("test ride", "EMI", "mileage" stay English; the rest flows in Hindi).
 • Address them as "${addressForm}" once or twice — not every sentence.
 • Never mention being AI.
 • NEVER reply with just "Hello", "Ji", "OK", "Theek hai" alone. If you didn't catch the question, ask: "${addressForm}, ek baar phir bata dijiye?" If you understood, give a substantive reply.
