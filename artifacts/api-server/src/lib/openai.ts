@@ -385,7 +385,7 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
   if (signals.exchangeInterest) lines.push(`• Exchange interest: YES — mention ₹10,000-20,000 bonus`);
 
   if (lines.length === 0) return "";
-  return `\n╔══ CUSTOMER PROFILE (KNOWN THIS CALL) ══╗\n${lines.join("\n")}\n• NEVER recommend outside customer segment. NEVER re-ask known info.\n╚════════════════════════════════════════╝`;
+  return `\n╔══ CUSTOMER PROFILE (KNOWN — may be from this or a previous call) ══╗\n${lines.join("\n")}\n• NEVER recommend outside customer segment. NEVER re-ask known info.\n• This info may come from an earlier call — reference it naturally ("aap commute ke liye dekh rahe the"), do NOT claim they said it in this call.\n╚════════════════════════════════════════╝`;
 }
 
 // Server-side recommendation engine — returns the BEST model for a segment + km.
