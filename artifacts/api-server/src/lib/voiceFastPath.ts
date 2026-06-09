@@ -5,6 +5,7 @@
 import type { DiscoverySignals } from "./openai";
 import { FINANCE_PARTNERS_LIST } from "./emiQuote";
 import { logger } from "./logger";
+import { sanitizeAgentSpeech } from "./ttsPrep";
 
 interface Intent {
   phrases: string[];

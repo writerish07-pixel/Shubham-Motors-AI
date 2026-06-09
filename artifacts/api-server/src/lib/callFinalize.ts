@@ -41,6 +41,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
     .where(eq(callsTable.id, callDbId));
 
   const terminalIntent = analysis.intent === "not_interested" || analysis.intent === "wrong_number";
+  const terminalForFollowup = terminalIntent || Boolean(analysis.lostDeal);
   const newStatus = analysis.lostDeal
     ? "lost"
     : terminalIntent
@@ -82,7 +83,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
     } as Record<string, unknown>)
     .where(eq(leadsTable.id, leadId));
 
-  if (terminalIntent) {
+  if (terminalForFollowup) {
     await db
       .update(followupsTable)
       .set({ status: "cancelled" })
@@ -120,7 +121,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
             lastCallSummary: analysis.summary,
             followupReason: followupSchedule.reason,
           },
-        } as Record<string, unknown>);
+        } as any);
       }
 
       await db

@@ -57,7 +57,7 @@ export const leadsTable = pgTable("leads", {
   /** Who makes the purchase decision — self | family | joint */
   decisionMaker: text("decision_maker"),
 
-  /** Lost-deal intelligence (customer bought elsewhere or explicitly chose competitor) */
+  /** Lost-deal intelligence (customer bought elsewhere or explicitly chose a competitor) */
   lostToBrand: text("lost_to_brand"),
   lostToDealer: text("lost_to_dealer"),
   lostReason: text("lost_reason"),
