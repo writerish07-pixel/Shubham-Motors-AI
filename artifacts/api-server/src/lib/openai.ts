@@ -25,10 +25,12 @@ import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
-import { classifyTurn, tryDirectAnswer } from "./modelRouter";
+import { classifyTurn } from "./modelRouter";
 
 // ─── Model IDs ───────────────────────────────────────────────────────────────
-const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
+// The conversation runs entirely on the premium model now (no mini tier) for
+// consistent, natural consultative quality. Background analysis/learning jobs
+// still use the cheaper gpt-4o-mini directly.
 const MODEL_PREMIUM = process.env.OPENAI_MODEL_PREMIUM ?? "gpt-4o";
 
 const openai = new OpenAI({
@@ -477,15 +479,11 @@ export async function generateAgentReply(
     conversationHistory.length, pendingQuestion,
   );
 
-  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
-  const direct = tryDirectAnswer(customerText, directKb, addressForm);
-  if (direct) {
-    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router → direct KB answer");
-    return direct;
-  }
-
+  // Every turn flows through the LLM persona (no canned template answers).
+  // The product catalog/prices stay injected as GROUNDING in the system prompt,
+  // so the model is accurate without sounding scripted.
   const tier = classifyTurn(customerText, conversationHistory);
-  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
+  const model = MODEL_PREMIUM;
 
   // NEW: Adjust tokens/temperature based on emotional tone
   const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
@@ -528,16 +526,10 @@ export async function* generateAgentReplyStream(
 
   const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
 
-  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
-  const direct = tryDirectAnswer(customerText, directKb, addressForm);
-  if (direct) {
-    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router (stream) → direct KB answer");
-    yield direct;
-    return;
-  }
-
+  // Every turn flows through the LLM persona — no canned template short-circuit.
+  // Knowledge stays in the system prompt as grounding (accurate, not scripted).
   const tier = classifyTurn(customerText, conversationHistory);
-  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
+  const model = MODEL_PREMIUM;
 
   const tone = emotionalTone ?? "neutral";
   const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
