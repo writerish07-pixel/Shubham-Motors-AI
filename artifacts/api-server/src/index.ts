@@ -24,5 +24,14 @@ setupVoicebotWS(server);
 
 server.listen(port, () => {
   logger.info({ port }, "Server listening");
+  if (!process.env.ADMIN_TOKEN) {
+    logger.warn("ADMIN_TOKEN is not set — all /api routes (except webhooks) will return 503");
+  }
+  if (!process.env.SARVAM_API_KEY) {
+    logger.warn("SARVAM_API_KEY is not set — voice STT/TTS will fail");
+  }
+  if (!process.env.DATABASE_URL) {
+    logger.warn("DATABASE_URL is not set — database operations will fail");
+  }
   startScheduler();
 });

@@ -217,7 +217,9 @@ async function runBlast(
           leadStatusAtSend: lead.status,
           leadScoreAtSend: lead.score,
           replied: false,
-        }).onConflictDoNothing();
+        }).onConflictDoNothing({
+          target: [campaignRecipientsTable.campaignId, campaignRecipientsTable.leadId],
+        });
         sent++;
       } else {
         failed++;

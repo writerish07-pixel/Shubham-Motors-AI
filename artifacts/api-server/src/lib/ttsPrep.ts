@@ -22,6 +22,10 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\bHero\b/g, "हीरो"],
   [/\bMotoCorp\b/gi, "मोटोकॉर्प"],
   [/\bShubham Motors\b/gi, "शुभम मोटर्स"],
+  [/\bShubham\b/gi, "शुभम"],
+  [/\bMotors\b/gi, "मोटर्स"],
+  [/\bSakshi\b/gi, "साक्षी"],
+  [/\bcruise\s*control\b/gi, "क्रूज़ कंट्रोल"],
 
   // Bike model names
   [/\bSplendor\s*Plus\s*XTEC\s*2\.0\b/gi, "स्प्लेंडर प्लस एक्सटेक टू पॉइंट ज़ीरो"],
@@ -121,9 +125,28 @@ function stripMarkdown(text: string): string {
   return t;
 }
 
+/** Strip amateur filler chains before TTS (Agent Identity PDF). */
+export function sanitizeAgentSpeech(text: string): string {
+  let t = text.trim();
+  const fillerStart = /^(\s*(?:जी|ji|अच्छा|achha|accha|बिल्कुल|bilkul|ठीक है|theek hai|thik hai|समझ गयी|समझ गई|samajh gayi|samajh gay|हाँ जी|haan ji|haan|ok|okay|perfect)[,!.?\s]*)+/i;
+  for (let i = 0; i < 3; i++) {
+    const next = t.replace(fillerStart, "").trim();
+    if (next === t) break;
+    t = next;
+  }
+  return t;
+}
+
 export function prepareTtsText(text: string): string {
-  let t = stripMarkdown(text);
+  let t = sanitizeAgentSpeech(stripMarkdown(text));
   for (const [re, rep] of PRONOUNCE) t = t.replace(re, rep);
   t = softenLists(t);
   return t.trim();
+}
+
+export function prepareNameForTts(name: string): string {
+  const t = name.trim();
+  if (!t || t === "Sir") return "";
+  if (/[\u0900-\u097F]/.test(t)) return t;
+  return t;
 }

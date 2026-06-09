@@ -25,10 +25,12 @@ import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
-import { classifyTurn, tryDirectAnswer } from "./modelRouter";
+import { classifyTurn } from "./modelRouter";
 
 // ─── Model IDs ───────────────────────────────────────────────────────────────
-const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
+// The conversation runs entirely on the premium model now (no mini tier) for
+// consistent, natural consultative quality. Background analysis/learning jobs
+// still use the cheaper gpt-4o-mini directly.
 const MODEL_PREMIUM = process.env.OPENAI_MODEL_PREMIUM ?? "gpt-4o";
 
 const openai = new OpenAI({
@@ -377,11 +379,13 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
   if (signals.familyUse) lines.push(`• Family use: YES — pillion comfort, seat, easy handling matter`);
   if (signals.currentVehicle) lines.push(`• Current vehicle: ${signals.currentVehicle} (offer exchange bonus)`);
   if (signals.purpose) lines.push(`• Purpose: ${signals.purpose}`);
-  if (signals.financeInterest) lines.push(`• Finance interest: YES — proactively offer EMI`);
+  if (signals.financeInterest) {
+    lines.push(`• Finance interest: YES — DO NOT stop at "finance achha option hai". Ask: (1) which model/budget (2) down payment amount (3) 24 or 36 month tenure. Quote reference EMI from table + disclaimer.`);
+  }
   if (signals.exchangeInterest) lines.push(`• Exchange interest: YES — mention ₹10,000-20,000 bonus`);
 
   if (lines.length === 0) return "";
-  return `\n╔══ CUSTOMER PROFILE (KNOWN THIS CALL) ══╗\n${lines.join("\n")}\n• NEVER recommend outside customer segment. NEVER re-ask known info.\n╚════════════════════════════════════════╝`;
+  return `\n╔══ CUSTOMER PROFILE (KNOWN — may be from this or a previous call) ══╗\n${lines.join("\n")}\n• NEVER recommend outside customer segment. NEVER re-ask known info.\n• This info may come from an earlier call — reference it naturally ("aap commute ke liye dekh rahe the"), do NOT claim they said it in this call.\n╚════════════════════════════════════════╝`;
 }
 
 // Server-side recommendation engine — returns the BEST model for a segment + km.
@@ -471,6 +475,21 @@ function formatFinanceNudge(turn: number, signals: DiscoverySignals, addressForm
   return `\n💡 FINANCE (offer only if it genuinely helps — e.g. budget came up): you may gently mention that easy EMI options exist (low down-payment, quick Hero FinCorp approval). Offer it as help, not a sales push. If finance isn't relevant to ${addressForm} right now, skip it.`;
 }
 
+function formatFinanceActive(turn: number, signals: DiscoverySignals, addressForm: string): string {
+  if (!signals.financeInterest) return formatFinanceNudge(turn, signals, addressForm);
+  return `
+╔══ FINANCE CONVERSATION — ACTIVE (customer asked about finance/EMI/loan) ══╗
+NEVER reply with only "haan finance achha option hai" or "EMI available hai" and STOP — that ends the sale.
+Required flow for ${addressForm}:
+1. If model unknown → ask which bike/scooter and rough budget.
+2. Ask ONE question: "Kitna down payment de sakte hain?" OR "24 mahine ya 36 mahine ki kisti?"
+3. Quote REFERENCE EMI from [PRECOMPUTED EMI TABLE] with disclaimer (CIBIL 8.5%–12%).
+4. Mention Hero FinCorp (30-min approval, zero processing on many schemes) or HDFC/IDBI if they ask bank.
+5. Close with next step: WhatsApp EMI sheet OR showroom for loan approval OR [TRANSFER:FINANCE] for exact CIBIL rate only.
+FORBIDDEN: one-line acknowledgement then silence.
+╚═══════════════════════════════════════════════════════════════════════════╝`;
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export async function generateAgentReply(
@@ -498,15 +517,11 @@ export async function generateAgentReply(
     conversationHistory.length, pendingQuestion,
   );
 
-  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
-  const direct = tryDirectAnswer(customerText, directKb, addressForm);
-  if (direct) {
-    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router → direct KB answer");
-    return direct;
-  }
-
+  // Every turn flows through the LLM persona (no canned template answers).
+  // The product catalog/prices stay injected as GROUNDING in the system prompt,
+  // so the model is accurate without sounding scripted.
   const tier = classifyTurn(customerText, conversationHistory);
-  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
+  const model = MODEL_PREMIUM;
 
   // NEW: Adjust tokens/temperature based on emotional tone
   const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
@@ -549,16 +564,10 @@ export async function* generateAgentReplyStream(
 
   const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
 
-  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
-  const direct = tryDirectAnswer(customerText, directKb, addressForm);
-  if (direct) {
-    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router (stream) → direct KB answer");
-    yield direct;
-    return;
-  }
-
+  // Every turn flows through the LLM persona — no canned template short-circuit.
+  // Knowledge stays in the system prompt as grounding (accurate, not scripted).
   const tier = classifyTurn(customerText, conversationHistory);
-  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
+  const model = MODEL_PREMIUM;
 
   const tone = emotionalTone ?? "neutral";
   const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
@@ -697,7 +706,7 @@ ${formatLeadProfile(leadProfile)}
 ${formatDiscoverySignals(signals)}
 ${formatStageInstructions(stage, addressForm)}
 ${formatFestivalOffer(festival)}
-${formatFinanceNudge(turn, signals, addressForm)}
+${formatFinanceActive(turn, signals, addressForm)}
 ${toneInstruction}
 
 ╔══ HOW YOU SPEAK ══╗
@@ -742,7 +751,7 @@ ONLY when the customer explicitly names a SPECIFIC model with the number (e.g. "
 
 [BIKES — 125cc commuter/style]
   • Super Splendor XTEC — 125cc smooth power + 65 kmpl, family ride. Variants: XTEC, XTEC DSS.
-  • Glamour X — 125cc styled commuter, ~55 kmpl. Variants: DRS Self, DSS Self.
+  • Glamour X — 125cc styled commuter, ~55 kmpl. Variants: DRS Self, DSS Self (DSS has cruise control for highway comfort).
   • Xtreme 125R — 125cc SPORTY bike, ~60 kmpl, premium segment styling. Variants: IBS, ABS, ABS Dual Channel.
 
 [BIKES — 160cc+ sporty]
@@ -783,6 +792,7 @@ NEVER name just ONE model when the customer asked a category question.
 • "Tell me about X / features / mileage / specs" = INFO question → Always answer using Hero brand knowledge.
 • "Available hai / stock / milegi" = INVENTORY question → check KB, else offer arrangement timeline.
 • NEVER say "हमारे पास नहीं है" for any Hero model.
+• NEVER deny a feature that exists in [MODEL FEATURES] — e.g. Glamour X DSS HAS cruise control; taxi/commercial and BH registration are possible under RTO rules (guide, don't refuse).
 
 RECOMMENDATION RULES — READ EVERY TIME BEFORE SUGGESTING A MODEL:
 
@@ -948,8 +958,18 @@ const _EMI_TABLE = buildEmiTable();
 // ─── Default KB (unchanged from original, fuel updated) ─────────────────────
 const DEFAULT_HERO_KNOWLEDGE = `
 [SHOWROOM DETAILS]
-Shubham Motors, authorised Hero MotoCorp dealership, Jaipur.
+Shubham Motors, authorised Hero MotoCorp dealership, Lal Kothi, Tonk Road, Jaipur.
 Open Mon–Sat 9AM–7PM, Sunday 10AM–5PM. Test rides available daily.
+
+[MODEL FEATURES — never deny these]
+Glamour X (125cc): LED headlamp, digital-analog cluster, i3S idle stop-start, COMBI BRAKE, tubeless tyres. Glamour X DSS variant includes CRUISE CONTROL — YES, confirm DSS if customer asks cruise control. DRS variant may not have cruise — clarify variant.
+Super Splendor XTEC: XTEC tech, DSS with extra comfort features.
+Xtreme 125R / 160R: sporty posture, ABS on higher variants.
+
+[REGISTRATION — taxi, commercial, BH number]
+Private registration included in on-road price (RTO + insurance per variant).
+Taxi / commercial registration: YES on eligible Hero models under Rajasthan RTO rules — commercial permit + commercial insurance extra. Shubham Motors RTO desk assists. Never flat-refuse; ask model + city of use.
+BH (Bharat) series plate: for eligible inter-state portability (MoRTH/RTO rules). Dealership guides documents — ask salaried vs business, never say "impossible" without checking.
 
 [PRICES — ON-ROAD JAIPUR, ₹ — as of 16-May-2026. Always quote on-road by default.]
 

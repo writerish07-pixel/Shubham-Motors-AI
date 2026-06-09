@@ -1,5 +1,6 @@
 import axios from "axios";
 import { logger } from "./logger";
+import { getPublicBaseUrl } from "./publicUrl";
 
 // Read at call time so any secret update + restart picks up fresh values
 function creds() {
@@ -67,20 +68,9 @@ export async function makeOutboundCall(
   }
 }
 
-// Exotel's call-modify API expects a public URL that RETURNS ExoML — passing
-// raw XML inline is not supported. We host `/api/webhooks/exotel/dial-agent.xml` which
-// emits the Dial XML, and we point Exotel at that URL. The base URL must be
-// publicly reachable (production domain or REPLIT_DOMAINS).
-function publicBaseUrl(): string {
-  const domains = (process.env.REPLIT_DOMAINS ?? "").split(",").map(s => s.trim()).filter(Boolean);
-  if (domains[0]) return `https://${domains[0]}`;
-  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/$/, "");
-  return "";
-}
-
 export async function transferCallToAgent(callSid: string, agentNumber: string): Promise<boolean> {
   const { apiKey, apiToken, base } = creds();
-  const pub = publicBaseUrl();
+  const pub = getPublicBaseUrl();
   if (!pub) {
     logger.error({ callSid }, "Cannot transfer — REPLIT_DOMAINS / PUBLIC_BASE_URL not set");
     return false;

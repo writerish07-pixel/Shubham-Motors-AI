@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, ilike, or } from "drizzle-orm";
+import { eq, ilike, or, and } from "drizzle-orm";
 import { db, leadsTable } from "@workspace/db";
 import {
   ListLeadsQueryParams,
@@ -10,7 +10,9 @@ import {
   TriggerOutboundCallParams,
 } from "@workspace/api-zod";
 import { makeOutboundCall } from "../lib/exotel";
-import { logger } from "../lib/logger";
+import { getWebhookBaseUrl } from "../lib/publicUrl";
+import { normalizePhone } from "../lib/phone";
+import { setOutboundContext } from "../lib/scheduler";
 
 const router: IRouter = Router();
 
@@ -29,9 +31,8 @@ router.get("/leads", async (req, res): Promise<void> => {
     }
   }
 
-  // @ts-ignore – drizzle where chaining
   const leads = conditions.length > 0
-    ? await db.select().from(leadsTable).where(conditions.length === 1 ? conditions[0] : or(...conditions))
+    ? await db.select().from(leadsTable).where(and(...conditions))
     : await db.select().from(leadsTable);
 
   res.json(leads);
@@ -43,9 +44,14 @@ router.post("/leads", async (req, res): Promise<void> => {
     res.status(400).json({ error: "name and phone are required" });
     return;
   }
+  const phone = normalizePhone(body.phone);
+  if (!phone) {
+    res.status(400).json({ error: "invalid phone number" });
+    return;
+  }
   const [lead] = await db.insert(leadsTable).values({
     name: body.name,
-    phone: body.phone,
+    phone,
     email: body.email ?? null,
     interestedModel: body.interestedModel ?? null,
     source: body.source ?? null,
@@ -73,15 +79,26 @@ router.post("/leads/import", async (req, res): Promise<void> => {
       continue;
     }
     try {
+      const phone = normalizePhone(l.phone);
+      if (!phone) throw new Error("invalid phone");
       await db.insert(leadsTable).values({
         name: l.name,
-        phone: l.phone,
+        phone,
         email: l.email ?? null,
         interestedModel: l.interestedModel ?? null,
         source: l.source ?? "import",
         notes: l.notes ?? null,
         status: "new",
         score: 0,
+      }).onConflictDoUpdate({
+        target: leadsTable.phone,
+        set: {
+          name: l.name,
+          email: l.email ?? null,
+          interestedModel: l.interestedModel ?? null,
+          notes: l.notes ?? null,
+          updatedAt: new Date(),
+        },
       });
       imported++;
     } catch (err) {
@@ -158,9 +175,15 @@ router.post("/leads/:id/call", async (req, res): Promise<void> => {
     return;
   }
 
-  const host = process.env.REPLIT_DEV_DOMAIN
-    ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-    : (process.env.REPLIT_DOMAINS?.split(",")[0] ? `https://${process.env.REPLIT_DOMAINS?.split(",")[0]}` : "http://localhost:5000");
+  const host = getWebhookBaseUrl();
+
+  setOutboundContext(lead.phone, {
+    name: lead.name,
+    interestedModel: lead.interestedModel,
+    notes: lead.notes,
+    lastCallSummary: lead.intentSummary,
+    followupReason: "Manual outbound call from CRM",
+  });
 
   const callSid = await makeOutboundCall(lead.phone, host);
   if (callSid) {
