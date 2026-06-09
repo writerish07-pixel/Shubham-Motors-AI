@@ -499,14 +499,28 @@ router.post("/webhooks/voice/stream", async (req, res): Promise<void> => {
 
 function mapExotelStatus(exotelStatus: string): string {
   const map: Record<string, string> = {
+    // Terminal — drive follow-up resolution (retry / WhatsApp fallback):
     completed: "completed",
     "no-answer": "missed",
     busy: "missed",
     failed: "failed",
+    canceled: "failed",
+    cancelled: "failed",
+    // Non-terminal — just update the call row and wait for a later event:
     "in-progress": "in_progress",
     ringing: "ringing",
+    queued: "in_progress",
   };
-  return map[exotelStatus?.toLowerCase()] ?? "failed";
+  const mapped = map[exotelStatus?.toLowerCase()];
+  if (mapped) return mapped;
+  // Unknown / unmapped status: do NOT assume terminal. Defaulting to "failed"
+  // here would fire resolveOutboundFollowupOutcome() and could retry a call
+  // that is still in progress. Keep it non-terminal instead — if the call
+  // really has ended, the scheduler's stale-'dialing' reaper (STALE_DIALING_MS)
+  // re-surfaces the follow-up for retry, so no lead is silently dropped. Log it
+  // so the mapping can be extended from real production statuses.
+  logger.warn({ exotelStatus }, "Unmapped Exotel call status — treating as non-terminal");
+  return "in_progress";
 }
 
 export default router;

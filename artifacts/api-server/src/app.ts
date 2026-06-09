@@ -25,7 +25,11 @@ app.use(
     },
   }),
 );
-app.use(cors());
+// CORS: lock down to CORS_ORIGINS (comma-separated) when set; otherwise allow
+// all (fine behind the shared same-origin proxy in dev).
+const corsOrigins = (process.env.CORS_ORIGINS ?? "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+app.use(cors(corsOrigins.length ? { origin: corsOrigins, credentials: true } : {}));
 // Wide JSON limit ONLY for the KB import route (full dev-KB JSON dumps).
 // Mount before the global parser so this takes precedence for that one path.
 app.use("/api/knowledge/import", express.json({ limit: "25mb" }));

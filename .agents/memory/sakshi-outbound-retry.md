@@ -47,6 +47,14 @@ The due-query also picks up `dialing` rows whose `lastAttemptAt <= now - STALE_D
 row goes through the normal claim/dial/retry path again.
 
 ## Status mapping (mapExotelStatus in webhooks.ts)
-completed→completed, no-answer/busy→missed, failed→failed, in-progress→in_progress,
-ringing→ringing. Terminal set acted on by the resolver call = completed/missed/failed;
-`answered = (dbStatus === "completed")`.
+completed→completed, no-answer/busy→missed, failed/canceled/cancelled→failed,
+in-progress/queued→in_progress, ringing→ringing. Terminal set acted on by the resolver
+call = completed/missed/failed; `answered = (dbStatus === "completed")`.
+
+**Invariant: unknown/unmapped statuses MUST default NON-terminal (return "in_progress"),
+never "failed".**
+**Why:** the terminal gate fires `resolveOutboundFollowupOutcome` for any status in
+{completed,missed,failed}. A "failed" default would retry a call that may still be in
+progress (premature/duplicate dial). A genuinely-terminal-but-unknown status is NOT
+dropped: the stale-`dialing` reaper (STALE_DIALING_MS, 15 min) re-surfaces it for retry.
+Log unmapped statuses so the map can be extended from real Exotel values.

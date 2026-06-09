@@ -18,10 +18,11 @@ export const callsTable = pgTable("calls", {
   exotelCallSid: text("exotel_call_sid"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-}, (table) => [
-  index("calls_exotel_call_sid_idx").on(table.exotelCallSid),
-  index("calls_lead_id_idx").on(table.leadId),
-]);
+}, (t) => ({
+  // Looked up on every call-stream event in callStream.ts — index it.
+  exotelCallSidIdx: index("calls_exotel_call_sid_idx").on(t.exotelCallSid),
+  leadIdIdx: index("calls_lead_id_idx").on(t.leadId),
+}));
 
 export const insertCallSchema = createInsertSchema(callsTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertCall = z.infer<typeof insertCallSchema>;

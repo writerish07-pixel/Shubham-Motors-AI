@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -56,9 +56,13 @@ export const leadsTable = pgTable("leads", {
 
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-}, (table) => [
-  uniqueIndex("leads_phone_unique").on(table.phone),
-]);
+}, (t) => ({
+  // Every inbound/outbound call resolves the lead by phone — index it.
+  // NOTE: not UNIQUE — phone formats aren't normalised (some +91, some 10-digit),
+  // so a unique constraint would give false dedup and risk push failures.
+  phoneIdx: index("leads_phone_idx").on(t.phone),
+  statusIdx: index("leads_status_idx").on(t.status),
+}));
 
 export const insertLeadSchema = createInsertSchema(leadsTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertLead = z.infer<typeof insertLeadSchema>;
