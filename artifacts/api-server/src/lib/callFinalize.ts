@@ -41,13 +41,15 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
     .where(eq(callsTable.id, callDbId));
 
   const terminalIntent = analysis.intent === "not_interested" || analysis.intent === "wrong_number";
-  const newStatus = terminalIntent
-    ? analysis.intent
-    : analysis.score >= 80
-      ? "hot"
-      : analysis.score >= 50
-        ? "interested"
-        : "contacted";
+  const newStatus = analysis.lostDeal
+    ? "lost"
+    : terminalIntent
+      ? analysis.intent
+      : analysis.score >= 80
+        ? "hot"
+        : analysis.score >= 50
+          ? "interested"
+          : "contacted";
 
   await db
     .update(leadsTable)
@@ -69,6 +71,14 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       ...(discoverySignals.budget ? { budget: discoverySignals.budget } : {}),
       ...(discoverySignals.currentVehicle ? { currentVehicle: discoverySignals.currentVehicle } : {}),
       ...(discoverySignals.purpose === "office" ? { occupation: "office" } : {}),
+      ...(analysis.decisionMaker ? { decisionMaker: analysis.decisionMaker } : {}),
+      ...(discoverySignals.decisionMaker && !analysis.decisionMaker
+        ? { decisionMaker: discoverySignals.decisionMaker }
+        : {}),
+      ...(analysis.lostDeal && analysis.lostToBrand ? { lostToBrand: analysis.lostToBrand } : {}),
+      ...(analysis.lostDeal && analysis.lostToDealer ? { lostToDealer: analysis.lostToDealer } : {}),
+      ...(analysis.lostDeal && analysis.lostReason ? { lostReason: analysis.lostReason } : {}),
+      ...(analysis.lostDeal && analysis.lostOfferFactor ? { lostOfferFactor: analysis.lostOfferFactor } : {}),
     } as Record<string, unknown>)
     .where(eq(leadsTable.id, leadId));
 
@@ -110,7 +120,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
             lastCallSummary: analysis.summary,
             followupReason: followupSchedule.reason,
           },
-        } as any);
+        } as Record<string, unknown>);
       }
 
       await db

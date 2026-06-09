@@ -7,7 +7,14 @@
 //   Tier 2 — gpt-4o       (premium, only for complex objections / negotiation /
 //                           explicit competitor comparisons / hot-buy closing)
 
-import type { ConversationTurn } from "./openai";
+import type { ConversationTurn, DiscoverySignals } from "./openai";
+import {
+  FINANCE_PARTNERS_LIST,
+  formatEmiQuote,
+  parseDownPayment,
+  parseTenureMonths,
+  resolveModelOnRoad,
+} from "./emiQuote";
 
 export type ModelTier = "mini" | "premium";
 
@@ -17,8 +24,8 @@ export type ModelTier = "mini" | "premium";
 // so Sakshi never gets confused by spelling drift.
 // ─────────────────────────────────────────────────────────────────────────────
 const STT_ALIASES: Array<[RegExp, string]> = [
-  // Xoom often comes as "Zoom" / "जूम"
-  [/\bzoom\b/gi, "Xoom"],
+  [/jan\s+prakash/gi, "Gyan Prakash"],
+  [/jian\s+prakash/gi, "Gyan Prakash"],
   [/जूम/g, "Xoom"],
   // Splendor variants
   [/\bsplender\b/gi, "Splendor"],
@@ -78,9 +85,180 @@ const PREMIUM_KEYWORDS_RE = new RegExp(
   "i"
 );
 
+const PRICE_QUERY_RE = /(?:price|कीमत|दाम|kitne ka|kitne ki|kya rate|on[- ]?road|ex[- ]?showroom|कितने|kitna|kitne)/i;
+const VARIANT_QUERY_RE = /(?:variant|variants|कौन सी|kaunsi|kaun si|model|वेरिएंट|version)/i;
+const FEATURE_QUERY_RE = /(?:feature|features|specs|mileage|माइलेज|engine|cc|warranty|वारंटी)/i;
+const HOURS_QUERY_RE = /(?:timing|kab khulta|kab khulte|open|close|hours|शोरूम कब)/i;
+// "pata"/"पता" is a homonym: पता = address, BUT "pata karna/lagana/chalana" = to find out.
+// FIND_OUT_RE catches the "find out / inquire" sense so it never triggers the address reply.
+const FIND_OUT_RE = /(?:पता|pata)\s*(?:करन|कर\b|लग|चल|karn|kar\b|laga|chal)/i;
+// Address intent in the ADDRESS sense only. "kahan/कहाँ" is matched ONLY with a
+// place cue (showroom/dealer/shop) so "Xoom kahan hai?" routes to model lookup, not address.
+const ADDRESS_QUERY_RE = new RegExp(
+  [
+    "address", "location", "directions",
+    "रास्ता", "raasta", "rasta",
+    "कैसे आऊं", "kaise aau",
+    "पता\\s*(?:क्या|बता|भेज|दे|दो)", "pata\\s*(?:kya|bata|bhej|de|do)",
+    "(?:showroom|dealer|shop|store|दुकान|शोरूम)\\s*(?:ka|ki|का|की)?\\s*(?:पता|pata|address)",
+    "(?:showroom|dealer|shop|store|शोरूम)\\s*(?:kahan|कहाँ)",
+    "(?:kahan|कहाँ)\\s*(?:hai|par|pe|है|पर|पे)?\\s*(?:showroom|dealer|shop|store|शोरूम)",
+  ].join("|"),
+  "i",
+);
+const YESNO_RE = /^(?:haan|han|ji|yes|ok|okay|theek|sahi|nahi|no|nope)[\s.!?]*$/i;
+const GREETING_RE = /^(?:hello|hi|namaste|namaskaar|namaskar|नमस्ते|jai mata di|salaam|salam)[\s.!?]*$/i;
+
 export function classifyTurn(customerText: string, history: ConversationTurn[]): ModelTier {
   if (PREMIUM_KEYWORDS_RE.test(customerText)) return "premium";
   if (customerText.length > 220 || customerText.split(/\s+/).length > 40) return "premium";
   void history;
   return "mini";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier-0 direct answer — operates on the new `[MODELS] Hero <name>: ...`
+// knowledge format. Returns a complete reply (Sakshi voice + follow-up
+// question) or null if it can't confidently answer.
+// ─────────────────────────────────────────────────────────────────────────────
+export function tryDirectAnswer(
+  customerText: string,
+  knowledge: string,
+  addressForm: string,
+  ctx?: { signals?: DiscoverySignals; history?: ConversationTurn[] },
+): string | null {
+  const text = correctStt(customerText.trim());
+  if (!text) return null;
+  const signals = ctx?.signals;
+
+  if (GREETING_RE.test(text)) {
+    return `नमस्ते ${addressForm}! बताइए, कौन सी Hero बाइक या स्कूटर में आपकी रुचि है?`;
+  }
+  if (YESNO_RE.test(text)) return null;
+
+  if (HOURS_QUERY_RE.test(text)) {
+    return `Shubham Motors सोमवार से शनिवार सुबह 9 से शाम 7 बजे तक, और रविवार सुबह 10 से शाम 5 तक खुला रहता है. आप कब आना चाहेंगे ${addressForm}?`;
+  }
+  if (ADDRESS_QUERY_RE.test(text) && !FIND_OUT_RE.test(text)) {
+    return `हमारा showroom जयपुर में है ${addressForm}, मैं exact location WhatsApp पर अभी भेज देती हूँ. क्या आज शाम का test ride book कर लूँ?`;
+  }
+
+  if (/cruise\s*control|क्रूज़|क्रूज/i.test(text)) {
+    return `Glamour X DSS variant में cruise control है ${addressForm} — highway पर comfortable riding. Aap DRS ya DSS dekh rahe hain? Showroom par dono compare karwa deti hoon.`;
+  }
+
+  if (/(?:taxi|commercial|टैक्सी|कमर्शियल).*(?:number|regist|पंजी|रजिस्ट)|taxi.*(?:regist|number|plate)/i.test(text)) {
+    return `Haan ${addressForm}, Hero bikes par commercial ya taxi registration RTO rules ke hisaab se ho sakta hai — commercial insurance alag lagta hai. Kaun sa model aur kis city mein chalayenge? Humara RTO desk paperwork sambhal leta hai.`;
+  }
+
+  if (/\bBH\b.*(?:number|series|plate|रजिस्ट)|bharat\s*series|भारत\s*सीरीज/i.test(text)) {
+    return `BH series registration eligible customers ke liye available hai ${addressForm} — jo do alag states mein rehte ya kaam karte hain. Documents RTO pe depend karte hain; hum guide kar dete hain. Aap salaried hain ya business?`;
+  }
+
+  // Finance / EMI — use customer's actual down payment @ 9% reference; list banks, don't push one.
+  if (/\bfinance\b|\bemi\b|\bloan\b|किस्त|फाइनेंस|लोन|down\s*payment|डाउन/i.test(text)) {
+    const down = parseDownPayment(text);
+    const months = parseTenureMonths(text) ?? 24;
+    const modelHint = signals?.interestedModel ?? "";
+    const resolved = resolveModelOnRoad(text, modelHint);
+    if (down && resolved) {
+      return formatEmiQuote(resolved.model, resolved.onRoad, down, months);
+    }
+    if (/kitne\s*(mahine|month|मही)|tenure|duration/i.test(text) && ctx?.history?.length) {
+      const lastAgent = [...ctx.history].reverse().find((h) => h.role === "assistant" && !/^\s*\[TRANSFER/i.test(h.content));
+      if (lastAgent?.content.match(/₹[\d,]+/)) {
+        return `Jo EMI maine abhi batayi thi — woh ${months} mahine ki reference EMI hai @ 9%. Actual rate aapke CIBIL par 8.5%–12% ho sakta hai. ${FINANCE_PARTNERS_LIST}`;
+      }
+    }
+    if (!signals?.financeInterest && /finance|loan|फाइनेंस|लोन/i.test(text)) {
+      const vehicle = signals?.segment?.startsWith("scooter") ? "scooter" : "bike/scooter";
+      return `${FINANCE_PARTNERS_LIST} Kaun sa ${vehicle} dekh rahe hain aur kitna down payment plan hai — phir main exact tenure ke saath EMI bataungi.`;
+    }
+  }
+
+  // Model lookup — find which KB model the customer is asking about
+  const modelEntry = findModelEntry(text, knowledge);
+  if (!modelEntry) return null;
+
+  const isPriceQ = PRICE_QUERY_RE.test(text);
+  const isVariantQ = VARIANT_QUERY_RE.test(text);
+  const isFeatureQ = FEATURE_QUERY_RE.test(text);
+
+  if (isPriceQ) {
+    const range = extractOnRoadRange(modelEntry.body);
+    if (range) {
+      return `${modelEntry.title} की on-road Jaipur price ${range} है ${addressForm}. कितने variant हैं उसमें से कौन सा देखना चाहेंगी — मैं detail भेज दूँ?`;
+    }
+  }
+  if (isVariantQ) {
+    const variants = extractVariantList(modelEntry.body);
+    if (variants.length) {
+      const list = variants.slice(0, 3).map(v => `${v.name} (₹${v.onRoad.toLocaleString("en-IN")})`).join(", ");
+      const extra = variants.length > 3 ? `और भी ${variants.length - 3} variant हैं` : "";
+      return `${modelEntry.title} में ${variants.length} variant available हैं — ${list}${extra ? ", " + extra : ""}. इनमें से कौन सा आपके लिए suit करेगा ${addressForm}?`;
+    }
+  }
+  if (isFeatureQ) {
+    const engine = matchLine(modelEntry.body, /^Engine:\s*(.+)$/m);
+    const warranty = matchLine(modelEntry.body, /^Warranty:\s*(.+)$/m);
+    if (engine) {
+      const parts = [engine ? `Engine ${engine}` : null, warranty ? `warranty ${warranty}` : null].filter(Boolean);
+      return `${modelEntry.title} में ${parts.join(", ")}. आप test ride के लिए कब आ सकेंगी ${addressForm}?`;
+    }
+  }
+
+  return null;
+}
+
+interface ModelEntry { title: string; body: string }
+
+function findModelEntry(text: string, knowledge: string): ModelEntry | null {
+  // Each KB entry in the assembled string looks like:
+  //   [MODELS] Hero Xoom 125: Hero Xoom 125 — Shubham Motors Jaipur ... \n ...
+  // Entries are separated by single newlines but the content itself contains
+  // newlines, so we split on the `[MODELS] ` prefix instead.
+  const chunks = knowledge.split(/\n?\[MODELS\]\s+/i).filter(Boolean);
+  const entries: ModelEntry[] = [];
+  for (const c of chunks) {
+    const m = c.match(/^([^:]+):\s*([\s\S]+?)(?=\n\[[A-Z_]+\]\s|$)/);
+    if (m) entries.push({ title: m[1].trim(), body: m[2].trim() });
+  }
+  if (!entries.length) return null;
+
+  const lower = text.toLowerCase();
+
+  // Score each entry by how many distinctive tokens from its title appear in the text.
+  let best: { entry: ModelEntry; score: number } | null = null;
+  for (const e of entries) {
+    const tokens = e.title.toLowerCase().replace(/^hero\s+/, "").split(/[\s+/]+/).filter(t => t.length >= 2);
+    let score = 0;
+    for (const t of tokens) {
+      if (lower.includes(t)) score += t.length >= 4 ? 2 : 1;
+    }
+    if (score > 0 && (!best || score > best.score)) best = { entry: e, score };
+  }
+  return best?.entry ?? null;
+}
+
+function extractOnRoadRange(body: string): string | null {
+  const m = body.match(/On-road Jaipur range:\s*(.+)$/m);
+  if (m) return m[1].trim();
+  // Single-variant entry — look for first "On-road Jaipur ₹X" line
+  const single = body.match(/On-road Jaipur\s*(₹[\d,]+)/);
+  return single ? single[1] : null;
+}
+
+function extractVariantList(body: string): Array<{ name: string; onRoad: number }> {
+  const out: Array<{ name: string; onRoad: number }> = [];
+  const re = /•\s+([^:]+):\s+Ex-showroom\s+₹[\d,]+\s+\|\s+RTO\s+₹[\d,]+\s+\|\s+Insurance\s+₹[\d,]+\s+\|\s+On-road Jaipur\s+₹([\d,]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) {
+    out.push({ name: m[1].trim(), onRoad: parseInt(m[2].replace(/,/g, ""), 10) });
+  }
+  return out;
+}
+
+function matchLine(body: string, re: RegExp): string | null {
+  const m = body.match(re);
+  return m ? m[1].trim() : null;
 }

@@ -19,7 +19,33 @@ const PHRASE_PATTERNS: RegExp[] = [
   /(?:मेरा\s+(?:शुभ\s+)?नाम\s+(?:है\s+)?)([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)/i,
   /(?:मैं|main)\s+([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)\s+(?:बोल\s*रहा|बोल\s*रही|hoon|hu|hoon|बोलता|बोलती|हूँ|हूं)/i,
   /(?:my\s+name\s+is|name\s+is|this\s+is|i\s+am|i'm)\s+([A-Za-z][A-Za-z]{1,20}(?:\s+[A-Za-z]{1,20})?)/i,
+  /(?:gyan|gian|jian|jan|gyaan|ज्ञान|जान)\s+(?:prakash|prakaash|prakas|प्रकाश)/i,
+  /(?:mera\s+naam\s+)?(?:gyan|gian|jian|jan|gyaan)\s+(?:prakash|prakaash)/i,
 ];
+
+/** Fix frequent STT name errors before extraction. */
+export function applyNameSttCorrections(text: string): string {
+  return text
+    .replace(/\bjan\s+prakash\b/gi, "Gyan Prakash")
+    .replace(/\bjian\s+prakash\b/gi, "Gyan Prakash")
+    .replace(/\bgyaan\s+prakash\b/gi, "Gyan Prakash")
+    .replace(/\bजान\s+प्रकाश\b/g, "ज्ञान प्रकाश");
+}
+
+export interface NameExtractResult {
+  name: string | null;
+  needsConfirmation: boolean;
+}
+
+export function extractCustomerNameWithMeta(text: string): NameExtractResult {
+  const corrected = applyNameSttCorrections(text);
+  const name = extractCustomerName(corrected);
+  const needsConfirmation =
+    Boolean(name) &&
+    (corrected.toLowerCase() !== text.toLowerCase().trim() ||
+      /\b(jan|jian|जान)\b/i.test(text));
+  return { name, needsConfirmation };
+}
 
 const STOPWORDS = new Set([
   // Affirmations / negations
@@ -40,21 +66,23 @@ const STOPWORDS = new Set([
   "splendor", "passion", "glamour", "destini", "pleasure", "xtreme", "xpulse",
   "vida", "maestro", "hf", "deluxe", "hero", "honda", "bajaj", "tvs", "yamaha", "suzuki",
   // Generic
-  "sir", "madam", "maam", "bhai", "boss", "ji", "saab",
+  "sir", "madam", "maam", "bhai", "boss", "saab",
 ]);
 
 export function extractCustomerName(text: string): string | null {
   if (!text) return null;
+  text = applyNameSttCorrections(text);
   // Strip Hindi danda (।, ॥) and ASCII punctuation BEFORE regex matching so
   // they don't get pulled into the name capture group.
   const cleaned = text.replace(/[।॥.,!?;:]/g, " ").replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
 
-  // 1. Strong phrase pattern: "my name is X", "मेरा नाम X है", etc.
+  // 1. Strong phrase pattern: "my name is X", "मेरा नाम X है", "Gyan Prakash", etc.
   for (const re of PHRASE_PATTERNS) {
     const m = cleaned.match(re);
-    if (m && m[1]) {
-      const cleaned1 = stripTrailingStopwords(m[1]);
+    if (m) {
+      const raw = m[1] ?? m[0];
+      const cleaned1 = stripTrailingStopwords(raw);
       const name = cleanName(cleaned1);
       if (isPlausibleName(name)) return name;
     }
@@ -86,12 +114,13 @@ function stripTrailingStopwords(s: string): string {
 }
 
 function cleanName(s: string): string {
-  // Title-case the latin parts; leave Devanagari as is
-  return s.trim()
+  const t = s.trim()
     .split(/\s+/)
     .map((w) => /^[a-z]/i.test(w) ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w)
     .join(" ")
     .slice(0, 40);
+  if (/^gyan\s+prakash$/i.test(t)) return "Gyan Prakash";
+  return t;
 }
 
 function isPlausibleName(name: string): boolean {

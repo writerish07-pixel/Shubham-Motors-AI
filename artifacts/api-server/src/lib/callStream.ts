@@ -22,7 +22,9 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
-import { detectIntentWithMeta, getCachedPhrasePcm, warmPhraseCache } from "./voiceFastPath";
+import { detectIntentWithMeta, getCachedPhrasePcm, warmPhraseCache, THINKING_FILLERS } from "./voiceFastPath";
+import { extractCustomerNameWithMeta } from "./nameExtractor";
+import { detectRepeatRequest, buildRepeatInstruction } from "./conversationHelpers";
 import { finalizeCompletedCall } from "./callFinalize";
 import {
   generateAgentReplyStream,
@@ -38,7 +40,6 @@ import {
 } from "./openai";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
 import { transferCallToAgent } from "./exotel";
-import { extractCustomerName } from "./nameExtractor";
 import { correctStt } from "./modelRouter";
 import { getOutboundContext } from "./scheduler";  // FIX #6: outbound context
 
@@ -104,6 +105,9 @@ interface Session {
   /** A NEW question the customer asked mid-answer (topic interrupt) — the LLM
    *  is told to answer it first. Cleared after each LLM turn. */
   pendingQuestion: string | null;
+  /** Name heard from STT may be wrong — confirm once with customer. */
+  nameNeedsConfirmation: boolean;
+  nameConfirmed: boolean;
 
   // ── PROACTIVE SALES ENGINE ──────────────────────────────────────────────────
   /** Timer that fires when customer is silent — agent proactively speaks */
@@ -219,6 +223,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     notes: lead.notes ?? null,
     lastCallSummary: lead.intentSummary ?? null,
     status: lead.status ?? null,
+    decisionMaker: (lead.decisionMaker === "self" || lead.decisionMaker === "family" || lead.decisionMaker === "joint")
+      ? lead.decisionMaker
+      : null,
   } : undefined;
 
   const leadProfile: LeadProfile | undefined = outboundCtx ? {
@@ -241,6 +248,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     if (lead.dailyKm) priorSignals.km = lead.dailyKm;
     if (lead.budget) priorSignals.budget = lead.budget;
     if (lead.currentVehicle) priorSignals.currentVehicle = lead.currentVehicle;
+    if (lead.decisionMaker === "self" || lead.decisionMaker === "family" || lead.decisionMaker === "joint") {
+      priorSignals.decisionMaker = lead.decisionMaker;
+    }
   }
 
   const session: Session = {
@@ -265,6 +275,8 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     convStage: "connect",
     emotionalTone: "neutral",
     pendingQuestion: null,
+    nameNeedsConfirmation: false,
+    nameConfirmed: false,
     proactiveTimer: null,
     proactiveCount: 0,
     lastAgentSpokeAt: Date.now(),
@@ -456,16 +468,27 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   }
   session.turn++;
 
-  // FIX #1: Name extraction extended to turns 1–3 (was turn 1 only).
-  // Customers often answer the first question about the bike before giving their name.
-  if (session.turn <= 3 && session.leadName === "Sir") {
-    const extracted = extractCustomerName(customerText);
-    if (extracted) {
-      session.leadName = extracted;
+  const correctedText = correctStt(customerText);
+
+  // Name capture turns 1–3; confirm if STT may have misheard (e.g. Gyan → Jan).
+  if (session.turn <= 3 && (session.leadName === "Sir" || session.nameNeedsConfirmation)) {
+    const { name, needsConfirmation } = extractCustomerNameWithMeta(customerText);
+    if (name) {
+      session.leadName = name;
+      session.nameNeedsConfirmation = needsConfirmation && !session.nameConfirmed;
       if (session.leadId) {
-        await db.update(leadsTable).set({ name: extracted }).where(eq(leadsTable.id, session.leadId));
+        await db.update(leadsTable).set({ name }).where(eq(leadsTable.id, session.leadId));
       }
-      logger.info({ callSid: session.callSid, name: extracted, turn: session.turn }, "Captured customer name");
+      logger.info({ callSid: session.callSid, name, needsConfirmation, turn: session.turn }, "Captured customer name");
+    }
+    if (/sahi hai|sahee hai|han sahi|हाँ सही|correct|theek hai naam/i.test(correctedText) && session.leadName !== "Sir") {
+      session.nameConfirmed = true;
+      session.nameNeedsConfirmation = false;
+    }
+    if (/nahi|galat|wrong|नहीं|गलत/i.test(correctedText) && /naam|name/i.test(correctedText)) {
+      session.leadName = "Sir";
+      session.nameNeedsConfirmation = true;
+      session.nameConfirmed = false;
     }
   }
 
@@ -476,8 +499,6 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     await runTransfer(ws, session, "[TRANSFER] turn limit reached — long conversation, hand to sales");
     return;
   }
-
-  const correctedText = correctStt(customerText);
 
   // Customer-requested transfer safety net
   if (isCustomerAskingForHuman(correctedText)) {
@@ -492,13 +513,19 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   // FIX #2: Update discovery signals, stage, and tone each turn
   session.discoverySignals = extractDiscoverySignals(correctedText, session.discoverySignals);
-  session.convStage = computeConvStage(session.turn, session.discoverySignals);
+  session.convStage = computeConvStage(session.turn, session.discoverySignals, correctedText);
   session.emotionalTone = detectEmotionalTone(correctedText, session.turn);
 
-  // Intent fast-path (skip on turns 1–3 to allow LLM to handle name+discovery)
-  const fastMeta = detectIntentWithMeta(correctedText, session.turn);
+  let repeatInstruction = "";
+  if (detectRepeatRequest(correctedText)) {
+    repeatInstruction = buildRepeatInstruction(session.history);
+    logger.info({ callSid: session.callSid }, "Repeat request detected");
+  }
+
+  const fastMeta = detectIntentWithMeta(correctedText, session.turn, { signals: session.discoverySignals });
   const fastReply = fastMeta?.response ?? null;
-  if (fastReply) {
+  // Skip fast-path when customer wants a repeat — LLM/direct router handles context.
+  if (fastReply && !repeatInstruction) {
     session.history.push({ role: "user", content: customerText });
     if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
     session.isSpeaking = true;
@@ -548,9 +575,22 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.speakingStartedAt = Date.now();
   const myGen = ++session.ttsGen;
 
-  // Thinking fillers disabled (Agent Identity PDF) — no "ek second" / stalling audio.
+  // Conditional thinking filler — only if first sentence takes >900ms (reduced, not every turn).
+  const FILLER_DELAY_MS = 900;
+  const fillerText = THINKING_FILLERS[session.turn % THINKING_FILLERS.length] ?? "";
+  let firstSentenceReady = false;
+  const fillerDone: Promise<void> = fillerText
+    ? (async () => {
+        await new Promise((r) => setTimeout(r, FILLER_DELAY_MS));
+        if (firstSentenceReady || session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
+        const pcm = getCachedPhrasePcm(fillerText, session.language) ?? await synthesizeTts(fillerText, session.language);
+        if (firstSentenceReady || !pcm || session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
+        await playPcm8k(ws, session.streamSid, pcm, session);
+      })().catch(() => {})
+    : Promise.resolve();
+
   const played: string[] = [];
-  let playChain: Promise<void> = Promise.resolve();
+  let playChain: Promise<void> = fillerDone;
   let transferText: string | null = null;
   let attemptedCount = 0;
   let ttsFailures = 0;
@@ -567,14 +607,18 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       session.convStage,           // NEW
       session.emotionalTone,       // NEW
       currentPendingQ ?? undefined, // NEW: topic interrupt
+      repeatInstruction || undefined,
+      session.nameNeedsConfirmation && !session.nameConfirmed,
     )) {
       if (session.ttsAbort || session.isClosed) break;
       if (/^\s*\[TRANSFER/i.test(sentence)) { transferText = sentence; break; }
       attemptedCount++;
+      const isFirstSentence = attemptedCount === 1;
       const myTts = synthesizeTts(sentence, session.language);
       const prev = playChain;
       playChain = (async () => {
         const pcm = await myTts;
+        if (isFirstSentence) firstSentenceReady = true;
         await prev;
         if (!pcm) { ttsFailures++; return; }
         if (session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
@@ -682,13 +726,13 @@ function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number
 // budget → current vehicle → segment-specific pitch → close.
 function getProactiveMessage(session: Session): string | null {
   const s = session.discoverySignals;
-  const name = session.leadName === "Sir" ? "Ji" : `${session.leadName} ji`;
+  const name = session.leadName !== "Sir" && session.turn % 4 === 0 ? `${session.leadName} ji, ` : "";
   const turn = session.turn;
   const count = session.proactiveCount;
 
   // Customer hasn't said anything yet
   if (turn <= 1) {
-    return `${name}, aap sun pa rahe hain? Main Shubham Motors se Sakshi bol rahi hoon — koi bhi Hero bike ya scooter ke baare mein jaanna ho toh batayein!`;
+    return `${name}aap sun pa rahe hain? Main Shubham Motors se Sakshi bol rahi hoon — koi bhi Hero bike ya scooter ke baare mein batayein.`;
   }
 
   // ── DISCOVERY — segment FIRST (cannot recommend without it) ────────────────
@@ -700,6 +744,9 @@ function getProactiveMessage(session: Session): string | null {
   }
   if (s.segment?.startsWith("scooter") && s.familyUse === undefined && count <= 3) {
     return `${name}, scooter sirf aap chalenge ya family ke liye bhi? Wife ya bachche baithein toh seat size aur comfort matter karta hai.`;
+  }
+  if (s.familyUse && !s.decisionMaker && count <= 3) {
+    return `${name}, purchase ka decision aap khud lenge ya family ke saath mil kar? Isse main sahi finance aur model suggest kar sakti hoon.`;
   }
   if (!s.budget && count <= 4) {
     return `${name}, roughly kitna budget soch rahe hain? EMI mein lena ho toh ₹3,000 mahine se shuru hota hai — Hero FinCorp 30 minute mein approve karta hai.`;

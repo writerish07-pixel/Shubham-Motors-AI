@@ -25,12 +25,11 @@ import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
-import { classifyTurn } from "./modelRouter";
+import { classifyTurn, tryDirectAnswer } from "./modelRouter";
+import { formatAddressForm } from "./conversationHelpers";
 
 // ─── Model IDs ───────────────────────────────────────────────────────────────
-// The conversation runs entirely on the premium model now (no mini tier) for
-// consistent, natural consultative quality. Background analysis/learning jobs
-// still use the cheaper gpt-4o-mini directly.
+const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
 const MODEL_PREMIUM = process.env.OPENAI_MODEL_PREMIUM ?? "gpt-4o";
 
 const openai = new OpenAI({
@@ -148,6 +147,7 @@ export interface LeadProfile {
   notes?: string | null;
   lastCallSummary?: string | null;
   status?: string | null;
+  decisionMaker?: "self" | "family" | "joint" | null;
 }
 
 // NEW: Discovery signals extracted from the live conversation.
@@ -170,10 +170,28 @@ export interface DiscoverySignals {
   // so we must recommend models, not just ask "kitne CC?".
   stylePreference?: "sporty" | "family" | "commuter";
   interestedModel?: string; // Specific model named e.g. "Xtreme 125R"
+  /** Who decides the purchase — PDF decision process */
+  decisionMaker?: "self" | "family" | "joint";
+  /** Customer is actively comparing Hero with another brand this call */
+  comparingBrands?: boolean;
+  /** Customer signalled readiness (book / buy / confirm language) */
+  readyToBuy?: boolean;
+  /** Customer negotiating price / discount */
+  negotiating?: boolean;
 }
 
-// NEW: Conversation stage — computed server-side, injected into prompt.
-export type ConvStage = "connect" | "discover" | "recommend" | "close";
+// PDF buying stages (plus connect for turn-1 greeting).
+export type BuyingStage =
+  | "connect"
+  | "exploring"
+  | "comparing"
+  | "shortlisting"
+  | "planning"
+  | "ready"
+  | "negotiating"
+  | "booking";
+
+export type ConvStage = BuyingStage;
 
 // NEW: Emotional tone — detected from last 2 turns, adjusts LLM params.
 export type EmotionalTone = "excited" | "neutral" | "confused" | "impatient";
@@ -265,6 +283,11 @@ export function extractDiscoverySignals(
     updated.segment = "scooter_125";
   }
 
+  if (/destini\s*110|destini 110|डेस्टिनी.*110/i.test(t)) {
+    updated.interestedModel = updated.interestedModel ?? "Destini 110";
+    updated.segment = updated.segment ?? "scooter_110";
+  }
+
   // ── STYLE PREFERENCE — sporty vs commuter(mileage) vs family ──────────────
   // "sporty mein?" must lead to the sporty lineup, not a generic CC list.
   if (!updated.stylePreference) {
@@ -285,25 +308,59 @@ export function extractDiscoverySignals(
     for (const m of models) { if (t.includes(m.toLowerCase())) { updated.interestedModel = m; break; } }
   }
 
+  // Decision maker (self / family / joint)
+  if (!updated.decisionMaker) {
+    if (/papa se|mummy se|ghar walon|ghar wale|family se|parivar se|मंजूरी|मंजूर|परिवार से|पापा से|माँ से|पति से|पत्नी से|wife se|husband se|parents se|baap se|ma se/i.test(t)) {
+      updated.decisionMaker = "family";
+    } else if (/saath mein decide|hum dono|joint decision|एक साथ|दोनों मिलकर/i.test(t)) {
+      updated.decisionMaker = "joint";
+    } else if (/main khud|mera decision|apne liye|khud lena|मैं खुद|अपने लिए|मेरा फैसला/i.test(t)) {
+      updated.decisionMaker = "self";
+    }
+  }
+
+  if (!updated.comparingBrands) {
+    if (/compare|compar|dono mein|vs\b|better than|honda|tvs|bajaj|yamaha|suzuki|ktm|compare kar/i.test(t)) {
+      updated.comparingBrands = true;
+    }
+  }
+
+  if (!updated.readyToBuy) {
+    if (/book kar|booking|lena hai|le lenge|ready hoon|confirm kar|aaj aa|final kar|delivery kab|खरीद|लेना है|बुक कर/i.test(t)) {
+      updated.readyToBuy = true;
+    }
+  }
+
+  if (!updated.negotiating) {
+    if (/discount|mehnga|mehenga|kam karo|rate kam|offer kitna|कम करो|छूट|महंगा/i.test(t)) {
+      updated.negotiating = true;
+    }
+  }
+
   return updated;
 }
 
-// ─── Conversation stage computation ──────────────────────────────────────────
-// NEW: Server-side stage tracking. Rules (in order):
-//   close:    turn >= 5 AND at least 1 discovery signal present
-//   recommend:turn >= 4 AND at least 1 signal present
-//   discover: turn >= 2 AND no discovery signals yet
-//   connect:  turn < 2
-export function computeConvStage(turn: number, signals: DiscoverySignals): ConvStage {
+// ─── Buying stage computation (PDF § Buying Intent Analysis) ─────────────────
+export function computeConvStage(
+  turn: number,
+  signals: DiscoverySignals,
+  customerText?: string,
+): ConvStage {
+  if (turn < 2) return "connect";
+
+  const t = (customerText ?? "").toLowerCase();
   const hasSignals = !!(signals.segment || signals.km || signals.budget || signals.familyUse || signals.currentVehicle || signals.purpose);
-  // Once segment is known we can recommend a model right away — don't stall in
-  // discovery. Knowing segment + one more signal (or a few turns) → start closing.
-  const richSignals = !!(signals.segment && (signals.km || signals.budget || signals.familyUse || signals.currentVehicle));
-  if (turn >= 4 && (richSignals || (signals.segment && turn >= 5))) return "close";
-  if (turn >= 5 && hasSignals) return "close";
-  if (turn >= 3 && hasSignals) return "recommend";
-  if (turn >= 2) return "discover";
-  return "connect";
+  const richSignals = !!(signals.segment && (signals.km || signals.budget || signals.familyUse || signals.currentVehicle || signals.interestedModel));
+
+  if (/book kar|booking|token|advance de|confirm kar|final kar|बुक कर|टोकन|एडवांस/i.test(t)) return "booking";
+  if (signals.negotiating || /discount|mehnga|mehenga|kam karo|offer kitna|छूट/i.test(t)) return "negotiating";
+  if (signals.readyToBuy || /lena hai|le lenge|ready hoon|aaj aa|खरीदूंगा|ले लूंगा/i.test(t)) return "ready";
+  if (signals.financeInterest && signals.interestedModel && (signals.budget || turn >= 5)) return "planning";
+  if (/agle mahine|salary ke baad|diwali|loan band|next month|15 din|अगले महीने/i.test(t)) return "planning";
+  if (signals.comparingBrands || /honda|tvs|bajaj|yamaha|compare|dono mein/i.test(t)) return "comparing";
+  if (signals.interestedModel && richSignals) return "shortlisting";
+  if (hasSignals && turn >= 3) return "shortlisting";
+  return "exploring";
 }
 
 // ─── Emotional tone detection ─────────────────────────────────────────────────
@@ -339,6 +396,7 @@ function formatLeadProfile(p?: LeadProfile): string {
   if (p.notes && p.notes.trim()) lines.push(`• Notes from past interactions: ${p.notes.trim()}`);
   if (p.lastCallSummary && p.lastCallSummary.trim()) lines.push(`• Last call summary: ${p.lastCallSummary.trim()}`);
   if (p.status && p.status !== "new") lines.push(`• CRM status: ${p.status}`);
+  if (p.decisionMaker) lines.push(`• Decision maker (known): ${p.decisionMaker} — tailor next steps accordingly.`);
   if (lines.length === 0) return "";
   return `\n╔══ WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER ══╗\n${lines.join("\n")}\n• Use ONLY to personalise — never invent details beyond what is listed here.\n• Reference it naturally in the FIRST 1–2 turns, not in every reply.\n╚════════════════════════════════════════════════╝`;
 }
@@ -383,9 +441,19 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
     lines.push(`• Finance interest: YES — DO NOT stop at "finance achha option hai". Ask: (1) which model/budget (2) down payment amount (3) 24 or 36 month tenure. Quote reference EMI from table + disclaimer.`);
   }
   if (signals.exchangeInterest) lines.push(`• Exchange interest: YES — mention ₹10,000-20,000 bonus`);
+  if (signals.decisionMaker) {
+    const dm: Record<string, string> = {
+      self: "Customer decides alone — speak directly to them about needs and next steps.",
+      family: "Family approval needed — ask who else is involved; offer to send summary on WhatsApp for family discussion; never pressure.",
+      joint: "Joint decision (customer + spouse/parent) — invite both to showroom or send shared EMI sheet.",
+    };
+    lines.push(`• Decision maker: ${signals.decisionMaker.toUpperCase()} — ${dm[signals.decisionMaker]}`);
+  }
+  if (signals.comparingBrands) lines.push(`• Comparing brands: YES — understand which brand and WHY respectfully; highlight Hero strength for THEIR need.`);
+  if (signals.negotiating) lines.push(`• Negotiating price: YES — pivot to value/EMI/exchange; exact discount → [TRANSFER] to sales.`);
 
   if (lines.length === 0) return "";
-  return `\n╔══ CUSTOMER PROFILE (KNOWN — may be from this or a previous call) ══╗\n${lines.join("\n")}\n• NEVER recommend outside customer segment. NEVER re-ask known info.\n• This info may come from an earlier call — reference it naturally ("aap commute ke liye dekh rahe the"), do NOT claim they said it in this call.\n╚════════════════════════════════════════╝`;
+  return `\n╔══ CUSTOMER PROFILE (KNOWN THIS CALL) ══╗\n${lines.join("\n")}\n• NEVER recommend outside customer segment. NEVER re-ask known info.\n╚════════════════════════════════════════╝`;
 }
 
 // Server-side recommendation engine — returns the BEST model for a segment + km.
@@ -430,34 +498,43 @@ function getBestModelForSegmentAndKm(segment: string, km: number): string | null
   return e.mid;
 }
 
-// NEW: Stage-specific instructions injected per turn.
+// Stage-specific instructions — PDF 7 buying stages + connect greeting.
 function formatStageInstructions(stage: ConvStage, addressForm: string): string {
   const instructions: Record<ConvStage, string> = {
     connect:
-      `CURRENT STAGE: CONNECT (Turn 1-2)\n` +
-      `YOUR ONLY JOB this turn: warm greeting + ask 1 simple discovery question. Be brief and friendly.\n` +
-      `Good opening: "aaj scooter ke liye hai ya bike? Aur khud ke liye hai ya family ke liye?"\n` +
-      `DO NOT pitch any specific model or price yet. DO NOT mention EMI yet.\n` +
-      `DO NOT offer a test ride, the showroom address, or a WhatsApp location yet — it's too early and sounds pushy. First just understand what ${addressForm} wants.`,
-    discover:
-      `CURRENT STAGE: DISCOVER (Turn 2-4)\n` +
-      `YOUR ONLY JOB this turn: learn what ${addressForm} actually needs.\n` +
-      `Ask about EXACTLY ONE of: daily km, budget, family use, or current vehicle — whichever is still unknown.\n` +
-      `DO NOT pitch a model until you know at least one discovery signal.\n` +
-      `If they name a model: acknowledge warmly, then still ask one discovery question before pitching.`,
-    recommend:
-      `CURRENT STAGE: RECOMMEND (Turn 4-6)\n` +
-      `You now understand enough to recommend. Suggest ONE best-fit Hero model (two at most) with a reason tied to what ${addressForm} actually told you — connect the feature to their benefit.\n` +
-      `Example: "Aap daily 60 km chalte hain, toh Splendor XTEC suit karegi — 80 kmpl deti hai, mahine ka petrol kaafi kam."\n` +
-      `Then check in naturally — "ye aapko theek lag rahi hai?" — don't jump to closing.`,
-    close:
-      `CURRENT STAGE: WARM CLOSE (Turn 5+)\n` +
-      `${addressForm} seems genuinely interested. Gently help them take the next step — but read their buying stage first.\n` +
-      `If ready: offer a test ride or showroom visit as a helpful suggestion, with a light choice ("is weekend aana suit karega?") — never a hard, pushy demand.\n` +
-      `If still thinking: don't pressure. Understand the real hesitation (budget / family / comparison) and offer to help — e.g. send a WhatsApp price+EMI breakdown so they can decide calmly.\n` +
-      `If they want to compare or need a human decision: offer to connect them to a senior colleague. Never sound desperate, never rush them.`,
+      `CURRENT STAGE: CONNECT (greeting)\n` +
+      `Warm greeting + ONE simple discovery question. Example: "scooter ya bike? Khud ke liye ya family ke liye?"\n` +
+      `DO NOT pitch models, prices, EMI, test ride, or showroom address yet.`,
+    exploring:
+      `CURRENT STAGE: EXPLORING (Stage 1)\n` +
+      `${addressForm} is still exploring options. Learn usage, budget, segment — ONE question this turn.\n` +
+      `DO NOT push booking or test ride. DO NOT list the full catalog.`,
+    comparing:
+      `CURRENT STAGE: COMPARING (Stage 2)\n` +
+      `${addressForm} is comparing brands. Ask which brand they like and WHY — stay respectful, never criticise competitors.\n` +
+      `Highlight ONE Hero strength tied to their stated need. DO NOT oversell.`,
+    shortlisting:
+      `CURRENT STAGE: SHORTLISTING (Stage 3)\n` +
+      `Enough context to narrow to 1–2 models. Recommend with ONE reason tied to their km/budget/family use.\n` +
+      `Check: "ye option theek lag raha hai?" — still not a hard close.`,
+    planning:
+      `CURRENT STAGE: PLANNING PURCHASE (Stage 4)\n` +
+      `${addressForm} is planning timing (salary/festival/loan/finance). Respect timeline — confirm when they plan to buy.\n` +
+      `Offer WhatsApp EMI sheet or finance pre-check. Schedule follow-up at their timing — no pressure for "today".`,
+    ready:
+      `CURRENT STAGE: READY TO BUY (Stage 5)\n` +
+      `${addressForm} sounds ready. Keep it simple — confirm model, variant, finance if needed, then suggest test ride or showroom visit.\n` +
+      `DO NOT over-explain specs they didn't ask for.`,
+    negotiating:
+      `CURRENT STAGE: NEGOTIATION (Stage 6)\n` +
+      `Price/discount concern. Discover real blocker (EMI vs cash vs value). Pivot to exchange, finance, or accessories.\n` +
+      `Exact discount amount unknown → [TRANSFER] to sales. Never argue.`,
+    booking:
+      `CURRENT STAGE: BOOKING (Stage 7)\n` +
+      `${addressForm} wants to book/finalise. Confirm model + colour preference + finance if any.\n` +
+      `Offer to connect senior sales for token/booking OR warm showroom visit today/tomorrow. Be efficient, not pushy.`,
   };
-  return `\n╔══ STAGE INSTRUCTIONS ══╗\n${instructions[stage]}\n╚════════════════════════╝`;
+  return `\n╔══ BUYING STAGE (PDF) ══╗\n${instructions[stage]}\n╚════════════════════════╝`;
 }
 
 // NEW: Festival urgency injection.
@@ -478,16 +555,17 @@ function formatFinanceNudge(turn: number, signals: DiscoverySignals, addressForm
 function formatFinanceActive(turn: number, signals: DiscoverySignals, addressForm: string): string {
   if (!signals.financeInterest) return formatFinanceNudge(turn, signals, addressForm);
   return `
-╔══ FINANCE CONVERSATION — ACTIVE (customer asked about finance/EMI/loan) ══╗
-NEVER reply with only "haan finance achha option hai" or "EMI available hai" and STOP — that ends the sale.
-Required flow for ${addressForm}:
-1. If model unknown → ask which bike/scooter and rough budget.
-2. Ask ONE question: "Kitna down payment de sakte hain?" OR "24 mahine ya 36 mahine ki kisti?"
-3. Quote REFERENCE EMI from [PRECOMPUTED EMI TABLE] with disclaimer (CIBIL 8.5%–12%).
-4. Mention Hero FinCorp (30-min approval, zero processing on many schemes) or HDFC/IDBI if they ask bank.
-5. Close with next step: WhatsApp EMI sheet OR showroom for loan approval OR [TRANSFER:FINANCE] for exact CIBIL rate only.
-FORBIDDEN: one-line acknowledgement then silence.
-╚═══════════════════════════════════════════════════════════════════════════╝`;
+╔══ FINANCE CONVERSATION — ACTIVE ══╗
+NEVER recommend one bank — LIST options: Hero FinCorp, HDFC, IDBI, Hinduja Leyland Finance, RBL Bank (customer chooses at showroom).
+NEVER stop at "finance achha option hai" — continue discovery.
+Required flow:
+1. Confirm model + customer's ACTUAL down payment (repeat their number back).
+2. Quote EMI from [PRECOMPUTED EMI TABLE] for that down payment — ALWAYS state tenure (24mo or 36mo).
+3. Base calculation @ 9% reference; say actual rate depends on CIBIL (8.5%–12%).
+4. If customer asks "kitne month" / "dubara batao" — REPEAT the same EMI with tenure clearly, do NOT restart finance script.
+5. [TRANSFER:FINANCE] only for exact CIBIL-locked rate.
+FORBIDDEN: pushing Hero FinCorp alone; quoting EMI without tenure; ignoring customer's down payment amount.
+╚═══════════════════════════════════════════════════════════════════╝`;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -502,6 +580,8 @@ export async function generateAgentReply(
   convStage?: ConvStage,
   emotionalTone?: EmotionalTone,
   pendingQuestion?: string,
+  repeatInstruction?: string,
+  nameNeedsConfirmation?: boolean,
 ): Promise<string> {
   const [knowledge, fuelPrice, festival] = await Promise.all([
     buildKnowledgeContext(),
@@ -509,19 +589,27 @@ export async function generateAgentReply(
     getActiveFestivalOffer(),
   ]);
 
-  const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
+  const turn = conversationHistory.length;
+  const addressForm = formatAddressForm(leadName, turn);
   const systemPrompt = await buildSystemPrompt(
     addressForm, language, knowledge, fuelPrice, leadProfile,
     discoverySignals ?? {}, convStage ?? "connect",
     emotionalTone ?? "neutral", festival,
-    conversationHistory.length, pendingQuestion,
+    turn, pendingQuestion, repeatInstruction, nameNeedsConfirmation, leadName,
   );
 
-  // Every turn flows through the LLM persona (no canned template answers).
-  // The product catalog/prices stay injected as GROUNDING in the system prompt,
-  // so the model is accurate without sounding scripted.
+  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
+  const direct = tryDirectAnswer(customerText, directKb, addressForm, {
+    signals: discoverySignals,
+    history: conversationHistory,
+  });
+  if (direct) {
+    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router → direct KB answer");
+    return direct;
+  }
+
   const tier = classifyTurn(customerText, conversationHistory);
-  const model = MODEL_PREMIUM;
+  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
 
   // NEW: Adjust tokens/temperature based on emotional tone
   const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
@@ -555,6 +643,8 @@ export async function* generateAgentReplyStream(
   convStage?: ConvStage,
   emotionalTone?: EmotionalTone,
   pendingQuestion?: string,
+  repeatInstruction?: string,
+  nameNeedsConfirmation?: boolean,
 ): AsyncGenerator<string, void, void> {
   const [knowledge, fuelPrice, festival] = await Promise.all([
     buildKnowledgeContext(),
@@ -562,12 +652,22 @@ export async function* generateAgentReplyStream(
     getActiveFestivalOffer(),
   ]);
 
-  const addressForm = leadName === "Sir" ? "सर" : `${leadName} जी`;
+  const turn = conversationHistory.length;
+  const addressForm = formatAddressForm(leadName, turn);
 
-  // Every turn flows through the LLM persona — no canned template short-circuit.
-  // Knowledge stays in the system prompt as grounding (accurate, not scripted).
+  const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
+  const direct = tryDirectAnswer(customerText, directKb, addressForm, {
+    signals: discoverySignals,
+    history: conversationHistory,
+  });
+  if (direct) {
+    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router (stream) → direct KB answer");
+    yield direct;
+    return;
+  }
+
   const tier = classifyTurn(customerText, conversationHistory);
-  const model = MODEL_PREMIUM;
+  const model = tier === "premium" ? MODEL_PREMIUM : MODEL_MINI;
 
   const tone = emotionalTone ?? "neutral";
   const tokenMap: Record<EmotionalTone, number> = { excited: 150, neutral: 130, confused: 110, impatient: 95 };
@@ -577,7 +677,7 @@ export async function* generateAgentReplyStream(
     addressForm, language, knowledge, fuelPrice, leadProfile,
     discoverySignals ?? {}, convStage ?? "connect",
     tone, festival,
-    conversationHistory.length, pendingQuestion,
+    turn, pendingQuestion, repeatInstruction, nameNeedsConfirmation, leadName,
   );
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
@@ -647,6 +747,9 @@ async function buildSystemPrompt(
   festival: { name: string; offer: string; endDate: string } | null,
   turn: number,
   pendingQuestion?: string,
+  repeatInstruction?: string,
+  nameNeedsConfirmation?: boolean,
+  leadName?: string,
 ): Promise<string> {
   const merged = knowledge && knowledge.trim()
     ? `${DEFAULT_HERO_KNOWLEDGE}\n\n[ADMIN KB OVERRIDES — dealer-curated, takes precedence when contradicts the baseline above]\n${knowledge}`
@@ -664,9 +767,14 @@ async function buildSystemPrompt(
     ? `\n╔══ TOPIC INTERRUPT — HIGHEST PRIORITY ══╗\n⚡ The customer just changed topic mid-conversation and asked: "${pendingQuestion}"\nEven if you were in the middle of another point, answer THIS new question FIRST in your opening sentence, THEN continue. Never ignore the new question.`
     : "";
 
+  const nameConfirm = nameNeedsConfirmation && leadName && leadName !== "Sir"
+    ? `\n╔══ NAME CONFIRMATION (once) ══╗\nYou are not 100% sure of the customer's name (voice may have misheard). Politely confirm ONCE: "Main aapka naam ${leadName} ji samajh rahi hoon — sahi hai?" If they correct you, use the corrected name.\n╚══════════════════════════════╝`
+    : "";
+
   return SAKSHI_SYSTEM_PROMPT(
     addressForm, language, merged, fuelPrice, leadProfile,
-    signals, stage, festival, turn, toneInstruction, topicInterrupt
+    signals, stage, festival, turn, toneInstruction, topicInterrupt,
+    repeatInstruction ?? "", nameConfirm,
   );
 }
 
@@ -683,7 +791,10 @@ const SAKSHI_SYSTEM_PROMPT = (
   turn: number,
   toneInstruction: string,
   topicInterrupt: string,
+  repeatInstruction: string,
+  nameConfirm: string,
 ) => `You are SAKSHI — a highly experienced female sales consultant at Shubham Motors, a premium Hero MotoCorp dealership in Jaipur. You are a REAL person: never an AI, never a chatbot, never a call-center script.
+${repeatInstruction}${nameConfirm}
 
 You are a trusted advisor and relationship-builder. Your purpose is NOT just to answer questions or close a sale today — it is to understand the customer, build trust, discover their real needs, and help them make a confident buying decision. Every conversation should move the relationship forward, even if the sale doesn't happen today. The customer should feel understood, respected, and more confident — never "sold to". You are measured by trust and relationships, not by talking fast or pushing hard.
 
@@ -713,19 +824,29 @@ ${toneInstruction}
 • Natural, conversational Hindi / Hinglish — the way a warm, experienced Jaipur consultant actually talks. Never scripted, never call-center-y.
 • Concise: most replies 1–3 short sentences. Begin DIRECTLY with the useful part. Give longer detail ONLY when the customer asks for it.
 • CLARITY ABOVE ALL: speak slowly and clearly, one idea per sentence, with natural commas and full-stops so the voice has real pauses and never runs words together. The customer must understand every single word.
-• DO NOT pad replies with fillers. Do not start every line with "Ji", "Achha", "Bilkul", "Theek hai", "Samajh gayi" — use such words only occasionally, when genuinely natural. Avoid excessive politeness, fake enthusiasm, and repeating yourself.
+• DO NOT pad every reply with fillers. Occasional "achha" or "theek hai" is fine — once in a while, not every sentence. Never chain "Ji, bilkul, achha, samajh gayi" together.
    BAD:  "Ji sir, bilkul sir, achha sir, samajh gayi sir..."
    GOOD: "Splendor daily commute aur mileage, dono ke liye kaafi suitable rahegi."
 • Keep familiar English words in English ("test ride", "EMI", "mileage", "model", "scooter"); say everything else in simple, spoken Hindi. Avoid hard/literary Hindi words. Keep ONE consistent, natural Indian accent throughout — never flip accents mid-sentence.
-• Warm and unhurried; mirror the customer's energy and pace. Never mention being an AI. Use "${addressForm}" only once in a while — not every sentence.
-• Never reply with just "Hello", "Ji", "OK" alone. If you didn't catch something, simply ask them to repeat once: "${addressForm}, ek baar phir bataiyega?"
+• Warm and unhurried; mirror the customer's energy and pace. Never mention being an AI.
+• Use customer name OCCASIONALLY — about once every 3–4 turns. Most replies use "aap" without name. Never name + "ji" on every line.
+• If customer asks to repeat ("phir se", "dubara", "sunai nahi") — repeat the prior fact (price/EMI/tenure) from history in simpler words. Do NOT restart finance discovery script.
+• Never reply with just "Hello", "Ji", "OK" alone. If unclear, ask once: "Ek baar phir bataiyega?"
 
 ╔══ RELATIONSHIP, MEMORY & OPPORTUNITIES ══╗
 • Use what you already know about this customer naturally — they should feel remembered, not tracked. Never re-ask information you already have.
 • Spot future opportunities without pushing: wife/family also rides → a scooter could suit them later; child starting college → a commuter soon; growing business → commercial use; already owns a vehicle → possible second vehicle. Note these gently, don't hard-sell them.
 • If they hint at timing ("agle mahine", "salary ke baad", "Diwali ke baad", "loan band hone ke baad"), acknowledge it warmly and respect it — don't pressure for "now". The system schedules the follow-up at the right time.
 • If they mention another brand (Honda, TVS, Bajaj…), stay respectful — understand WHY they like it, then highlight Hero's relevant strength. NEVER criticise a competitor.
-• If they already bought elsewhere, be gracious — understand which brand and why, and leave the door open for the future.
+• If they already bought elsewhere, be gracious — ask which brand/dealer and what offer influenced them (for our learning). Leave the door open for service, accessories, or their next purchase. Never argue or sound bitter.
+
+╔══ LOST CUSTOMER (bought elsewhere) ══╗
+If customer says they already purchased or will buy from another dealer/brand:
+1. Congratulate briefly — stay professional.
+2. Ask ONE question: which brand/dealer and what mattered most (price, EMI, waiting period, offer)?
+3. Note for CRM — do NOT keep selling the same model aggressively.
+4. Offer future relationship: "Agar kabhi second vehicle ya service chahiye ho toh hum yahan hain."
+╚═══════════════════════════════════════╝
 
 ╔══ HOW TO READ NUMBERS — DISPLACEMENT vs MODEL NAME (CRITICAL) ══╗
 When the customer says a bare number like "110", "125", "160", "200", "350", "411", they almost ALWAYS mean ENGINE DISPLACEMENT (CC), not a specific model.
@@ -872,10 +993,12 @@ Listen → Acknowledge → Explore → Respond. Never argue.
 • **NEVER invent the customer's own data.**
 
 ╔══ FINANCE / EMI ══╗
-PARTNERS: Hero FinCorp (30-min approval), HDFC Bank, IDBI Bank, Hinduja Leyland Finance, RBL Bank.
-DEFAULT TENURES: 12, 18, 24, 36 months. Most popular = 24 months.
-EMI QUOTES: always add "ye reference EMI hai, actual rate aapke CIBIL score ke hisaab se 8.5%–12% vary kar sakta hai."
-PROACTIVE FINANCE: After quoting any on-road price → offer EMI breakdown in same breath.
+PARTNERS (list all — do NOT recommend one): Hero FinCorp, HDFC Bank, IDBI Bank, Hinduja Leyland Finance, RBL Bank. Customer chooses at showroom.
+BASE RATE: 9% p.a. for reference EMI from [PRECOMPUTED EMI TABLE]. Actual rate depends on CIBIL (typically 8.5%–12%).
+DEFAULT TENURES: 12, 18, 24, 36 months. Always state tenure WITH EMI amount.
+When customer gives down payment — use THEIR amount (repeat it back), not a default.
+NEVER say "Hero FinCorp best hai" — say "in options mein se choose kar sakte hain".
+PROACTIVE FINANCE: After on-road price → offer EMI with tenure in same breath.
 CIBIL / EXACT RATE / LOAN APPROVAL → \`[TRANSFER:FINANCE]\`.
 
 ╔══ TRANSFER PROTOCOL — TRIGGER AGGRESSIVELY ══╗
@@ -939,7 +1062,7 @@ function buildEmiTable(): string {
     { name: "Xoom 125 VX",             onRoad: 103178 },
     { name: "Xoom 125 ZX",             onRoad: 110647 },
   ];
-  const downs = [20000, 30000, 50000];
+  const downs = [20000, 25000, 30000, 50000, 80000];
   const tenures = [12, 18, 24, 36];
   const out: string[] = [];
   for (const v of variants) {
@@ -1067,6 +1190,12 @@ export async function analyzeCallIntent(
   competitorMentioned: string | null;
   competitorReason: string | null;
   buyingTimeline: string | null;
+  decisionMaker: "self" | "family" | "joint" | null;
+  lostDeal: boolean;
+  lostToBrand: string | null;
+  lostToDealer: string | null;
+  lostReason: string | null;
+  lostOfferFactor: string | null;
 }> {
   const langInstruction = sessionLanguage.startsWith("hi")
     ? "Write the summary field in Hindi (Devanagari script)."
@@ -1090,9 +1219,16 @@ Analyze the transcript and return JSON with:
 - objections: array of objection strings raised (e.g. "price too high", "wants TVS comparison"), else []
 - competitorMentioned: competitor brand mentioned by customer (Bajaj/TVS/Honda/Yamaha/etc.), else null
 - competitorReason: why customer considered competitor (price/mileage/design/waiting), else null
-- buyingTimeline: "immediate" | "15days" | "month" | "festival" | "next_year" | null
+- buyingTimeline: "immediate" | "15days" | "month" | "festival" | "loan_closure" | "next_year" | null
+- decisionMaker: "self" | "family" | "joint" | null — who makes the purchase decision
+- lostDeal: true if customer already bought elsewhere OR explicitly chose another brand/dealer this call, else false
+- lostToBrand: brand they bought/will buy (Honda/TVS/Bajaj/etc.), else null
+- lostToDealer: dealer name or city if mentioned, else null
+- lostReason: main reason they didn't choose Hero (price/service/waiting/offer), else null
+- lostOfferFactor: which competitor offer influenced them (cash discount/EMI/exchange), else null
 
-Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20`,
+Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20
+If lostDeal=true, intent should be "not_interested" or "future_date" with score ≤30 unless they left door open.`,
       },
       { role: "user", content: `Transcript:\n${transcript}` },
     ],
@@ -1115,6 +1251,12 @@ Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70
       competitorMentioned: parsed.competitorMentioned ?? null,
       competitorReason: parsed.competitorReason ?? null,
       buyingTimeline: parsed.buyingTimeline ?? null,
+      decisionMaker: ["self", "family", "joint"].includes(parsed.decisionMaker) ? parsed.decisionMaker : null,
+      lostDeal: Boolean(parsed.lostDeal),
+      lostToBrand: parsed.lostToBrand ?? null,
+      lostToDealer: parsed.lostToDealer ?? null,
+      lostReason: parsed.lostReason ?? null,
+      lostOfferFactor: parsed.lostOfferFactor ?? null,
     };
   } catch {
     logger.error("Failed to parse intent analysis JSON");
@@ -1123,6 +1265,8 @@ Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70
       followupDate: null, followupReason: null, language: "hi",
       familyInfo: null, preferredModel: null, objections: [],
       competitorMentioned: null, competitorReason: null, buyingTimeline: null,
+      decisionMaker: null, lostDeal: false, lostToBrand: null, lostToDealer: null,
+      lostReason: null, lostOfferFactor: null,
     };
   }
 }
@@ -1162,6 +1306,9 @@ export function computeFollowupDate(
   if (buyingTimeline === "festival") {
     const festDate = addDays(now, 35); // approximate festival-season window
     return { date: festDate, reason: festivalName ? `${festivalName} season follow-up` : "Festival-season follow-up" };
+  }
+  if (buyingTimeline === "loan_closure") {
+    return { date: addDays(now, 30), reason: "Loan closure follow-up — customer waiting for existing loan to end" };
   }
 
   // Intent-based defaults

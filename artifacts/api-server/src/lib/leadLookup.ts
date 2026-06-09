@@ -21,11 +21,6 @@ export async function findOrCreateLead(
   const existing = await findLeadByPhone(normalized);
   if (existing) return existing;
 
-  // NOTE: leads.phone is intentionally NOT a unique constraint (phone formats
-  // aren't fully normalised across legacy rows), so we cannot use
-  // onConflictDoUpdate here. The findLeadByPhone() check above dedupes the
-  // common case; a tiny concurrent-insert race is acceptable and self-heals on
-  // the next lookup.
   const [lead] = await db
     .insert(leadsTable)
     .values({
@@ -34,6 +29,10 @@ export async function findOrCreateLead(
       status: "new",
       score: 0,
       source: opts.source ?? null,
+    })
+    .onConflictDoUpdate({
+      target: leadsTable.phone,
+      set: { updatedAt: new Date() },
     })
     .returning();
 

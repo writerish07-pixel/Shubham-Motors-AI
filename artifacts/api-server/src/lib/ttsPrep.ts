@@ -125,20 +125,20 @@ function stripMarkdown(text: string): string {
   return t;
 }
 
-/** Strip amateur filler chains before TTS (Agent Identity PDF). */
+/** Light filler trim — only removes 2+ consecutive filler words at start (PDF: reduce, not eliminate). */
 export function sanitizeAgentSpeech(text: string): string {
   let t = text.trim();
-  const fillerStart = /^(\s*(?:जी|ji|अच्छा|achha|accha|बिल्कुल|bilkul|ठीक है|theek hai|thik hai|समझ गयी|समझ गई|samajh gayi|samajh gay|हाँ जी|haan ji|haan|ok|okay|perfect)[,!.?\s]*)+/i;
-  for (let i = 0; i < 3; i++) {
-    const next = t.replace(fillerStart, "").trim();
-    if (next === t) break;
-    t = next;
+  const fillerToken = /^(?:जी|ji|अच्छा|achha|accha|बिल्कुल|bilkul|ठीक है|theek hai|thik hai|समझ गयी|समझ गई|samajh gayi|samajh gay|हाँ जी|haan ji|perfect)[,!.?\s]+/i;
+  let prev = "";
+  while (t !== prev) {
+    prev = t;
+    t = t.replace(fillerToken, "").trim();
   }
   return t;
 }
 
 export function prepareTtsText(text: string): string {
-  let t = sanitizeAgentSpeech(stripMarkdown(text));
+  let t = stripMarkdown(text);
   for (const [re, rep] of PRONOUNCE) t = t.replace(re, rep);
   t = softenLists(t);
   return t.trim();
