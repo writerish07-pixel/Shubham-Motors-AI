@@ -165,6 +165,10 @@ export interface DiscoverySignals {
   // MUST be known before recommending any model. Never suggest Splendor
   // to someone who asked about 125cc or scooters.
   segment?: "100cc" | "125cc" | "160cc+" | "scooter_110" | "scooter_125" | "electric";
+  // STYLE PREFERENCE — the feel the customer wants, independent of CC.
+  // A "sporty" customer wants the Xtreme/Xpulse lineup even before naming a CC,
+  // so we must recommend models, not just ask "kitne CC?".
+  stylePreference?: "sporty" | "family" | "commuter";
   interestedModel?: string; // Specific model named e.g. "Xtreme 125R"
 }
 
@@ -261,6 +265,18 @@ export function extractDiscoverySignals(
     updated.segment = "scooter_125";
   }
 
+  // ── STYLE PREFERENCE — sporty vs commuter(mileage) vs family ──────────────
+  // "sporty mein?" must lead to the sporty lineup, not a generic CC list.
+  if (!updated.stylePreference) {
+    if (/\bsporty\b|\bsport\b|stylish|\bstyle\b|racing|powerful|\bpower\b|pickup|\bfast\b|दमदार|स्पोर्टी|स्पोर्ट|स्टाइलिश|रेसिंग/i.test(t)) {
+      updated.stylePreference = "sporty";
+    } else if (/mileage|average|kitna deti|kitni deti|माइलेज|एवरेज|कम खर्च|petrol bachat/i.test(t)) {
+      updated.stylePreference = "commuter";
+    } else if (/family|wife|biwi|patni|bachche|परिवार|पत्नी|बच्चे|comfort|आराम/i.test(t)) {
+      updated.stylePreference = "family";
+    }
+  }
+
   // Specific model
   if (!updated.interestedModel) {
     const models = ["Xtreme 125R","Xtreme 160R","Xpulse 200","Splendor Plus","Splendor XTEC",
@@ -343,9 +359,14 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
     };
     lines.push(`• ⭐ SEGMENT INTEREST: ${seg[signals.segment] ?? signals.segment}`);
     lines.push(`  → Recommend ONLY within this segment. NEVER suggest Splendor if they want 125cc/scooter.`);
+  } else if (signals.stylePreference === "sporty") {
+    lines.push(`• ⭐ STYLE: SPORTY — recommend the sporty lineup right away: Xtreme 125R, Xtreme 160R 2V/4V, Xpulse 200 4V. Use budget/CC only to pick BETWEEN them — do NOT just list "100/125/160cc" categories.`);
   } else {
     lines.push(`• ⚠️ SEGMENT UNKNOWN — ASK before recommending: "Scooter ya bike? Kitne CC?"`);
   }
+  if (signals.stylePreference === "sporty" && signals.segment) lines.push(`• Style: SPORTY — favour Xtreme / Xpulse within the segment.`);
+  if (signals.stylePreference === "commuter") lines.push(`• Style: COMMUTER — emphasise mileage (kmpl) + low running cost.`);
+  if (signals.stylePreference === "family") lines.push(`• Style: FAMILY — pillion comfort, wide seat, easy handling.`);
   if (signals.interestedModel) lines.push(`• Named model: ${signals.interestedModel}`);
   if (signals.km) {
     lines.push(`• Daily commute: ${signals.km} km/day`);
@@ -358,7 +379,9 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
   if (signals.familyUse) lines.push(`• Family use: YES — pillion comfort, seat, easy handling matter`);
   if (signals.currentVehicle) lines.push(`• Current vehicle: ${signals.currentVehicle} (offer exchange bonus)`);
   if (signals.purpose) lines.push(`• Purpose: ${signals.purpose}`);
-  if (signals.financeInterest) lines.push(`• Finance interest: YES — proactively offer EMI`);
+  if (signals.financeInterest) {
+    lines.push(`• Finance interest: YES — DO NOT stop at "finance achha option hai". Ask: (1) which model/budget (2) down payment amount (3) 24 or 36 month tenure. Quote reference EMI from table + disclaimer.`);
+  }
   if (signals.exchangeInterest) lines.push(`• Exchange interest: YES — mention ₹10,000-20,000 bonus`);
 
   if (lines.length === 0) return "";
@@ -450,6 +473,21 @@ function formatFestivalOffer(festival: { name: string; offer: string; endDate: s
 function formatFinanceNudge(turn: number, signals: DiscoverySignals, addressForm: string): string {
   if (turn < 4 || signals.financeInterest) return "";
   return `\n💡 FINANCE (offer only if it genuinely helps — e.g. budget came up): you may gently mention that easy EMI options exist (low down-payment, quick Hero FinCorp approval). Offer it as help, not a sales push. If finance isn't relevant to ${addressForm} right now, skip it.`;
+}
+
+function formatFinanceActive(turn: number, signals: DiscoverySignals, addressForm: string): string {
+  if (!signals.financeInterest) return formatFinanceNudge(turn, signals, addressForm);
+  return `
+╔══ FINANCE CONVERSATION — ACTIVE (customer asked about finance/EMI/loan) ══╗
+NEVER reply with only "haan finance achha option hai" or "EMI available hai" and STOP — that ends the sale.
+Required flow for ${addressForm}:
+1. If model unknown → ask which bike/scooter and rough budget.
+2. Ask ONE question: "Kitna down payment de sakte hain?" OR "24 mahine ya 36 mahine ki kisti?"
+3. Quote REFERENCE EMI from [PRECOMPUTED EMI TABLE] with disclaimer (CIBIL 8.5%–12%).
+4. Mention Hero FinCorp (30-min approval, zero processing on many schemes) or HDFC/IDBI if they ask bank.
+5. Close with next step: WhatsApp EMI sheet OR showroom for loan approval OR [TRANSFER:FINANCE] for exact CIBIL rate only.
+FORBIDDEN: one-line acknowledgement then silence.
+╚═══════════════════════════════════════════════════════════════════════════╝`;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -668,7 +706,7 @@ ${formatLeadProfile(leadProfile)}
 ${formatDiscoverySignals(signals)}
 ${formatStageInstructions(stage, addressForm)}
 ${formatFestivalOffer(festival)}
-${formatFinanceNudge(turn, signals, addressForm)}
+${formatFinanceActive(turn, signals, addressForm)}
 ${toneInstruction}
 
 ╔══ HOW YOU SPEAK ══╗
@@ -713,7 +751,7 @@ ONLY when the customer explicitly names a SPECIFIC model with the number (e.g. "
 
 [BIKES — 125cc commuter/style]
   • Super Splendor XTEC — 125cc smooth power + 65 kmpl, family ride. Variants: XTEC, XTEC DSS.
-  • Glamour X — 125cc styled commuter, ~55 kmpl. Variants: DRS Self, DSS Self.
+  • Glamour X — 125cc styled commuter, ~55 kmpl. Variants: DRS Self, DSS Self (DSS has cruise control for highway comfort).
   • Xtreme 125R — 125cc SPORTY bike, ~60 kmpl, premium segment styling. Variants: IBS, ABS, ABS Dual Channel.
 
 [BIKES — 160cc+ sporty]
@@ -754,6 +792,7 @@ NEVER name just ONE model when the customer asked a category question.
 • "Tell me about X / features / mileage / specs" = INFO question → Always answer using Hero brand knowledge.
 • "Available hai / stock / milegi" = INVENTORY question → check KB, else offer arrangement timeline.
 • NEVER say "हमारे पास नहीं है" for any Hero model.
+• NEVER deny a feature that exists in [MODEL FEATURES] — e.g. Glamour X DSS HAS cruise control; taxi/commercial and BH registration are possible under RTO rules (guide, don't refuse).
 
 RECOMMENDATION RULES — READ EVERY TIME BEFORE SUGGESTING A MODEL:
 
@@ -919,8 +958,18 @@ const _EMI_TABLE = buildEmiTable();
 // ─── Default KB (unchanged from original, fuel updated) ─────────────────────
 const DEFAULT_HERO_KNOWLEDGE = `
 [SHOWROOM DETAILS]
-Shubham Motors, authorised Hero MotoCorp dealership, Jaipur.
+Shubham Motors, authorised Hero MotoCorp dealership, Lal Kothi, Tonk Road, Jaipur.
 Open Mon–Sat 9AM–7PM, Sunday 10AM–5PM. Test rides available daily.
+
+[MODEL FEATURES — never deny these]
+Glamour X (125cc): LED headlamp, digital-analog cluster, i3S idle stop-start, COMBI BRAKE, tubeless tyres. Glamour X DSS variant includes CRUISE CONTROL — YES, confirm DSS if customer asks cruise control. DRS variant may not have cruise — clarify variant.
+Super Splendor XTEC: XTEC tech, DSS with extra comfort features.
+Xtreme 125R / 160R: sporty posture, ABS on higher variants.
+
+[REGISTRATION — taxi, commercial, BH number]
+Private registration included in on-road price (RTO + insurance per variant).
+Taxi / commercial registration: YES on eligible Hero models under Rajasthan RTO rules — commercial permit + commercial insurance extra. Shubham Motors RTO desk assists. Never flat-refuse; ask model + city of use.
+BH (Bharat) series plate: for eligible inter-state portability (MoRTH/RTO rules). Dealership guides documents — ask salaried vs business, never say "impossible" without checking.
 
 [PRICES — ON-ROAD JAIPUR, ₹ — as of 16-May-2026. Always quote on-road by default.]
 

@@ -16,6 +16,7 @@ import cron from "node-cron";
 import { and, eq, lte, or, sql } from "drizzle-orm";
 import { db, followupsTable, leadsTable, callsTable } from "@workspace/db";
 import { makeOutboundCall } from "./exotel";
+import { getWebhookBaseUrl } from "./publicUrl";
 import { sendWhatsAppMessage } from "./whatsapp";
 import { logger } from "./logger";
 
@@ -52,7 +53,7 @@ export function getOutboundContext(phone: string): OutboundLeadContext | null {
   return entry.profile;
 }
 
-function setOutboundContext(phone: string, ctx: OutboundLeadContext): void {
+export function setOutboundContext(phone: string, ctx: OutboundLeadContext): void {
   _outboundContext.set(ctxKey(phone), { profile: ctx, expiresAt: Date.now() + CONTEXT_TTL_MS });
 }
 
@@ -134,20 +135,19 @@ function hourIST(): number {
 }
 
 // Returns true if current IST time is in a "callable" window.
-function isCallableNow(preferredTime?: string | null): boolean {
+function isCallableNow(preferredTime?: string | null, attemptCount = 0): boolean {
   const h = hourIST();
   // Never call during lunch (13:00–14:00) or after 20:00 or before 09:00
-  if (h < 9 || h >= 20 || (h === 13)) return false;
+  if (h < 9 || h >= 20 || h === 13) return false;
 
-  if (!preferredTime) return true; // no preference — any business hour is fine
+  if (!preferredTime) return true;
 
   if (preferredTime === "morning" && h >= 9 && h < 12) return true;
   if (preferredTime === "afternoon" && h >= 14 && h < 17) return true;
   if (preferredTime === "evening" && h >= 17 && h < 20) return true;
 
-  // Outside preferred window — only call if it's already late afternoon and this
-  // is a retry (don't wait forever). Allow 17:00+ for morning-preferred leads on retry.
-  if (h >= 17) return true;
+  // After 2+ failed attempts, allow evening dial rather than never calling.
+  if (attemptCount >= 2 && h >= 17 && h < 20) return true;
 
   return false;
 }
@@ -194,9 +194,7 @@ const defaultConfig: SchedulerConfig = {
   cronExpression: "*/30 * * * *",
   maxCallsPerRun: 50,
   delayBetweenCallsMs: 5000,
-  callbackBaseUrl: process.env.REPLIT_DEV_DOMAIN
-    ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-    : "http://localhost:5000",
+  callbackBaseUrl: getWebhookBaseUrl(),
   notifyWhatsApp: true,
   maxAttemptsPerFollowup: 3,   // NEW: retry up to 3 times
   retryDelayMinutes: 30,       // NEW: 30 min between retries
@@ -299,17 +297,17 @@ export async function runAutoDialer(): Promise<RunResult> {
         continue;
       }
 
-      // NEW: Check callable time window
+      const attemptCount = (followup.attemptCount as number | null) ?? 0;
+
+      // Check callable time window (respect preferred slot; relax after 2+ attempts)
       const preferred = followup.preferredCallTime as string | null;
-      if (!isCallableNow(preferred)) {
-        // Don't skip — just defer to next cron run naturally (don't reschedule, scheduledAt is already past)
+      if (!isCallableNow(preferred, attemptCount)) {
         result.skipped++;
         result.details.push({ followupId: followup.followupId, leadName: followup.leadName, phone: followup.leadPhone, success: false, reason: `Outside callable window (IST hour: ${hourIST()}, preference: ${preferred ?? "any"})` });
         continue;
       }
 
-      // NEW: Check retry limit
-      const attemptCount = (followup.attemptCount as number | null) ?? 0;
+      // Check retry limit
       const maxAttempts = (followup.maxAttempts as number | null) ?? schedulerStatus.config.maxAttemptsPerFollowup;
       if (attemptCount >= maxAttempts) {
         // All retries exhausted — send WhatsApp fallback
@@ -351,7 +349,8 @@ export async function runAutoDialer(): Promise<RunResult> {
         const callbackUrl = schedulerStatus.config.callbackBaseUrl;
 
         // NEW: Inject outbound context so Sakshi opens with personalization
-        const ctx: OutboundLeadContext = {
+        const stored = followup.outboundContext as OutboundLeadContext | null;
+        const ctx: OutboundLeadContext = stored ?? {
           name: followup.leadName,
           interestedModel: followup.leadInterestedModel ?? null,
           notes: followup.leadNotes ?? null,

@@ -7,6 +7,7 @@ import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "../lib/whatsapp";
 import { resolveOutboundFollowupOutcome } from "../lib/scheduler";
 import { knowledgeTable } from "@workspace/db";
 import { logger } from "../lib/logger";
+import { findOrCreateLead } from "../lib/leadLookup";
 import axios from "axios";
 import { sql } from "drizzle-orm";
 
@@ -84,25 +85,9 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     return;
   }
 
-  // Find or create lead
-  let lead = null;
-  const fromPhone = From?.replace(/\D/g, "") ?? "";
-  if (fromPhone) {
-    const variants = [fromPhone, `+91${fromPhone.slice(-10)}`, fromPhone.slice(-10)];
-    for (const phone of variants) {
-      const [found] = await db.select().from(leadsTable).where(eq(leadsTable.phone, phone));
-      if (found) { lead = found; break; }
-    }
-    if (!lead) {
-      [lead] = await db.insert(leadsTable).values({
-        name: fromPhone,
-        phone: fromPhone.slice(-10),
-        status: "new",
-        score: 0,
-        source: "inbound_call",
-      }).returning();
-    }
-  }
+  const lead = From
+    ? await findOrCreateLead(From, { name: From.replace(/\D/g, "").slice(-10), source: "inbound_call" })
+    : null;
 
   // Create or update call log
   let callRecordId: number | null = null;
@@ -117,14 +102,14 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     if (existingCall) {
       callRecordId = existingCall.id;
       await db.update(callsTable).set({ status: "in_progress" }).where(eq(callsTable.id, existingCall.id));
-    } else {
+    } else if (lead) {
       const [newCall] = await db.insert(callsTable).values({
-        leadId: lead?.id ?? 0,
+        leadId: lead.id,
         direction,
         status: "in_progress",
         exotelCallSid: CallSid,
       }).returning();
-      callRecordId = newCall.id;
+      callRecordId = newCall?.id ?? null;
     }
   }
 
@@ -521,7 +506,7 @@ function mapExotelStatus(exotelStatus: string): string {
     "in-progress": "in_progress",
     ringing: "ringing",
   };
-  return map[exotelStatus?.toLowerCase()] ?? "completed";
+  return map[exotelStatus?.toLowerCase()] ?? "failed";
 }
 
 export default router;

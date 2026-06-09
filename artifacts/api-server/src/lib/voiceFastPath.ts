@@ -96,6 +96,14 @@ const INTENTS: Record<string, Intent> = {
     words: [],
     response: "Test ride बिल्कुल free है! आप कब आ सकते हैं — आज, कल, या weekend पर?",
   },
+  finance: {
+    phrases: [
+      "finance karna", "finance lena", "loan lena", "loan chahiye", "emi pe lena",
+      "किस्त पर", "फाइनेंस", "लोन", "ईएमआई", "finance mein",
+    ],
+    words: ["finance", "loan", "emi"],
+    response: "Hero FinCorp se EMI तीस मिनट में approve हो सकता है — आप किस model की bike सोच रहे हैं, और लगभग कितना down payment दे सकेंगे?",
+  },
   thanks: {
     phrases: ["thank you", "thanks", "धन्यवाद", "शुक्रिया"],
     words: ["dhanyavaad", "shukriya", "thanku", "thnx"],
@@ -110,7 +118,7 @@ const INTENTS: Record<string, Intent> = {
       "ठीक है", "हाँ जी", "जी हाँ", "हाँ हाँ",
     ],
     words: ["haan", "ok", "okay", "हाँ", "हां", "achha", "accha", "अच्छा"],
-    response: "Bilkul! Ek baat batayein — bike sirf aap chalenge ya ghar mein koi aur bhi chalata hai? Family ke hisaab se recommend karungi.",
+    response: "Ek baat batayein — bike sirf aap chalenge ya ghar mein koi aur bhi chalata hai? Family ke hisaab se recommend karungi.",
   },
 };
 
@@ -123,7 +131,10 @@ const INTENTS: Record<string, Intent> = {
  * with the LLM. The pipeline increments `session.turn` BEFORE calling us, so
  * the first customer utterance arrives with turn === 1. Skip while turn < 2.
  */
-export function detectIntent(text: string, turn: number): string | null {
+export function detectIntentWithMeta(
+  text: string,
+  turn: number,
+): { name: string; response: string } | null {
   if (turn < 2) return null;
   const clean = text.toLowerCase().trim();
   if (clean.length < 2) return null;
@@ -142,33 +153,21 @@ export function detectIntent(text: string, turn: number): string | null {
     for (const phrase of intent.phrases) {
       if (clean.includes(phrase.toLowerCase())) {
         logger.info({ intent: name, customerText: text.slice(0, 60) }, "Intent fast-path hit");
-        return intent.response;
+        return { name, response: intent.response };
       }
     }
     for (const word of intent.words) {
       if (wordSet.has(word.toLowerCase())) {
         logger.info({ intent: name, customerText: text.slice(0, 60) }, "Intent fast-path hit");
-        return intent.response;
+        return { name, response: intent.response };
       }
     }
   }
   return null;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// THINKING FILLERS — short phrases played INSTANTLY after STT while the LLM is
-// still generating its first token. Eliminates the multi-second dead air the
-// customer would otherwise hear between speaking and getting a reply. Rotated
-// round-robin per turn. Pre-cached below so playback needs no live TTS call.
-// ─────────────────────────────────────────────────────────────────────────────
-export const THINKING_FILLERS: string[] = [
-  "जी, समझ रही हूँ।",
-  "अच्छा जी, एक second।",
-  "हाँ जी, देखती हूँ।",
-  "बिल्कुल, बताती हूँ।",
-  "जी बिल्कुल, सोच रही हूँ।",
-  "हाँ, समझ गयी।",
-];
+// Thinking fillers are intentionally disabled (Agent Identity PDF: no filler
+// words after every response — silence during a slow LLM beats sounding amateur).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PHRASE CACHE — pre-synthesized PCM for stock replies
@@ -179,7 +178,6 @@ export const THINKING_FILLERS: string[] = [
 // of these verbatim, we skip the Sarvam call.
 const CACHED_PHRASES: string[] = [
   ...Object.values(INTENTS).map((i) => i.response),
-  ...THINKING_FILLERS,
   // Common AI fallback / stalling phrases
   "जी, समझ रही हूँ। थोड़ा detail दीजिए?",
   "जी? एक बार फिर से बताइए?",

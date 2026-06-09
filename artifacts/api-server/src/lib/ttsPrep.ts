@@ -16,11 +16,16 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\b210\s*cc\b/gi, "दो सौ दस सीसी"],
   [/\b350\s*cc\b/gi, "तीन सौ पचास सीसी"],
   [/\b(\d+)\s*cc\b/gi, "$1 सीसी"], // fallback for any other displacement
+  [/\bcc\b/gi, "सीसी"],            // stray "cc" with no leading number
 
   // Brand
   [/\bHero\b/g, "हीरो"],
   [/\bMotoCorp\b/gi, "मोटोकॉर्प"],
   [/\bShubham Motors\b/gi, "शुभम मोटर्स"],
+  [/\bShubham\b/gi, "शुभम"],
+  [/\bMotors\b/gi, "मोटर्स"],
+  [/\bSakshi\b/gi, "साक्षी"],
+  [/\bcruise\s*control\b/gi, "क्रूज़ कंट्रोल"],
 
   // Bike model names
   [/\bSplendor\s*Plus\s*XTEC\s*2\.0\b/gi, "स्प्लेंडर प्लस एक्सटेक टू पॉइंट ज़ीरो"],
@@ -58,21 +63,6 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\bXoom\b/gi, "ज़ूम"],
   [/\bMaestro\b/gi, "मेस्ट्रो"],
   [/\bVida\b/gi, "विडा"],
-
-  // Engine displacement (CC) + mileage — spoken clearly. Without this the Hindi
-  // TTS slurs "100cc"/"125cc" into an unintelligible blur. Specific numbers
-  // first, then the bare "cc"/"kmpl" fallbacks.
-  [/\b100\s*cc\b/gi, "वन हंड्रेड सी सी"],
-  [/\b110\s*cc\b/gi, "वन टेन सी सी"],
-  [/\b125\s*cc\b/gi, "वन ट्वेंटी फाइव सी सी"],
-  [/\b150\s*cc\b/gi, "वन फिफ्टी सी सी"],
-  [/\b160\s*cc\b/gi, "वन सिक्सटी सी सी"],
-  [/\b200\s*cc\b/gi, "टू हंड्रेड सी सी"],
-  [/\b210\s*cc\b/gi, "टू टेन सी सी"],
-  [/\b350\s*cc\b/gi, "थ्री फिफ्टी सी सी"],
-  [/\bcc\b/gi, "सी सी"],
-  [/\bkmpl\b/gi, "किलोमीटर प्रति लीटर"],
-  [/\bkm\s*\/\s*l\b/gi, "किलोमीटर प्रति लीटर"],
 
   // Variant codes
   [/\bIBS\b/g, "आई बी एस"],
@@ -135,9 +125,28 @@ function stripMarkdown(text: string): string {
   return t;
 }
 
+/** Strip amateur filler chains before TTS (Agent Identity PDF). */
+export function sanitizeAgentSpeech(text: string): string {
+  let t = text.trim();
+  const fillerStart = /^(\s*(?:जी|ji|अच्छा|achha|accha|बिल्कुल|bilkul|ठीक है|theek hai|thik hai|समझ गयी|समझ गई|samajh gayi|samajh gay|हाँ जी|haan ji|haan|ok|okay|perfect)[,!.?\s]*)+/i;
+  for (let i = 0; i < 3; i++) {
+    const next = t.replace(fillerStart, "").trim();
+    if (next === t) break;
+    t = next;
+  }
+  return t;
+}
+
 export function prepareTtsText(text: string): string {
-  let t = stripMarkdown(text);
+  let t = sanitizeAgentSpeech(stripMarkdown(text));
   for (const [re, rep] of PRONOUNCE) t = t.replace(re, rep);
   t = softenLists(t);
   return t.trim();
+}
+
+export function prepareNameForTts(name: string): string {
+  const t = name.trim();
+  if (!t || t === "Sir") return "";
+  if (/[\u0900-\u097F]/.test(t)) return t;
+  return t;
 }

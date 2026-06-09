@@ -20,25 +20,22 @@ import type { IncomingMessage } from "http";
 import type { Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
-import { db, callsTable, leadsTable, followupsTable, contactsTable } from "@workspace/db";
+import { db, callsTable, leadsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
-import { detectIntent, getCachedPhrasePcm, warmPhraseCache, THINKING_FILLERS } from "./voiceFastPath";
+import { detectIntentWithMeta, getCachedPhrasePcm, warmPhraseCache } from "./voiceFastPath";
+import { finalizeCompletedCall } from "./callFinalize";
 import {
   generateAgentReplyStream,
-  analyzeCallIntent,
-  learnFromTranscript,
   buildKnowledgeContext,
   getJaipurFuelPrice,
   extractDiscoverySignals,
   computeConvStage,
   detectEmotionalTone,
-  computeFollowupDate,
   type LeadProfile,
   type DiscoverySignals,
   type ConvStage,
   type EmotionalTone,
 } from "./openai";
-import { sendCallSummaryWhatsApp } from "./whatsapp";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
 import { transferCallToAgent } from "./exotel";
 import { extractCustomerName } from "./nameExtractor";
@@ -402,86 +399,33 @@ async function handleStop(session: Session): Promise<void> {
   session.ttsGen++;
 
   const transcript = session.transcript.join("\n");
-  if (!transcript || !session.callDbId) return;
+  if (!transcript.trim()) return;
 
   try {
-    // FIX #7: pass session.language so summary is generated in Hindi for Hindi calls
-    const analysis = await analyzeCallIntent(transcript, session.language);
-
-    await db.update(callsTable)
-      .set({
-        status: "completed",
-        transcript,
-        summary: analysis.summary,
-        intentDetected: analysis.intent,
-        scoreAfterCall: analysis.score,
-        languageDetected: analysis.language,
-      })
-      .where(eq(callsTable.id, session.callDbId));
-
-    const newStatus = analysis.score >= 80 ? "hot" : analysis.score >= 50 ? "interested" : "contacted";
-
-    // FIX #4: persist ALL new CRM fields from analyzeCallIntent
-    await db.update(leadsTable)
-      .set({
-        score: analysis.score,
-        status: newStatus,
-        language: analysis.language,
-        intentSummary: analysis.summary,
-        lastCallId: session.callDbId,
-        // NEW: persist CRM intelligence fields
-        ...(analysis.preferredModel ? { interestedModel: analysis.preferredModel } : {}),
-        ...(analysis.familyInfo ? { familyInfo: analysis.familyInfo } : {}),
-        ...(analysis.competitorMentioned ? { competitorMentioned: analysis.competitorMentioned } : {}),
-        ...(analysis.competitorReason ? { competitorReason: analysis.competitorReason } : {}),
-        ...(analysis.buyingTimeline ? { buyingTimeline: analysis.buyingTimeline } : {}),
-        // discoverySignals from live session (more reliable than LLM extraction)
-        ...(session.discoverySignals.segment ? { segment: session.discoverySignals.segment } : {}),
-        ...(session.discoverySignals.km ? { dailyKm: session.discoverySignals.km } : {}),
-        ...(session.discoverySignals.budget ? { budget: session.discoverySignals.budget } : {}),
-        ...(session.discoverySignals.currentVehicle ? { currentVehicle: session.discoverySignals.currentVehicle } : {}),
-        ...(session.discoverySignals.purpose === "office" ? { occupation: "office" } : {}),
-      } as any)
-      .where(eq(leadsTable.id, session.leadId));
-
-    // FIX #3: Use computeFollowupDate() — smart server-side rules, not raw LLM date
-    const followupSchedule = computeFollowupDate(
-      analysis.intent,
-      analysis.score,
-      analysis.buyingTimeline,
-      null, // festival name — will be loaded from KB on next warm
-    );
-
-    if (followupSchedule) {
-      await db.insert(followupsTable).values({
+    let callDbId = session.callDbId;
+    if (!callDbId && session.leadId) {
+      const [newCall] = await db.insert(callsTable).values({
         leadId: session.leadId,
-        scheduledAt: followupSchedule.date,
-        reason: followupSchedule.reason,
-        intentLabel: analysis.intent,
-        callId: session.callDbId,
-        status: "pending",
-        // Store outbound context for the follow-up call
-        outboundContext: {
-          name: session.leadName,
-          interestedModel: analysis.preferredModel ?? null,
-          notes: analysis.objections?.length > 0 ? `Objections: ${analysis.objections.join(", ")}` : null,
-          lastCallSummary: analysis.summary,
-          followupReason: followupSchedule.reason,
-        },
-      } as any);
-      logger.info({ date: followupSchedule.date, reason: followupSchedule.reason }, "Follow-up scheduled");
+        direction: session.isOutbound ? "outbound" : "inbound",
+        status: "completed",
+        exotelCallSid: session.callSid,
+        transcript,
+      }).returning();
+      callDbId = newCall?.id ?? null;
+    }
+    if (!callDbId || !session.leadId) {
+      logger.warn({ callSid: session.callSid, leadId: session.leadId }, "Call finalise skipped — no call/lead row");
+      return;
     }
 
-    // FIX whatsapp: send summary in correct language
-    const [lead] = await db.select().from(leadsTable).where(eq(leadsTable.id, session.leadId));
-    if (lead) {
-      void sendCallSummaryWhatsApp(
-        lead.phone, lead.name, analysis.summary,
-        lead.interestedModel, session.language,  // pass language
-      ).catch((err) => logger.error({ err }, "Background WhatsApp summary failed"));
-    }
-
-    await learnFromTranscript(transcript, analysis.summary, session.callSid);
+    await finalizeCompletedCall({
+      callDbId,
+      leadId: session.leadId,
+      transcript,
+      sessionLanguage: session.language,
+      discoverySignals: session.discoverySignals,
+      exotelCallSid: session.callSid,
+    });
   } catch (err) {
     logger.error({ err, callSid: session.callSid }, "Error finalising call");
   }
@@ -552,7 +496,8 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.emotionalTone = detectEmotionalTone(correctedText, session.turn);
 
   // Intent fast-path (skip on turns 1–3 to allow LLM to handle name+discovery)
-  const fastReply = detectIntent(correctedText, session.turn);
+  const fastMeta = detectIntentWithMeta(correctedText, session.turn);
+  const fastReply = fastMeta?.response ?? null;
   if (fastReply) {
     session.history.push({ role: "user", content: customerText });
     if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
@@ -578,7 +523,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       session.history.push({ role: "assistant", content: fastReply });
       session.transcript.push(`Agent: ${fastReply}`);
     }
-    logger.info({ callSid: session.callSid, agentText: actuallyPlayed ? fastReply : "", played: actuallyPlayed ? 1 : 0, source: "fastpath" }, "Agent reply");
+    logger.info({ callSid: session.callSid, intent: fastMeta?.name, agentText: actuallyPlayed ? fastReply : "", played: actuallyPlayed ? 1 : 0, source: "fastpath" }, "Agent reply");
     return;
   }
 
@@ -603,29 +548,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.speakingStartedAt = Date.now();
   const myGen = ++session.ttsGen;
 
-  // ── THINKING FILLER (conditional) — kill the LLM first-token dead air ───────
-  // Only speak a filler if the first real sentence is NOT ready within
-  // FILLER_DELAY_MS. Fast turns (instant direct-KB answers) skip it entirely, so
-  // Sakshi doesn't say "ek second" before every quick reply. When it does fire,
-  // the first real sentence is chained AFTER it (playChain starts as fillerDone)
-  // so audio never overlaps. Guarded by myGen + ttsAbort so barge-in cancels it.
-  const FILLER_DELAY_MS = 650;
-  const fillerText = THINKING_FILLERS[session.turn % THINKING_FILLERS.length]!;
-  let firstSentenceReady = false;
-  const fillerDone: Promise<void> = (async () => {
-    await new Promise((r) => setTimeout(r, FILLER_DELAY_MS));
-    if (firstSentenceReady || session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
-    const pcm = getCachedPhrasePcm(fillerText, session.language) ?? await synthesizeTts(fillerText, session.language);
-    if (firstSentenceReady || !pcm || session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
-    await playPcm8k(ws, session.streamSid, pcm, session);
-  })().catch(() => {});
-
+  // Thinking fillers disabled (Agent Identity PDF) — no "ek second" / stalling audio.
   const played: string[] = [];
-  let playChain: Promise<void> = fillerDone;
+  let playChain: Promise<void> = Promise.resolve();
   let transferText: string | null = null;
   let attemptedCount = 0;
   let ttsFailures = 0;
-  const MAX_REPLY_SENTENCES = 2;
+  const MAX_REPLY_SENTENCES = 3;
 
   try {
     for await (const sentence of generateAgentReplyStream(
@@ -642,12 +571,10 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       if (session.ttsAbort || session.isClosed) break;
       if (/^\s*\[TRANSFER/i.test(sentence)) { transferText = sentence; break; }
       attemptedCount++;
-      const isFirstSentence = attemptedCount === 1;
       const myTts = synthesizeTts(sentence, session.language);
       const prev = playChain;
       playChain = (async () => {
         const pcm = await myTts;
-        if (isFirstSentence) firstSentenceReady = true; // real audio ready → suppress pending filler
         await prev;
         if (!pcm) { ttsFailures++; return; }
         if (session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { eq, and, lte } from "drizzle-orm";
-import { db, followupsTable, leadsTable } from "@workspace/db";
+import { db, followupsTable, leadsTable, callsTable } from "@workspace/db";
 import {
   ListFollowupsQueryParams,
   UpdateFollowupParams,
@@ -9,6 +9,8 @@ import {
   ExecuteFollowupParams,
 } from "@workspace/api-zod";
 import { makeOutboundCall } from "../lib/exotel";
+import { getWebhookBaseUrl } from "../lib/publicUrl";
+import { setOutboundContext, type OutboundLeadContext } from "../lib/scheduler";
 
 const router: IRouter = Router();
 
@@ -126,15 +128,37 @@ router.post("/followups/:id/execute", async (req, res): Promise<void> => {
     return;
   }
 
-  const host = process.env.REPLIT_DEV_DOMAIN
-    ? `https://${process.env.REPLIT_DEV_DOMAIN}`
-    : "http://localhost:5000";
+  const host = getWebhookBaseUrl();
 
-  const callSid = await makeOutboundCall(lead.phone, `${host}/api/webhooks/exotel/inbound`);
+  const storedCtx = followup.outboundContext as OutboundLeadContext | null;
+  const ctx: OutboundLeadContext = storedCtx ?? {
+    name: lead.name,
+    interestedModel: lead.interestedModel,
+    notes: lead.notes,
+    lastCallSummary: lead.intentSummary,
+    followupReason: followup.reason,
+  };
+  setOutboundContext(lead.phone, ctx);
 
-  await db.update(followupsTable)
-    .set({ status: "completed" })
-    .where(eq(followupsTable.id, params.data.id));
+  const callSid = await makeOutboundCall(lead.phone, host);
+
+  if (callSid) {
+    const [newCall] = await db.insert(callsTable).values({
+      leadId: lead.id,
+      direction: "outbound",
+      status: "initiated",
+      exotelCallSid: callSid,
+    }).returning();
+
+    await db.update(followupsTable)
+      .set({
+        status: "dialing",
+        callId: newCall?.id ?? followup.callId,
+        lastAttemptAt: new Date(),
+        attemptCount: (followup.attemptCount ?? 0) + 1,
+      })
+      .where(eq(followupsTable.id, params.data.id));
+  }
 
   res.json({ success: !!callSid, message: callSid ? "Follow-up call initiated" : "Failed", callSid: callSid ?? null });
 });
