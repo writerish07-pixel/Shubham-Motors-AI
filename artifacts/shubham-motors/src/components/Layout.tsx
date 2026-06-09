@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Users, Phone, Calendar, BookOpen,
   Settings, Bike, Menu, X, PhoneCall, Megaphone
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -19,9 +19,20 @@ const navItems = [
 export default function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [hasToken, setHasToken] = useState(true);
+
+  useEffect(() => {
+    setHasToken(Boolean(localStorage.getItem("shubham_admin_token")));
+  }, [location]);
 
   return (
     <div className="flex h-screen bg-background overflow-hidden">
+      {!hasToken && (
+        <div className="fixed top-0 inset-x-0 z-[60] bg-amber-500 text-amber-950 text-center text-sm py-2 px-4">
+          API access requires an admin token — set it in{" "}
+          <Link href="/settings" className="underline font-semibold">Settings</Link>.
+        </div>
+      )}
       {/* Sidebar */}
       <aside className={cn(
         "fixed inset-y-0 left-0 z-50 w-60 bg-sidebar border-r border-sidebar-border flex flex-col transition-transform duration-200",

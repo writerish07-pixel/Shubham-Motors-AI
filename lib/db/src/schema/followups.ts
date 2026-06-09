@@ -42,11 +42,10 @@ export const followupsTable = pgTable("followups", {
 
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-}, (t) => ({
-  // The scheduler polls due follow-ups by (status, scheduledAt) on a tick.
-  statusScheduledIdx: index("followups_status_scheduled_at_idx").on(t.status, t.scheduledAt),
-  leadIdIdx: index("followups_lead_id_idx").on(t.leadId),
-}));
+}, (table) => [
+  index("followups_status_scheduled_idx").on(table.status, table.scheduledAt),
+  index("followups_lead_id_idx").on(table.leadId),
+]);
 
 export const insertFollowupSchema = createInsertSchema(followupsTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertFollowup = z.infer<typeof insertFollowupSchema>;

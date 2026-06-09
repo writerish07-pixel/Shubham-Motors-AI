@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, index } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -52,17 +52,22 @@ export const leadsTable = pgTable("leads", {
   occupation: text("occupation"),
 
   /** Timeline for purchase — drives follow-up scheduling */
-  buyingTimeline: text("buying_timeline"), // "immediate" | "15days" | "month" | "festival" | "next_year"
+  buyingTimeline: text("buying_timeline"), // "immediate" | "15days" | "month" | "festival" | "loan_closure" | "next_year"
+
+  /** Who makes the purchase decision — self | family | joint */
+  decisionMaker: text("decision_maker"),
+
+  /** Lost-deal intelligence (customer bought elsewhere or explicitly chose competitor) */
+  lostToBrand: text("lost_to_brand"),
+  lostToDealer: text("lost_to_dealer"),
+  lostReason: text("lost_reason"),
+  lostOfferFactor: text("lost_offer_factor"),
 
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-}, (t) => ({
-  // Every inbound/outbound call resolves the lead by phone — index it.
-  // NOTE: not UNIQUE — phone formats aren't normalised (some +91, some 10-digit),
-  // so a unique constraint would give false dedup and risk push failures.
-  phoneIdx: index("leads_phone_idx").on(t.phone),
-  statusIdx: index("leads_status_idx").on(t.status),
-}));
+}, (table) => [
+  uniqueIndex("leads_phone_unique").on(table.phone),
+]);
 
 export const insertLeadSchema = createInsertSchema(leadsTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertLead = z.infer<typeof insertLeadSchema>;

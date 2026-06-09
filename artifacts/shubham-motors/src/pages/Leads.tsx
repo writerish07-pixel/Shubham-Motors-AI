@@ -16,42 +16,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-const STATUSES = ["", "new", "contacted", "interested", "hot", "converted", "lost"];
-
-// Minimal RFC-4180-ish CSV parser: handles quoted fields, escaped quotes ("")
-// and commas / newlines inside quotes. A naive line.split(",") corrupts any
-// address or note that contains a comma.
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = "";
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else inQuotes = false;
-      } else field += c;
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ",") {
-      row.push(field); field = "";
-    } else if (c === "\n" || c === "\r") {
-      if (c === "\r" && text[i + 1] === "\n") i++;
-      row.push(field); field = "";
-      if (row.some((v) => v !== "")) rows.push(row);
-      row = [];
-    } else {
-      field += c;
-    }
-  }
-  if (field !== "" || row.length > 0) {
-    row.push(field);
-    if (row.some((v) => v !== "")) rows.push(row);
-  }
-  return rows;
-}
+const STATUSES = ["", "new", "contacted", "interested", "hot", "converted", "lost", "not_interested", "wrong_number"];
 
 export default function Leads() {
   const [search, setSearch] = useState("");
@@ -83,12 +48,25 @@ export default function Leads() {
     const file = e.target.files?.[0];
     if (!file) return;
     const text = await file.text();
-    const rows = parseCsv(text);
-    if (rows.length < 2) { toast.error("CSV has no data rows"); e.target.value = ""; return; }
-    const headers = rows[0].map((h) => h.trim().toLowerCase());
-    const leadsData = rows.slice(1).map((vals) => {
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const parseCsvLine = (line: string): string[] => {
+      const out: string[] = [];
+      let cur = "";
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i]!;
+        if (c === '"') { inQuotes = !inQuotes; continue; }
+        if (c === "," && !inQuotes) { out.push(cur.trim()); cur = ""; continue; }
+        cur += c;
+      }
+      out.push(cur.trim());
+      return out;
+    };
+    const headers = parseCsvLine(lines[0]!).map((h) => h.trim().toLowerCase());
+    const leadsData = lines.slice(1).map((line) => {
+      const vals = parseCsvLine(line);
       const obj: Record<string, string> = {};
-      headers.forEach((h, i) => { obj[h] = (vals[i] ?? "").trim(); });
+      headers.forEach((h, i) => { obj[h] = vals[i]?.trim() ?? ""; });
       return { name: obj["name"] || obj["full name"] || "", phone: obj["phone"] || obj["mobile"] || obj["number"] || "", email: obj["email"] || "", interestedModel: obj["model"] || obj["interested model"] || "", source: obj["source"] || "csv_import" };
     }).filter((l) => l.name && l.phone);
     importLeads.mutate({ data: { leads: leadsData } }, {

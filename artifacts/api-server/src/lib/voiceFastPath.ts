@@ -1,45 +1,21 @@
 /**
- * voiceFastPath.ts
- *
- * Two latency wins ported from the previous Python codebase, combined into one
- * module because they're naturally coupled:
- *
- *   1. INTENT FAST-PATH
- *      For very common short customer replies ("haan", "theek hai", "address
- *      kya hai", "timing", "test ride", "EMI", "thanks", "busy", "callback",
- *      "not interested"), detect them with O(1) keyword lookup and reply with
- *      a fixed string — skipping the LLM round trip entirely. This is the
- *      biggest single latency win: those turns drop from ~10–15 s to ~1 s.
- *
- *   2. PHRASE CACHE
- *      The intent responses + a handful of common stock acknowledgements are
- *      TTS-synthesized once at server boot and kept as raw PCM in memory.
- *      When the agent (LLM or fast-path) emits one of these exact strings,
- *      playback is instant — no Sarvam call at all.
- *
- * Replies are written in *Sakshi's* voice (the current TS persona — female,
- * Shubham Motors, Hero MotoCorp), NOT Priya from the legacy code.
+ * voiceFastPath.ts — intent fast-path + phrase cache (low-latency stock replies).
  */
 
+import type { DiscoverySignals } from "./openai";
+import { FINANCE_PARTNERS_LIST } from "./emiQuote";
 import { logger } from "./logger";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// INTENT MATCHING
-// ─────────────────────────────────────────────────────────────────────────────
-
 interface Intent {
-  /** Multi-word phrases (substring match, case-insensitive). */
   phrases: string[];
-  /** Single-token keywords (exact word match — avoids false positives like
-   *  "han" inside "kahan"). */
   words: string[];
-  /** Fixed Sakshi reply. Keep it under ~15 words so TTS is fast and barge-in
-   *  works cleanly. */
-  response: string;
+  response: string | ((ctx: FastPathContext) => string);
 }
 
-// Order matters — more specific intents come first so "haan, busy hoon" hits
-// `busy`, not a generic acknowledgement.
+export interface FastPathContext {
+  signals?: DiscoverySignals;
+}
+
 const INTENTS: Record<string, Intent> = {
   busy: {
     phrases: [
@@ -48,7 +24,7 @@ const INTENTS: Record<string, Intent> = {
       "बाद में", "अभी नहीं", "अभी मत", "फ्री नहीं", "टाइम नहीं",
     ],
     words: ["busy", "later", "व्यस्त"],
-    response: "कोई बात नहीं! आप कब free रहेंगे — मैं तब call करूँ?",
+    response: "कोई बात नहीं — aap kab free rahenge? Main tab call karungi.",
   },
   not_interested: {
     phrases: [
@@ -58,7 +34,7 @@ const INTENTS: Record<string, Intent> = {
       "जरूरत नहीं", "हटा लो नंबर",
     ],
     words: [],
-    response: "जी ठीक है, आपका समय लेने के लिए माफ़ी। ज़रूरत हो तो ज़रूर call कीजिएगा। नमस्ते!",
+    response: "Theek hai — zarurat ho toh call kijiyega. Dhanyavaad!",
   },
   callback: {
     phrases: [
@@ -66,7 +42,7 @@ const INTENTS: Record<string, Intent> = {
       "call back", "कॉल बैक", "बाद में बात", "बाद में कॉल",
     ],
     words: [],
-    response: "बिल्कुल, मैं call कर लूँगी — सुबह अच्छा रहेगा या शाम?",
+    response: "Main call kar lungi — subah suit karega ya shaam?",
   },
   address: {
     phrases: [
@@ -75,7 +51,7 @@ const INTENTS: Record<string, Intent> = {
       "शोरूम कहाँ", "शोरूम का पता", "शोरूम की लोकेशन",
     ],
     words: ["address", "location", "एड्रेस", "पता", "लोकेशन", "जगह"],
-    response: "हम Lal Kothi, Tonk Road, Jaipur में हैं — सुबह ९ से शाम ७ बजे तक खुले हैं।",
+    response: "Hum Lal Kothi, Tonk Road, Jaipur mein hain — subah 9 se shaam 7 baje tak khule hain.",
   },
   timing: {
     phrases: [
@@ -85,7 +61,7 @@ const INTENTS: Record<string, Intent> = {
       "शोरूम की टाइमिंग", "शोरूम का टाइम",
     ],
     words: ["timing", "टाइमिंग", "समय"],
-    response: "Monday से Saturday, सुबह ९ से शाम ७ बजे तक। आप कब आएँगे?",
+    response: "Monday se Saturday subah 9 se shaam 7 baje. Aap kab aayenge?",
   },
   test_ride: {
     phrases: [
@@ -94,105 +70,114 @@ const INTENTS: Record<string, Intent> = {
       "चला के देखना", "चलाकर देखना",
     ],
     words: [],
-    response: "Test ride बिल्कुल free है! आप कब आ सकते हैं — आज, कल, या weekend पर?",
+    response: "Test ride free hai — aaj, kal, ya weekend kab suit karega?",
   },
   finance: {
     phrases: [
       "finance karna", "finance lena", "loan lena", "loan chahiye", "emi pe lena",
-      "किस्त पर", "फाइनेंस", "लोन", "ईएमआई", "finance mein",
+      "finance chahiye", "finance karana", "finance karwana",
+      "किस्त पर", "फाइनेंस", "लोन", "finance mein", "finance ke baare",
+      "financing ke baare", "finance option",
     ],
-    words: ["finance", "loan", "emi"],
-    response: "Hero FinCorp se EMI तीस मिनट में approve हो सकता है — आप किस model की bike सोच रहे हैं, और लगभग कितना down payment दे सकेंगे?",
+    words: ["finance", "loan"],
+    response: (ctx) => {
+      const vehicle = ctx.signals?.segment?.startsWith("scooter") ? "scooter" : "bike/scooter";
+      return `${FINANCE_PARTNERS_LIST} Pehle batayein kaun sa ${vehicle} aur roughly kitna down payment de sakte hain — phir main 9% reference par EMI bataungi (actual CIBIL par rate change ho sakta hai).`;
+    },
   },
   thanks: {
     phrases: ["thank you", "thanks", "धन्यवाद", "शुक्रिया"],
     words: ["dhanyavaad", "shukriya", "thanku", "thnx"],
-    response: "धन्यवाद आपका! कुछ और help चाहिए तो ज़रूर बताइए।",
+    response: "Aapka dhanyavaad! Aur kuch help chahiye toh batayein.",
   },
-  // Generic short acknowledgements — only fire if NO other intent matched and
-  // the utterance is short. Lets us respond to "haan", "OK", "theek hai" with
-  // a discovery question instead of paying a 5-second LLM round trip.
   acknowledgement_short: {
     phrases: [
       "theek hai", "thik hai", "ok ji", "haan ji", "ji haan",
       "ठीक है", "हाँ जी", "जी हाँ", "हाँ हाँ",
     ],
     words: ["haan", "ok", "okay", "हाँ", "हां", "achha", "accha", "अच्छा"],
-    response: "Ek baat batayein — bike sirf aap chalenge ya ghar mein koi aur bhi chalata hai? Family ke hisaab se recommend karungi.",
+    response: "Bike sirf aap chalenge ya ghar mein koi aur bhi chalata hai? Family ke hisaab se recommend karungi.",
   },
 };
 
-/**
- * Returns a pre-canned Sakshi reply if the customer's utterance matches a
- * known intent, otherwise null (caller falls through to the LLM).
- *
- * NOTE: We deliberately do NOT fast-path on the very first customer turn so
- * Sakshi always has a chance to capture the customer's name / model interest
- * with the LLM. The pipeline increments `session.turn` BEFORE calling us, so
- * the first customer utterance arrives with turn === 1. Skip while turn < 2.
- */
+/** Skip finance fast-path on follow-up questions (tenure, down payment, repeat). */
+function isFinanceFollowUp(text: string, signals?: DiscoverySignals): boolean {
+  if (!signals?.financeInterest) return false;
+  return /kitne\s*(mahine|month|मही|mes|mahino)|tenure|duration|\d+\s*(hajar|hazaar|hazar|हज़|000)|down\s*payment|dubara|phir\s*se|repeat|minimum|kam\s*emi|कितने\s*मही/i.test(
+    text,
+  );
+}
+
+/** First-time finance ask only — not "emi kitne month" follow-ups. */
+function isFirstFinanceAsk(text: string, signals?: DiscoverySignals): boolean {
+  if (signals?.financeInterest) return false;
+  if (isFinanceFollowUp(text, signals)) return false;
+  const clean = text.toLowerCase();
+  if (/finance|loan|फाइनेंस|लोन|finance mein|financing/i.test(clean)) return true;
+  if (/\bemi\b/i.test(clean) && /chahiye|lena|karna|option|kitna|calcul|calculate|batao|bataiye|बताओ/i.test(clean)) return true;
+  return false;
+}
+
 export function detectIntentWithMeta(
   text: string,
   turn: number,
+  ctx: FastPathContext = {},
 ): { name: string; response: string } | null {
   if (turn < 2) return null;
   const clean = text.toLowerCase().trim();
   if (clean.length < 2) return null;
-  // If the customer said more than ~12 words, this is a real question — go
-  // to the LLM. Fast-path is for short, common one-liners only.
   const wordCount = clean.split(/\s+/).length;
   if (wordCount > 12) return null;
+
+  if (isFinanceFollowUp(text, ctx.signals)) return null;
 
   const wordSet = new Set(clean.split(/\s+/));
 
   for (const [name, intent] of Object.entries(INTENTS)) {
-    // Acknowledgement is the broadest match — only allow it on utterances of
-    // ≤4 words to avoid catching "haan main 100 km daily chalata hoon".
+    if (name === "finance" && !isFirstFinanceAsk(text, ctx.signals)) continue;
     if (name === "acknowledgement_short" && wordCount > 4) continue;
 
     for (const phrase of intent.phrases) {
       if (clean.includes(phrase.toLowerCase())) {
+        const response = typeof intent.response === "function" ? intent.response(ctx) : intent.response;
         logger.info({ intent: name, customerText: text.slice(0, 60) }, "Intent fast-path hit");
-        return { name, response: intent.response };
+        return { name, response };
       }
     }
     for (const word of intent.words) {
       if (wordSet.has(word.toLowerCase())) {
+        const response = typeof intent.response === "function" ? intent.response(ctx) : intent.response;
         logger.info({ intent: name, customerText: text.slice(0, 60) }, "Intent fast-path hit");
-        return { name, response: intent.response };
+        return { name, response };
       }
     }
   }
   return null;
 }
 
-// Thinking fillers are intentionally disabled (Agent Identity PDF: no filler
-// words after every response — silence during a slow LLM beats sounding amateur).
+export function detectIntent(text: string, turn: number, ctx?: FastPathContext): string | null {
+  return detectIntentWithMeta(text, turn, ctx)?.response ?? null;
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PHRASE CACHE — pre-synthesized PCM for stock replies
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Every intent response, plus the thinking fillers and a few catch-all
-// acknowledgements Sakshi falls back to. If the LLM (or filler path) emits any
-// of these verbatim, we skip the Sarvam call.
-const CACHED_PHRASES: string[] = [
-  ...Object.values(INTENTS).map((i) => i.response),
-  // Common AI fallback / stalling phrases
-  "जी, समझ रही हूँ। थोड़ा detail दीजिए?",
-  "जी? एक बार फिर से बताइए?",
-  "मैं manager से confirm करके बता देती हूँ।",
-  "WhatsApp पर details भेज देती हूँ।",
-  "आपका budget कितना है?",
-  "एक minute, मैं check करती हूँ।",
+/** Rare thinking audio — only if LLM is slow (>900ms), not every turn. */
+export const THINKING_FILLERS: string[] = [
+  "Ek moment.",
+  "Haan, sun lijiye.",
 ];
 
-// Cache key includes the LANGUAGE so a Hindi-rendered PCM is never served
-// for an English/Marathi/etc. session — different language → different
-// pronunciation/voice/sample-path, no cross-language reuse allowed.
+const CACHED_PHRASES: string[] = [
+  ...Object.values(INTENTS).flatMap((i) =>
+    typeof i.response === "function" ? [i.response({})] : [i.response],
+  ),
+  ...THINKING_FILLERS,
+  "Samajh rahi hoon — thoda detail dijiye?",
+  "Ek baar phir se bataiyega?",
+  "WhatsApp par details bhej deti hoon.",
+  "Aapka budget kitna hai?",
+];
+
 const _phraseCache = new Map<string, Int16Array>();
 
-/** Normalize for cache lookups — trim, lowercase, collapse whitespace. */
 function normalize(text: string): string {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -201,12 +186,6 @@ function cacheKey(text: string, language: string): string {
   return `${language}\u0000${normalize(text)}`;
 }
 
-/** Build the cache at server boot. `synth` is injected so this module stays
- *  free of TTS-pipeline dependencies (it doesn't import callStream).
- *
- *  All cached phrases here are Sakshi's stock Hindi/Hinglish lines, so we
- *  only warm them in `hi-IN`. If a call lands in another language the cache
- *  will simply miss and fall through to live TTS — correct behaviour. */
 export async function warmPhraseCache(
   synth: (text: string) => Promise<Int16Array | null>,
 ): Promise<void> {
@@ -227,10 +206,6 @@ export async function warmPhraseCache(
   logger.info({ cached: ok, total: CACHED_PHRASES.length, language: WARM_LANG }, "Phrase cache warmed");
 }
 
-/** Returns cached PCM for an exact phrase + language match (after
- *  normalization), else null. We deliberately do NOT do fuzzy matching —
- *  serving the wrong audio for a semantically different sentence is worse
- *  than paying a TTS call. */
 export function getCachedPhrasePcm(text: string, language: string): Int16Array | null {
   return _phraseCache.get(cacheKey(text, language)) ?? null;
 }

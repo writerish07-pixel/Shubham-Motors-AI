@@ -3,6 +3,7 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { requireApiAuth, isPublicApiPath } from "./middlewares/auth";
 
 const app: Express = express();
 
@@ -25,17 +26,22 @@ app.use(
     },
   }),
 );
-// CORS: lock down to CORS_ORIGINS (comma-separated) when set; otherwise allow
-// all (fine behind the shared same-origin proxy in dev).
-const corsOrigins = (process.env.CORS_ORIGINS ?? "")
-  .split(",").map((s) => s.trim()).filter(Boolean);
-app.use(cors(corsOrigins.length ? { origin: corsOrigins, credentials: true } : {}));
+const corsOrigins = (process.env.CORS_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+app.use(
+  corsOrigins.length > 0
+    ? cors({ origin: corsOrigins, credentials: true })
+    : cors(),
+);
 // Wide JSON limit ONLY for the KB import route (full dev-KB JSON dumps).
 // Mount before the global parser so this takes precedence for that one path.
 app.use("/api/knowledge/import", express.json({ limit: "25mb" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.use("/api", (req, res, next) => {
+  if (isPublicApiPath(req.path)) return next();
+  return requireApiAuth(req, res, next);
+});
 app.use("/api", router);
 
 export default app;
