@@ -42,6 +42,9 @@ import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
 import { transferCallToAgent } from "./exotel";
 import { correctStt } from "./modelRouter";
 import { getOutboundContext } from "./scheduler";  // FIX #6: outbound context
+import { ensureSalesFollowUp } from "./salesFollowUp";
+import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
+import { buyingTimelineQuestion } from "./buyingTimeline";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
   const n = buf.length >> 1;
@@ -215,6 +218,22 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     ? getOutboundContext(fromPhone.replace(/\D/g, "").slice(-10))
     : null;
 
+  let priorCompletedCalls = 0;
+  let lastTranscriptSnippet: string | null = null;
+  if (lead) {
+    const priorCalls = await db
+      .select({ id: callsTable.id, status: callsTable.status, transcript: callsTable.transcript })
+      .from(callsTable)
+      .where(eq(callsTable.leadId, lead.id))
+      .orderBy(desc(callsTable.createdAt))
+      .limit(5);
+    priorCompletedCalls = priorCalls.filter((c) => c.status === "completed").length;
+    const lastWithTx = priorCalls.find((c) => c.transcript && c.transcript.length > 20);
+    if (lastWithTx?.transcript) lastTranscriptSnippet = lastWithTx.transcript.slice(-400);
+  }
+
+  const followUpCall = isFollowUpCall(priorCompletedCalls, isOutbound);
+
   // Build leadProfile — merge DB data with outbound context (outbound context wins
   // because it was set just seconds ago by the scheduler with fresh DB data).
   const baseProfile: LeadProfile | undefined = lead ? {
@@ -223,6 +242,11 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     notes: lead.notes ?? null,
     lastCallSummary: lead.intentSummary ?? null,
     status: lead.status ?? null,
+    buyingTimeline: lead.buyingTimeline ?? null,
+    priorCallCount: priorCompletedCalls,
+    lastTranscriptSnippet,
+    isFollowUpCall: followUpCall,
+    isOutbound,
     decisionMaker: (lead.decisionMaker === "self" || lead.decisionMaker === "family" || lead.decisionMaker === "joint")
       ? lead.decisionMaker
       : null,
@@ -234,6 +258,13 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     notes: outboundCtx.notes ?? baseProfile?.notes,
     lastCallSummary: outboundCtx.lastCallSummary ?? baseProfile?.lastCallSummary,
     status: baseProfile?.status,
+    buyingTimeline: baseProfile?.buyingTimeline,
+    priorCallCount: priorCompletedCalls,
+    lastTranscriptSnippet,
+    isFollowUpCall: followUpCall,
+    isOutbound,
+    followupReason: outboundCtx.followupReason ?? null,
+    decisionMaker: baseProfile?.decisionMaker,
   } : baseProfile;
 
   const leadName = (leadProfile?.name && leadProfile.name.trim() && !leadProfile.name.startsWith("Lead "))
@@ -250,6 +281,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     if (lead.currentVehicle) priorSignals.currentVehicle = lead.currentVehicle;
     if (lead.decisionMaker === "self" || lead.decisionMaker === "family" || lead.decisionMaker === "joint") {
       priorSignals.decisionMaker = lead.decisionMaker;
+    }
+    if (lead.buyingTimeline && /^(immediate|15days|month|festival|loan_closure|next_year)$/.test(lead.buyingTimeline)) {
+      priorSignals.buyingTimeline = lead.buyingTimeline as DiscoverySignals["buyingTimeline"];
     }
   }
 
@@ -282,15 +316,17 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     lastAgentSpokeAt: Date.now(),
   };
 
-  // Greeting — personalised for outbound calls referencing previous interest
+  // Greeting — follow-up calls ask purchase outcome first (reference agent.py)
   let greeting: string;
-  if (isOutbound && outboundCtx?.interestedModel) {
-    // Warm outbound opening referencing previous conversation
-    const addrName = leadName === "Sir" ? "" : `${leadName} जी`;
-    greeting = `नमस्ते ${addrName}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। आपने पिछली बार ${outboundCtx.interestedModel} के बारे में बात की थी — क्या आप अभी उसके बारे में कुछ और जानना चाहेंगे?`;
+  if (followUpCall && (isOutbound || priorCompletedCalls >= 1)) {
+    greeting = buildPurchaseVerificationGreeting(
+      leadName,
+      outboundCtx?.interestedModel ?? leadProfile?.interestedModel,
+      outboundCtx?.followupReason,
+    );
   } else if (isOutbound && outboundCtx?.followupReason) {
     const addrName = leadName === "Sir" ? "" : `${leadName} जी`;
-    greeting = `नमस्ते ${addrName}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। ${outboundCtx.followupReason} — क्या अभी बात करना ठीक है?`;
+    greeting = `नमस्ते ${addrName}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। ${outboundCtx.followupReason} — क्या अभी 2 minute baat kar sakte hain?`;
   } else if (leadName !== "Sir") {
     greeting = `नमस्ते ${leadName} जी! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। बताइए, मैं आपकी क्या help कर सकती हूँ?`;
   } else {
@@ -301,7 +337,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
   session.history.push({ role: "assistant", content: greeting });
   session.lastAgentSpokeAt = Date.now();
   // PROACTIVE: if customer doesn't respond within 8s of greeting, Sakshi speaks first
-  scheduleProactiveNudge(ws, session, 8000);
+  scheduleProactiveNudge(ws, session, 6000);
 
   const cachedPcm = GREETING_CACHE.get(greeting);
   if (cachedPcm) {
@@ -526,6 +562,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const fastReply = fastMeta?.response ?? null;
   // Skip fast-path when customer wants a repeat — LLM/direct router handles context.
   if (fastReply && !repeatInstruction) {
+    const fastWithFollowUp = ensureSalesFollowUp(fastReply, {
+      signals: session.discoverySignals,
+      convStage: session.convStage,
+      turn: session.turn,
+      customerText: correctedText,
+      leadName: session.leadName,
+    });
     session.history.push({ role: "user", content: customerText });
     if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
     session.isSpeaking = true;
@@ -535,7 +578,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     const myGen = ++session.ttsGen;
     let actuallyPlayed = false;
     try {
-      const pcm = await synthesizeTts(fastReply, session.language);
+      const pcm = await synthesizeTts(fastWithFollowUp, session.language);
       if (pcm && !session.ttsAbort && !session.isClosed && session.ttsGen === myGen && ws.readyState === WebSocket.OPEN) {
         await playPcm8k(ws, session.streamSid, pcm, session);
         if (!session.ttsAbort && session.ttsGen === myGen) actuallyPlayed = true;
@@ -547,10 +590,12 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       session.speakingStartedAt = undefined;
     }
     if (actuallyPlayed) {
-      session.history.push({ role: "assistant", content: fastReply });
-      session.transcript.push(`Agent: ${fastReply}`);
+      session.history.push({ role: "assistant", content: fastWithFollowUp });
+      session.transcript.push(`Agent: ${fastWithFollowUp}`);
+      session.lastAgentSpokeAt = Date.now();
+      scheduleProactiveNudge(ws, session, 4500);
     }
-    logger.info({ callSid: session.callSid, intent: fastMeta?.name, agentText: actuallyPlayed ? fastReply : "", played: actuallyPlayed ? 1 : 0, source: "fastpath" }, "Agent reply");
+    logger.info({ callSid: session.callSid, intent: fastMeta?.name, agentText: actuallyPlayed ? fastWithFollowUp : "", played: actuallyPlayed ? 1 : 0, source: "fastpath" }, "Agent reply");
     return;
   }
 
@@ -652,9 +697,9 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     return;
   }
 
-  // PROACTIVE: re-arm — if customer is silent 6s after agent finishes, Sakshi continues
+  // PROACTIVE: re-arm — if customer is silent ~4.5s after agent finishes, Sakshi continues
   session.lastAgentSpokeAt = Date.now();
-  scheduleProactiveNudge(ws, session, 6000);
+  scheduleProactiveNudge(ws, session, 4500);
 
   // Hot-lead detection
   const lower = customerText.toLowerCase();
@@ -692,8 +737,14 @@ function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number
     if (session.speechCount > 0) return; // customer is mid-utterance — do not talk over them
     if (Date.now() - session.lastAgentSpokeAt < 2000) return; // TTS may still be playing
 
-    const msg = getProactiveMessage(session);
+    let msg = getProactiveMessage(session);
     if (!msg) return;
+    msg = ensureSalesFollowUp(msg, {
+      signals: session.discoverySignals,
+      convStage: session.convStage,
+      turn: session.turn,
+      leadName: session.leadName,
+    });
 
     session.proactiveCount++;
     logger.info({ callSid: session.callSid, count: session.proactiveCount, msg: msg.slice(0, 60) }, "Proactive nudge");
@@ -710,7 +761,7 @@ function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number
         session.history.push({ role: "assistant", content: msg });
         session.transcript.push(`Agent[proactive]: ${msg}`);
         session.lastAgentSpokeAt = Date.now();
-        scheduleProactiveNudge(ws, session, 10000); // nudge again in 10s if still silent
+        scheduleProactiveNudge(ws, session, 6000); // nudge again in 8s if still silent
       }
     } catch (err) {
       logger.error({ err }, "Proactive nudge TTS failed");
@@ -753,6 +804,9 @@ function getProactiveMessage(session: Session): string | null {
   }
   if (!s.currentVehicle && count <= 4) {
     return `${name}, abhi kya chala rahe hain? Purani vehicle ho toh exchange mein ₹10,000-20,000 tak mil jaata hai.`;
+  }
+  if (!s.buyingTimeline && count <= 4 && (s.segment || s.interestedModel)) {
+    return `${name}, ${buyingTimelineQuestion(s.interestedModel)}`;
   }
 
   // ── SEGMENT-SPECIFIC PITCH ─────────────────────────────────────────────────
@@ -803,7 +857,7 @@ function detectTopicShift(lastAgentText: string, customerText: string): boolean 
   // question and would fire spurious topic-interrupts on nearly every turn.
   const topics: Record<string, RegExp> = {
     scooter: /scooter|scooty|destini|pleasure|xoom|vida/i,
-    bike: /\bbike\b|splendor|glamour|xtreme|hf deluxe|passion|xpulse|bullet/i,
+    bike: /\bbike\b|splendor|glamour|galemar|galaimer|xtreme|hf deluxe|passion|xpulse|bullet|cruise/i,
     price: /\bprice\b|on.?road|ex.?showroom|kitne ka|kitne ki|kimat|qeemat|कीमत/i,
     emi: /\bemi\b|finance|\bloan\b|kist|किस्त|down ?payment|installment/i,
     address: /\baddress\b|showroom kahan|\blocation\b|kahan hai|kahan ho|jagah/i,

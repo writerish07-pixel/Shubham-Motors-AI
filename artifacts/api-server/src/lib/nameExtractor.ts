@@ -29,7 +29,11 @@ export function applyNameSttCorrections(text: string): string {
     .replace(/\bjan\s+prakash\b/gi, "Gyan Prakash")
     .replace(/\bjian\s+prakash\b/gi, "Gyan Prakash")
     .replace(/\bgyaan\s+prakash\b/gi, "Gyan Prakash")
-    .replace(/\bजान\s+प्रकाश\b/g, "ज्ञान प्रकाश");
+    .replace(/\bजान\s+प्रकाश\b/g, "ज्ञान प्रकाश")
+    .replace(/\brushav\b/gi, "Rishabh")
+    .replace(/\brishab\b/gi, "Rishabh")
+    .replace(/\bरुशव\b/g, "ऋषभ")
+    .replace(/\bरिशभ\b/g, "ऋषभ");
 }
 
 export interface NameExtractResult {
