@@ -5,7 +5,6 @@
 import type { DiscoverySignals } from "./openai";
 import { FINANCE_PARTNERS_LIST } from "./emiQuote";
 import { logger } from "./logger";
-import { sanitizeAgentSpeech } from "./ttsPrep";
 
 interface Intent {
   phrases: string[];
@@ -114,7 +113,7 @@ function isFirstFinanceAsk(text: string, signals?: DiscoverySignals): boolean {
   if (signals?.financeInterest) return false;
   if (isFinanceFollowUp(text, signals)) return false;
   const clean = text.toLowerCase();
-  if (/finance|loan|फाइनेंस|लोन|finance mein|financing/i.test(clean)) return true;
+  if (/finance|loan|फाइनेंस|लोन|finance mein|financing|finance option/i.test(clean)) return true;
   if (/\bemi\b/i.test(clean) && /chahiye|lena|karna|option|kitna|calcul|calculate|batao|bataiye|बताओ/i.test(clean)) return true;
   return false;
 }

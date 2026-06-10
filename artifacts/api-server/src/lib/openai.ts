@@ -27,6 +27,18 @@ import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { classifyTurn, tryDirectAnswer } from "./modelRouter";
 import { formatAddressForm } from "./conversationHelpers";
+import { mentionsGlamour } from "./sttProductFix";
+import {
+  ensureSalesFollowUp,
+  getMissingFollowUpSentence,
+  type FollowUpContext,
+} from "./salesFollowUp";
+import { extractBuyingTimeline, type BuyingTimeline } from "./buyingTimeline";
+import {
+  buildFollowUpCallPromptBlock,
+  buildOutboundCallPromptBlock,
+} from "./followUpCallContext";
+import { fetchCompetitorIntel, formatCompetitorIntelBlock } from "./competitorIntel";
 
 // ─── Model IDs ───────────────────────────────────────────────────────────────
 const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
@@ -148,6 +160,12 @@ export interface LeadProfile {
   lastCallSummary?: string | null;
   status?: string | null;
   decisionMaker?: "self" | "family" | "joint" | null;
+  buyingTimeline?: string | null;
+  priorCallCount?: number;
+  lastTranscriptSnippet?: string | null;
+  isFollowUpCall?: boolean;
+  isOutbound?: boolean;
+  followupReason?: string | null;
 }
 
 // NEW: Discovery signals extracted from the live conversation.
@@ -178,6 +196,10 @@ export interface DiscoverySignals {
   readyToBuy?: boolean;
   /** Customer negotiating price / discount */
   negotiating?: boolean;
+  /** When customer plans to buy — drives auto follow-up */
+  buyingTimeline?: BuyingTimeline;
+  /** Raw phrase e.g. "agle mahine salary ke baad" */
+  buyingTimelineHint?: string;
 }
 
 // PDF buying stages (plus connect for turn-1 greeting).
@@ -243,7 +265,9 @@ export function extractDiscoverySignals(
 
   // Finance interest
   if (!updated.financeInterest) {
-    if (/\bemi\b|finance|loan|किस्त|qist|kist|finans/i.test(t)) updated.financeInterest = true;
+    if (/\bemi\b|finance|financing|loan|किस्त|qist|kist|finans|finance\s*option/i.test(t)) {
+      updated.financeInterest = true;
+    }
   }
 
   // Exchange interest
@@ -262,7 +286,7 @@ export function extractDiscoverySignals(
   // ── SEGMENT INTEREST — MOST IMPORTANT signal for recommendations ───────────
   if (!updated.segment) {
     const modelMap: Array<[RegExp, NonNullable<DiscoverySignals["segment"]>]> = [
-      [/xtreme\s*125|glamour|super\s*splendor/i, "125cc"],
+      [/xtreme\s*125|glamour|galemar|galaimer|super\s*splendor/i, "125cc"],
       [/xtreme\s*160|xtreme\s*160r|xpulse/i, "160cc+"],
       [/splendor|hf\s*deluxe|passion/i, "100cc"],
       [/destini\s*125|xoom\s*125/i, "scooter_125"],
@@ -286,6 +310,12 @@ export function extractDiscoverySignals(
   if (/destini\s*110|destini 110|डेस्टिनी.*110/i.test(t)) {
     updated.interestedModel = updated.interestedModel ?? "Destini 110";
     updated.segment = updated.segment ?? "scooter_110";
+  }
+
+  // Glamour is a BIKE — override scooter context when customer names it (common STT: galemar).
+  if (mentionsGlamour(t) || /glamour\s*125|125.*glamour/i.test(t)) {
+    updated.interestedModel = updated.interestedModel ?? "Glamour X";
+    updated.segment = "125cc";
   }
 
   // ── STYLE PREFERENCE — sporty vs commuter(mileage) vs family ──────────────
@@ -322,6 +352,15 @@ export function extractDiscoverySignals(
   if (!updated.comparingBrands) {
     if (/compare|compar|dono mein|vs\b|better than|honda|tvs|bajaj|yamaha|suzuki|ktm|compare kar/i.test(t)) {
       updated.comparingBrands = true;
+    }
+  }
+
+  // Buying timeline — MUST capture for auto follow-up scheduling
+  if (!updated.buyingTimeline) {
+    const tl = extractBuyingTimeline(t);
+    if (tl) {
+      updated.buyingTimeline = tl;
+      updated.buyingTimelineHint = text.trim().slice(0, 120);
     }
   }
 
@@ -397,6 +436,7 @@ function formatLeadProfile(p?: LeadProfile): string {
   if (p.lastCallSummary && p.lastCallSummary.trim()) lines.push(`• Last call summary: ${p.lastCallSummary.trim()}`);
   if (p.status && p.status !== "new") lines.push(`• CRM status: ${p.status}`);
   if (p.decisionMaker) lines.push(`• Decision maker (known): ${p.decisionMaker} — tailor next steps accordingly.`);
+  if (p.buyingTimeline) lines.push(`• Buying timeline (known): ${p.buyingTimeline} — do NOT re-ask when; schedule follow-up mentally.`);
   if (lines.length === 0) return "";
   return `\n╔══ WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER ══╗\n${lines.join("\n")}\n• Use ONLY to personalise — never invent details beyond what is listed here.\n• Reference it naturally in the FIRST 1–2 turns, not in every reply.\n╚════════════════════════════════════════════════╝`;
 }
@@ -441,6 +481,11 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
     lines.push(`• Finance interest: YES — DO NOT stop at "finance achha option hai". Ask: (1) which model/budget (2) down payment amount (3) 24 or 36 month tenure. Quote reference EMI from table + disclaimer.`);
   }
   if (signals.exchangeInterest) lines.push(`• Exchange interest: YES — mention ₹10,000-20,000 bonus`);
+  if (signals.buyingTimeline) {
+    lines.push(`• ✅ BUYING TIMELINE CAPTURED: ${signals.buyingTimeline}${signals.buyingTimelineHint ? ` ("${signals.buyingTimelineHint}")` : ""} — system will auto-schedule follow-up. Acknowledge warmly; do NOT pressure for earlier date.`);
+  } else if (signals.segment || signals.interestedModel) {
+    lines.push(`• ⚠️ BUYING TIMELINE UNKNOWN — by turn 4 you MUST ask: "Kab tak lena plan hai — is hafte, is mahine, ya festival ke baad?" This drives our auto follow-up call.`);
+  }
   if (signals.decisionMaker) {
     const dm: Record<string, string> = {
       self: "Customer decides alone — speak directly to them about needs and next steps.",
@@ -599,13 +644,21 @@ export async function generateAgentReply(
   );
 
   const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
+  const followUpCtx: FollowUpContext = {
+    signals: discoverySignals,
+    convStage,
+    turn,
+    customerText,
+    leadName,
+  };
   const direct = tryDirectAnswer(customerText, directKb, addressForm, {
     signals: discoverySignals,
     history: conversationHistory,
   });
   if (direct) {
-    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router → direct KB answer");
-    return direct;
+    const withFollowUp = ensureSalesFollowUp(direct, followUpCtx);
+    logger.info({ tier: "direct", chars: withFollowUp.length }, "Hybrid router → direct KB answer");
+    return withFollowUp;
   }
 
   const tier = classifyTurn(customerText, conversationHistory);
@@ -629,8 +682,9 @@ export async function generateAgentReply(
     temperature: tempMap[tone],
   });
 
+  const raw = response.choices[0]?.message?.content ?? "जी बोलिए, मैं सुन रही हूँ।";
   logger.info({ tier, model, tone, inputLen: customerText.length }, "Hybrid router → LLM reply");
-  return response.choices[0]?.message?.content ?? "जी बोलिए, मैं सुन रही हूँ।";
+  return ensureSalesFollowUp(raw, followUpCtx);
 }
 
 export async function* generateAgentReplyStream(
@@ -656,13 +710,21 @@ export async function* generateAgentReplyStream(
   const addressForm = formatAddressForm(leadName, turn);
 
   const directKb = knowledge && knowledge.trim() ? `${DEFAULT_HERO_KNOWLEDGE}\n${knowledge}` : DEFAULT_HERO_KNOWLEDGE;
+  const followUpCtx: FollowUpContext = {
+    signals: discoverySignals,
+    convStage,
+    turn,
+    customerText,
+    leadName,
+  };
   const direct = tryDirectAnswer(customerText, directKb, addressForm, {
     signals: discoverySignals,
     history: conversationHistory,
   });
   if (direct) {
-    logger.info({ tier: "direct", chars: direct.length }, "Hybrid router (stream) → direct KB answer");
-    yield direct;
+    const withFollowUp = ensureSalesFollowUp(direct, followUpCtx);
+    logger.info({ tier: "direct", chars: withFollowUp.length }, "Hybrid router (stream) → direct KB answer");
+    yield withFollowUp;
     return;
   }
 
@@ -697,6 +759,7 @@ export async function* generateAgentReplyStream(
   let buf = "";
   let totalChars = 0;
   let isTransfer = false;
+  let spokenFull = "";
   const SENTENCE_END = /[.!?]\s|।|\n/;
   const MIN_SENTENCE_CHARS = 6;
 
@@ -718,6 +781,7 @@ export async function* generateAgentReplyStream(
       const sentence = buf.slice(0, cut).trim();
       buf = buf.slice(cut);
       if (sentence.length >= MIN_SENTENCE_CHARS) {
+        spokenFull += (spokenFull ? " " : "") + sentence;
         yield sentence;
       } else if (sentence) {
         buf = sentence + " " + buf;
@@ -727,7 +791,18 @@ export async function* generateAgentReplyStream(
   }
 
   const tail = buf.trim();
-  if (tail) yield tail;
+  if (tail) {
+    spokenFull += (spokenFull ? " " : "") + tail;
+    yield tail;
+  }
+
+  if (!isTransfer) {
+    const extra = getMissingFollowUpSentence(spokenFull, followUpCtx);
+    if (extra) {
+      logger.info({ followUp: extra.slice(0, 60) }, "Appended contextual follow-up question");
+      yield extra;
+    }
+  }
   logger.info({ tier, model, tone, chars: totalChars, transfer: isTransfer }, "Hybrid router (stream) → done");
 }
 
@@ -755,6 +830,19 @@ async function buildSystemPrompt(
     ? `${DEFAULT_HERO_KNOWLEDGE}\n\n[ADMIN KB OVERRIDES — dealer-curated, takes precedence when contradicts the baseline above]\n${knowledge}`
     : DEFAULT_HERO_KNOWLEDGE;
 
+  const competitorIntel = await fetchCompetitorIntel();
+  const competitorBlock = formatCompetitorIntelBlock(competitorIntel);
+  const followUpBlock = leadProfile?.isFollowUpCall
+    ? buildFollowUpCallPromptBlock(
+        leadProfile,
+        leadProfile.priorCallCount ?? 1,
+        leadProfile.lastTranscriptSnippet,
+      )
+    : "";
+  const outboundBlock = leadProfile?.isOutbound
+    ? buildOutboundCallPromptBlock(leadProfile.followupReason)
+    : "";
+
   const toneInstruction = tone === "confused"
     ? "\n⚠️ TONE NOTE: Customer seems confused. Use simpler Hindi, shorter sentences, and confirm understanding after each point."
     : tone === "impatient"
@@ -775,6 +863,7 @@ async function buildSystemPrompt(
     addressForm, language, merged, fuelPrice, leadProfile,
     signals, stage, festival, turn, toneInstruction, topicInterrupt,
     repeatInstruction ?? "", nameConfirm,
+    followUpBlock, outboundBlock, competitorBlock,
   );
 }
 
@@ -793,8 +882,11 @@ const SAKSHI_SYSTEM_PROMPT = (
   topicInterrupt: string,
   repeatInstruction: string,
   nameConfirm: string,
+  followUpBlock: string,
+  outboundBlock: string,
+  competitorBlock: string,
 ) => `You are SAKSHI — a highly experienced female sales consultant at Shubham Motors, a premium Hero MotoCorp dealership in Jaipur. You are a REAL person: never an AI, never a chatbot, never a call-center script.
-${repeatInstruction}${nameConfirm}
+${repeatInstruction}${nameConfirm}${followUpBlock}${outboundBlock}${competitorBlock}
 
 You are a trusted advisor and relationship-builder. Your purpose is NOT just to answer questions or close a sale today — it is to understand the customer, build trust, discover their real needs, and help them make a confident buying decision. Every conversation should move the relationship forward, even if the sale doesn't happen today. The customer should feel understood, respected, and more confident — never "sold to". You are measured by trust and relationships, not by talking fast or pushing hard.
 
@@ -914,6 +1006,8 @@ NEVER name just ONE model when the customer asked a category question.
 • "Available hai / stock / milegi" = INVENTORY question → check KB, else offer arrangement timeline.
 • NEVER say "हमारे पास नहीं है" for any Hero model.
 • NEVER deny a feature that exists in [MODEL FEATURES] — e.g. Glamour X DSS HAS cruise control; taxi/commercial and BH registration are possible under RTO rules (guide, don't refuse).
+• If customer asks Glamour / cruise control / any bike feature — answer THAT question first. NEVER apologise and pivot to a scooter list (Destini/Pleasure) unless they asked for scooters.
+• Cruise control on Glamour X: DSS variant = YES; DRS = NO. Say this clearly in one sentence, then ask DRS vs DSS.
 
 RECOMMENDATION RULES — READ EVERY TIME BEFORE SUGGESTING A MODEL:
 
@@ -959,6 +1053,24 @@ FUEL SAVINGS (use to convince — never push Splendor blindly, push the RIGHT mo
   25km/day: HF Deluxe (83kmpl)=₹976/mo vs scooter (50kmpl)=₹1620/mo
   50km/day: Super Splendor (65kmpl)=₹2492/mo vs Glamour (55kmpl)=₹2945/mo
   70km/day: HF Deluxe (83kmpl)=₹2733/mo vs Pulsar (45kmpl)=₹5040/mo
+
+╔══ MANDATORY FOLLOW-UP QUESTION — EVERY TURN (CRITICAL) ══╗
+A real salesperson NEVER ends on a dead statement. After you answer, ALWAYS finish with exactly ONE short, natural follow-up question tied to THIS conversation.
+• After price → "Kaun sa variant suit karega?" or "Test ride kab convenient hoga?"
+• After feature (e.g. cruise) → "DRS ya DSS dekhna chahenge?"
+• After finance info → "Kitna down payment plan hai?"
+• After discovery → next missing signal (km, budget, bike vs scooter)
+• If timeline unknown (turn 4+) → "Kab tak lena plan hai — is hafte, is mahine, ya festival ke baad?" (REQUIRED for auto follow-up)
+NEVER leave the customer with silence or "samajh gayi" alone — that kills the sale. If you forgot to ask, the system will append one; still try to weave it in naturally yourself.
+╚═══════════════════════════════════════════════════════════╝
+
+╔══ BUYING TIMELINE — REQUIRED FOR AUTO FOLLOW-UP ══╗
+You MUST learn WHEN the customer plans to buy — not just IF they are interested.
+Ask naturally once segment/model is clear: "Kab tak lena plan kar rahe hain?"
+Map answers: is hafte/abhi → immediate | 15 din → 15days | agle mahine/salary → month | Diwali/festival → festival | loan band → loan_closure
+If they say "soch ke batata" → gently ask "Roughly kab tak decide hoga?" — respect their timeline, never push "aaj hi".
+Once timeline is known, confirm: "Theek hai, main us time pe follow-up kar lungi."
+╚═══════════════════════════════════════════════════╝
 
 ╔══ CLOSING TECHNIQUES ══╗
 • ASSUMPTIVE: "Kal Saturday ko showroom convenient hoga ya Sunday subah? Test ride ready rakhwa deti hoon."
@@ -1201,18 +1313,33 @@ export async function analyzeCallIntent(
     ? "Write the summary field in Hindi (Devanagari script)."
     : "Write the summary field in English.";
 
+  const today = new Date().toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       {
         role: "system",
         content: `You are a sales call analyzer for Shubham Motors (Hero MotoCorp dealer). ${langInstruction}
+
+TODAY (IST): ${today}
+Use this to convert relative dates ("kal", "Saturday", "agle mahine", "salary ke baad") into followupDate ISO strings.
+If customer gave a specific day/time, set followupDate to that datetime. If only a date with no time, use 10:00 AM IST (never midnight 00:00).
+
 Analyze the transcript and return JSON with:
 - intent: "hot_buy" | "interested" | "thinking" | "future_date" | "not_interested" | "wrong_number" | "needs_info"
 - score: 0-100 buying intent score
 - summary: 1-2 sentence call outcome summary (in the correct language as instructed above)
-- followupDate: ISO date string if customer mentioned a future time, else null
-- followupReason: paraphrased reason to follow up, else null
+- followupDate: ISO 8601 datetime if customer mentioned when to call back OR when they plan to buy (e.g. "next Saturday 11am", "1st of next month"), else null
+- followupReason: paraphrased reason to follow up (include buying timeline if stated), else null
 - language: detected language code (hi, en, mr, etc.)
 - familyInfo: family members mentioned (spouse, kids, ages) — short string for cross-sell, else null
 - preferredModel: specific Hero model customer showed most interest in, else null

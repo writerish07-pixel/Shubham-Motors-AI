@@ -2,10 +2,11 @@ import { eq, and, sql } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, knowledgeTable } from "@workspace/db";
 import {
   analyzeCallIntent,
-  computeFollowupDate,
+  getActiveFestivalOffer,
   learnFromTranscript,
   type DiscoverySignals,
 } from "./openai";
+import { resolveFollowupSchedule } from "./followupSchedule";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "./whatsapp";
 import { logger } from "./logger";
 
@@ -27,6 +28,17 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
   if (!existingLead) return;
 
   const analysis = await analyzeCallIntent(transcript, sessionLanguage);
+  const festival = await getActiveFestivalOffer();
+  const mergedTimeline =
+    analysis.buyingTimeline
+    ?? discoverySignals.buyingTimeline
+    ?? existingLead.buyingTimeline
+    ?? null;
+
+  const callNote = `[Call #${callDbId} - ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}] ${analysis.summary}`;
+  const mergedNotes = existingLead.notes?.trim()
+    ? `${existingLead.notes.trim()}\n${callNote}`
+    : callNote;
 
   await db
     .update(callsTable)
@@ -66,7 +78,8 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       ...(analysis.familyInfo ? { familyInfo: analysis.familyInfo } : {}),
       ...(analysis.competitorMentioned ? { competitorMentioned: analysis.competitorMentioned } : {}),
       ...(analysis.competitorReason ? { competitorReason: analysis.competitorReason } : {}),
-      ...(analysis.buyingTimeline ? { buyingTimeline: analysis.buyingTimeline } : {}),
+      ...(mergedTimeline ? { buyingTimeline: mergedTimeline } : {}),
+      notes: mergedNotes,
       ...(discoverySignals.segment ? { segment: discoverySignals.segment } : {}),
       ...(discoverySignals.km ? { dailyKm: discoverySignals.km } : {}),
       ...(discoverySignals.budget ? { budget: discoverySignals.budget } : {}),
@@ -89,12 +102,14 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       .set({ status: "cancelled" })
       .where(and(eq(followupsTable.leadId, leadId), eq(followupsTable.status, "pending")));
   } else {
-    const followupSchedule = computeFollowupDate(
-      analysis.intent,
-      analysis.score,
-      analysis.buyingTimeline,
-      null,
-    );
+    const followupSchedule = resolveFollowupSchedule({
+      intent: analysis.intent,
+      score: analysis.score,
+      buyingTimeline: mergedTimeline,
+      llmFollowupDate: analysis.followupDate,
+      llmFollowupReason: analysis.followupReason,
+      festivalName: festival?.name ?? null,
+    });
 
     if (followupSchedule) {
       const [existingPending] = await db

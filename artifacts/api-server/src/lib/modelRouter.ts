@@ -15,6 +15,12 @@ import {
   parseTenureMonths,
   resolveModelOnRoad,
 } from "./emiQuote";
+import {
+  normalizeProductStt,
+  isCruiseControlQuestion,
+  mentionsGlamour,
+  isFeatureAvailabilityQuestion,
+} from "./sttProductFix";
 
 export type ModelTier = "mini" | "premium";
 
@@ -64,7 +70,7 @@ const STT_ALIASES: Array<[RegExp, string]> = [
 export function correctStt(text: string): string {
   let t = text;
   for (const [re, rep] of STT_ALIASES) t = t.replace(re, rep);
-  return t;
+  return normalizeProductStt(t);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,6 +86,7 @@ const PREMIUM_KEYWORDS_RE = new RegExp(
     "book kar", "booking karna", "confirm karta", "abhi le", "aaj le lenge",
     "final kar", "delivery kab", "registration kab",
     "mileage aur power", "kitne ka aata", "टॉर्क", "torque", "bhp", "ground clearance",
+    "cruise control", "cruise", "glamour", "क्रूज", "संट्रो",
     "exchange", "purani bike", "second hand", "trade",
   ].join("|"),
   "i"
@@ -87,7 +94,7 @@ const PREMIUM_KEYWORDS_RE = new RegExp(
 
 const PRICE_QUERY_RE = /(?:price|कीमत|दाम|kitne ka|kitne ki|kya rate|on[- ]?road|ex[- ]?showroom|कितने|kitna|kitne)/i;
 const VARIANT_QUERY_RE = /(?:variant|variants|कौन सी|kaunsi|kaun si|model|वेरिएंट|version)/i;
-const FEATURE_QUERY_RE = /(?:feature|features|specs|mileage|माइलेज|engine|cc|warranty|वारंटी)/i;
+const FEATURE_QUERY_RE = /(?:feature|features|specs|mileage|माइलेज|engine|cc|warranty|वारंटी|cruise|क्रूज|centro|संट्रो|control|कंट्रोल)/i;
 const HOURS_QUERY_RE = /(?:timing|kab khulta|kab khulte|open|close|hours|शोरूम कब)/i;
 // "pata"/"पता" is a homonym: पता = address, BUT "pata karna/lagana/chalana" = to find out.
 // FIND_OUT_RE catches the "find out / inquire" sense so it never triggers the address reply.
@@ -143,8 +150,15 @@ export function tryDirectAnswer(
     return `हमारा showroom जयपुर में है ${addressForm}, मैं exact location WhatsApp पर अभी भेज देती हूँ. क्या आज शाम का test ride book कर लूँ?`;
   }
 
-  if (/cruise\s*control|क्रूज़|क्रूज/i.test(text)) {
-    return `Glamour X DSS variant में cruise control है ${addressForm} — highway पर comfortable riding. Aap DRS ya DSS dekh rahe hain? Showroom par dono compare karwa deti hoon.`;
+  const historyText = (ctx?.history ?? []).map((h) => h.content).join(" ");
+  const glamourCtx = mentionsGlamour(text) || mentionsGlamour(historyText) || /glamour/i.test(signals?.interestedModel ?? "");
+
+  if (isCruiseControlQuestion(text) || (glamourCtx && isFeatureAvailabilityQuestion(text) && /control|cruis|centro|संट्रो|क्रूज/i.test(text))) {
+    return `Glamour X DSS variant mein cruise control hai — DRS variant mein nahi hota. Highway ride comfortable rehti hai. Aap DSS dekhna chahenge ya DRS?`;
+  }
+
+  if (glamourCtx && (isFeatureAvailabilityQuestion(text) || FEATURE_QUERY_RE.test(text))) {
+    return `Glamour X 125cc styled commuter hai — DSS variant mein cruise control milta hai, on-road Jaipur mein lagbhag ek lakh se upar. DRS ya DSS — kaun sa variant dekh rahe hain?`;
   }
 
   if (/(?:taxi|commercial|टैक्सी|कमर्शियल).*(?:number|regist|पंजी|रजिस्ट)|taxi.*(?:regist|number|plate)/i.test(text)) {
@@ -155,24 +169,32 @@ export function tryDirectAnswer(
     return `BH series registration eligible customers ke liye available hai ${addressForm} — jo do alag states mein rehte ya kaam karte hain. Documents RTO pe depend karte hain; hum guide kar dete hain. Aap salaried hain ya business?`;
   }
 
-  // Finance / EMI — use customer's actual down payment @ 9% reference; list banks, don't push one.
-  if (/\bfinance\b|\bemi\b|\bloan\b|किस्त|फाइनेंस|लोन|down\s*payment|डाउन/i.test(text)) {
+  // Finance / EMI — list all banks; use customer's down payment @ 9% reference.
+  if (/\bfinance\b|\bfinancing\b|\bemi\b|\bloan\b|किस्त|फाइनेंस|लोन|down\s*payment|डाउन|finance\s*option/i.test(text)) {
     const down = parseDownPayment(text);
     const months = parseTenureMonths(text) ?? 24;
     const modelHint = signals?.interestedModel ?? "";
-    const resolved = resolveModelOnRoad(text, modelHint);
+    const resolved = resolveModelOnRoad(text + " " + historyText, modelHint);
+
     if (down && resolved) {
       return formatEmiQuote(resolved.model, resolved.onRoad, down, months);
     }
+
     if (/kitne\s*(mahine|month|मही)|tenure|duration/i.test(text) && ctx?.history?.length) {
       const lastAgent = [...ctx.history].reverse().find((h) => h.role === "assistant" && !/^\s*\[TRANSFER/i.test(h.content));
       if (lastAgent?.content.match(/₹[\d,]+/)) {
         return `Jo EMI maine abhi batayi thi — woh ${months} mahine ki reference EMI hai @ 9%. Actual rate aapke CIBIL par 8.5%–12% ho sakta hai. ${FINANCE_PARTNERS_LIST}`;
       }
     }
-    if (!signals?.financeInterest && /finance|loan|फाइनेंस|लोन/i.test(text)) {
-      const vehicle = signals?.segment?.startsWith("scooter") ? "scooter" : "bike/scooter";
-      return `${FINANCE_PARTNERS_LIST} Kaun sa ${vehicle} dekh rahe hain aur kitna down payment plan hai — phir main exact tenure ke saath EMI bataungi.`;
+
+    // Active finance — customer already asked; never skip to price-only monologue.
+    if (signals?.financeInterest || /finance|financing|option/i.test(text)) {
+      if (resolved) {
+        const emi24 = formatEmiQuote(resolved.model, resolved.onRoad, 25000, 24);
+        return `${FINANCE_PARTNERS_LIST} ${emi24} Aap kitna down payment de sakte hain?`;
+      }
+      const vehicle = signals?.segment?.startsWith("scooter") ? "scooter" : "bike";
+      return `${FINANCE_PARTNERS_LIST} Kaun sa ${vehicle}/model final hai aur kitna down payment plan hai — main 24 aur 36 mahine ki EMI bataungi.`;
     }
   }
 
