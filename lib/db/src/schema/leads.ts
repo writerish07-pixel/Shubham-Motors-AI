@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, boolean, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -62,6 +62,15 @@ export const leadsTable = pgTable("leads", {
   lostToDealer: text("lost_to_dealer"),
   lostReason: text("lost_reason"),
   lostOfferFactor: text("lost_offer_factor"),
+
+  /** TRAI/DND compliance — customer explicitly said "don't call me".
+   *  Hard gate: the auto-dialer and instant-call trigger must NEVER dial this lead. */
+  doNotCall: boolean("do_not_call").notNull().default(false),
+
+  /** Confirmed showroom visit / test ride appointment (from call analysis) */
+  visitScheduledAt: timestamp("visit_scheduled_at", { withTimezone: true }),
+  /** When the day-of WhatsApp visit reminder was sent — booked-but-no-show killer */
+  visitReminderSentAt: timestamp("visit_reminder_sent_at", { withTimezone: true }),
 
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),

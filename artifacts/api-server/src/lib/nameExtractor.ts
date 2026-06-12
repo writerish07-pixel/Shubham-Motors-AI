@@ -16,6 +16,9 @@
 // We capture greedy name tokens then call stripTrailingStopwords() to peel
 // off any verb/filler that got included.
 const PHRASE_PATTERNS: RegExp[] = [
+  // Romanized Hindi — what STT actually produces: "mera naam Amit hai",
+  // "mera shubh naam Amit Sharma". Trailing "hai" is stripped as a stopword.
+  /(?:mera\s+(?:shubh\s+)?naa?m\s+)([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)/i,
   /(?:मेरा\s+(?:शुभ\s+)?नाम\s+(?:है\s+)?)([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)/i,
   /(?:मैं|main)\s+([\u0900-\u097Fa-z][\u0900-\u097Fa-z]{1,20}(?:\s+[\u0900-\u097Fa-z]{1,20})?)\s+(?:बोल\s*रहा|बोल\s*रही|hoon|hu|hoon|बोलता|बोलती|हूँ|हूं)/i,
   /(?:my\s+name\s+is|name\s+is|this\s+is|i\s+am|i'm)\s+([A-Za-z][A-Za-z]{1,20}(?:\s+[A-Za-z]{1,20})?)/i,

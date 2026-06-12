@@ -13,6 +13,7 @@ import { makeOutboundCall } from "../lib/exotel";
 import { getWebhookBaseUrl } from "../lib/publicUrl";
 import { normalizePhone } from "../lib/phone";
 import { setOutboundContext } from "../lib/scheduler";
+import { triggerInstantLeadCall, isInstantCallSource } from "../lib/leadTrigger";
 
 const router: IRouter = Router();
 
@@ -59,6 +60,13 @@ router.post("/leads", async (req, res): Promise<void> => {
     status: "new",
     score: 0,
   }).returning();
+
+  // Speed-to-lead: live enquiry sources get an instant first-response call
+  // (within the TRAI calling window) — see leadTrigger.ts for the research.
+  if (lead && isInstantCallSource(body.source)) {
+    void triggerInstantLeadCall(lead.id);
+  }
+
   res.status(201).json(lead);
 });
 

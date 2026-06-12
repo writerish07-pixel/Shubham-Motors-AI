@@ -22,7 +22,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
-import { detectIntentWithMeta, getCachedPhrasePcm, warmPhraseCache, THINKING_FILLERS } from "./voiceFastPath";
+import { detectIntentWithMeta, getCachedPhrasePcm, warmPhraseCache, pickThinkingFiller } from "./voiceFastPath";
 import { extractCustomerNameWithMeta } from "./nameExtractor";
 import { detectRepeatRequest, buildRepeatInstruction } from "./conversationHelpers";
 import { finalizeCompletedCall } from "./callFinalize";
@@ -333,6 +333,10 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     greeting = `नमस्ते! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
   }
 
+  // DPDP recording notice — short, confident, mid-greeting (research: a legalistic
+  // preamble kills conversion; a brief notice does not). Disable with RECORDING_NOTICE=0.
+  if (RECORDING_NOTICE_ENABLED) greeting += ` ${RECORDING_NOTICE}`;
+
   session.transcript.push(`Agent: ${greeting}`);
   session.history.push({ role: "assistant", content: greeting });
   session.lastAgentSpokeAt = Date.now();
@@ -363,7 +367,12 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
 
 // ── Greeting cache ────────────────────────────────────────────────────────────
 const GREETING_CACHE = new Map<string, Int16Array>();
-const UNKNOWN_GREETING = `नमस्ते! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
+const RECORDING_NOTICE = "Yeh call quality ke liye record hoti hai.";
+const RECORDING_NOTICE_ENABLED = process.env.RECORDING_NOTICE !== "0";
+const UNKNOWN_GREETING_BASE = `नमस्ते! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
+const UNKNOWN_GREETING = RECORDING_NOTICE_ENABLED
+  ? `${UNKNOWN_GREETING_BASE} ${RECORDING_NOTICE}`
+  : UNKNOWN_GREETING_BASE;
 
 async function warmGreetingCache(): Promise<void> {
   try {
@@ -547,6 +556,13 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     return;
   }
 
+  // TRAI/DND: explicit opt-out — honor instantly and permanently. The agent's
+  // not_interested fast-path says the goodbye; this flag stops all future dials.
+  if (isExplicitOptOut(correctedText) && session.leadId) {
+    await db.update(leadsTable).set({ doNotCall: true, status: "not_interested" }).where(eq(leadsTable.id, session.leadId));
+    logger.info({ callSid: session.callSid, leadId: session.leadId }, "Customer opted out — doNotCall set");
+  }
+
   // FIX #2: Update discovery signals, stage, and tone each turn
   session.discoverySignals = extractDiscoverySignals(correctedText, session.discoverySignals);
   session.convStage = computeConvStage(session.turn, session.discoverySignals, correctedText);
@@ -562,13 +578,19 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const fastReply = fastMeta?.response ?? null;
   // Skip fast-path when customer wants a repeat — LLM/direct router handles context.
   if (fastReply && !repeatInstruction) {
-    const fastWithFollowUp = ensureSalesFollowUp(fastReply, {
-      signals: session.discoverySignals,
-      convStage: session.convStage,
-      turn: session.turn,
-      customerText: correctedText,
-      leadName: session.leadName,
-    });
+    // Terminal/exit intents must NOT get a sales question appended — the customer
+    // just said busy/not-interested/thanks; pushing "scooter ya bike?" here is
+    // tone-deaf and kills trust.
+    const TERMINAL_FAST_INTENTS = new Set(["busy", "not_interested", "callback", "thanks"]);
+    const fastWithFollowUp = TERMINAL_FAST_INTENTS.has(fastMeta?.name ?? "")
+      ? fastReply
+      : ensureSalesFollowUp(fastReply, {
+          signals: session.discoverySignals,
+          convStage: session.convStage,
+          turn: session.turn,
+          customerText: correctedText,
+          leadName: session.leadName,
+        });
     session.history.push({ role: "user", content: customerText });
     if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
     session.isSpeaking = true;
@@ -622,7 +644,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   // Conditional thinking filler — only if first sentence takes >900ms (reduced, not every turn).
   const FILLER_DELAY_MS = 900;
-  const fillerText = THINKING_FILLERS[session.turn % THINKING_FILLERS.length] ?? "";
+  const fillerText = pickThinkingFiller(correctedText, session.turn);
   let firstSentenceReady = false;
   const fillerDone: Promise<void> = fillerText
     ? (async () => {
@@ -878,6 +900,13 @@ function detectTopicShift(lastAgentText: string, customerText: string): boolean 
   return customerTopic !== null && agentTopic !== null && customerTopic !== agentTopic;
 }
 
+// ── isExplicitOptOut ──────────────────────────────────────────────────────────
+// "Not interested" is a sales objection; "stop calling me" is a compliance
+// instruction. Only the latter sets doNotCall.
+function isExplicitOptOut(text: string): boolean {
+  return /(?:mat\s+(?:karo|karna|kijiye)\s*(?:call|phone)|call\s+mat\s+(?:karo|karna|kijiye)|band\s+karo\s+call|call\s+band\s+karo|hata\s*(?:lo|do)\s+number|number\s+hata\s*(?:lo|do)|do\s+not\s+call|don'?t\s+call|stop\s+calling|\bdnd\b|block\s+(?:karo|kar\s+do)|मत\s+करो\s+(?:कॉल|फोन)|कॉल\s+मत\s+करो|बंद\s+करो\s+कॉल|हटा\s+लो\s+नंबर)/i.test(text);
+}
+
 // ── isCustomerAskingForHuman (unchanged from original) ────────────────────────
 function isCustomerAskingForHuman(text: string): boolean {
   const t = text.toLowerCase();
@@ -923,14 +952,20 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
   session.transcript.push(`Agent: ${handoff}`);
   await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
 
+  let transferred = false;
   if (phone && session.callSid) {
     await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-    await transferCallToAgent(session.callSid, phone);
-  } else {
+    transferred = await transferCallToAgent(session.callSid, phone);
+  }
+
+  // A transfer that silently fails strands the customer on a dead line after
+  // "connect kar rahi hoon" — always speak the fallback and keep the lead hot.
+  if (!transferred) {
+    await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
     const sorry = `माफ़ कीजिए ${addrName}, अभी हमारा sales expert available नहीं है। मैं आपका नंबर note कर लेती हूँ, हम 5 मिनट में call back करेंगे।`;
     session.transcript.push(`Agent: ${sorry}`);
     await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
-    logger.warn({ callSid: session.callSid, tag, bankHint }, "Transfer requested but no contact configured");
+    logger.warn({ callSid: session.callSid, tag, bankHint, hadPhone: !!phone }, "Transfer not completed — spoke callback fallback");
   }
 }
 

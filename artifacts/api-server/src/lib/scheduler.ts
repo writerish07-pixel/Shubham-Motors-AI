@@ -13,7 +13,7 @@
  */
 
 import cron from "node-cron";
-import { and, eq, lte, or, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, lte, or, sql } from "drizzle-orm";
 import { db, followupsTable, leadsTable, callsTable } from "@workspace/db";
 import { makeOutboundCall } from "./exotel";
 import { getWebhookBaseUrl } from "./publicUrl";
@@ -232,6 +232,10 @@ export async function runAutoDialer(): Promise<RunResult> {
   const startTime = new Date().toISOString();
   logger.info({ istHour: hourIST() }, "Auto-dialer started");
 
+  // Booked-but-no-show killer: send day-of WhatsApp reminders for confirmed
+  // showroom visits before working the call queue.
+  await sendVisitReminders().catch((err) => logger.error({ err }, "Visit reminders failed"));
+
   const result: RunResult = {
     attempted: 0, succeeded: 0, failed: 0, skipped: 0, whatsappFallback: 0, details: [],
   };
@@ -253,6 +257,7 @@ export async function runAutoDialer(): Promise<RunResult> {
         leadName: leadsTable.name,
         leadPhone: leadsTable.phone,
         leadStatus: leadsTable.status,
+        leadDoNotCall: leadsTable.doNotCall,
         leadInterestedModel: leadsTable.interestedModel,
         leadNotes: leadsTable.notes,
         leadIntentSummary: leadsTable.intentSummary,
@@ -286,6 +291,14 @@ export async function runAutoDialer(): Promise<RunResult> {
         result.skipped++;
         result.details.push({ followupId: followup.followupId, leadName: followup.leadName ?? `Lead #${followup.leadId}`, phone: followup.leadPhone ?? "unknown", success: false, reason: "Missing phone number" });
         await db.update(followupsTable).set({ status: "failed" }).where(eq(followupsTable.id, followup.followupId));
+        continue;
+      }
+
+      // TRAI/DND hard gate — customer explicitly opted out of calls.
+      if (followup.leadDoNotCall) {
+        result.skipped++;
+        result.details.push({ followupId: followup.followupId, leadName: followup.leadName ?? `Lead #${followup.leadId}`, phone: followup.leadPhone, success: false, reason: "Lead is do-not-call — cancelled" });
+        await db.update(followupsTable).set({ status: "cancelled" }).where(eq(followupsTable.id, followup.followupId));
         continue;
       }
 
@@ -474,6 +487,59 @@ export function startScheduler(): void {
 
 export function stopScheduler(): void {
   if (cronTask) { cronTask.stop(); cronTask = null; logger.info("Auto-dialer scheduler stopped"); }
+}
+
+// ── Visit reminders ───────────────────────────────────────────────────────────
+// A booked test ride that nobody confirms is the silent conversion killer:
+// the customer books on the call, life happens, they never show. Research:
+// walk-ins close at ~25% vs ~6-14% for phone/web leads, and a test ride ~3x's
+// purchase probability — every confirmed visit deserves a day-of reminder.
+// Runs with each dialer tick; sends once per visit (visitReminderSentAt guard).
+export async function sendVisitReminders(): Promise<number> {
+  const h = hourIST();
+  if (h < 8 || h >= 20) return 0; // WhatsApp at 3am is its own complaint
+
+  const now = new Date();
+  const windowEnd = new Date(now.getTime() + 24 * 3600_000);
+
+  const due = await db
+    .select({
+      id: leadsTable.id,
+      name: leadsTable.name,
+      phone: leadsTable.phone,
+      interestedModel: leadsTable.interestedModel,
+      visitScheduledAt: leadsTable.visitScheduledAt,
+    })
+    .from(leadsTable)
+    .where(and(
+      gte(leadsTable.visitScheduledAt, now),
+      lte(leadsTable.visitScheduledAt, windowEnd),
+      isNull(leadsTable.visitReminderSentAt),
+      eq(leadsTable.doNotCall, false),
+    ))
+    .limit(50);
+
+  let sent = 0;
+  for (const lead of due) {
+    if (!lead.phone || !lead.visitScheduledAt) continue;
+    const when = lead.visitScheduledAt.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata", weekday: "long", hour: "numeric", minute: "2-digit", hour12: true,
+    });
+    const model = lead.interestedModel ? ` *${lead.interestedModel}* की` : "";
+    const msg =
+      `नमस्ते ${lead.name || ""} जी! 🙏\n\n` +
+      `Reminder: आपकी${model} test ride *${when}* को Shubham Motors, Lal Kothi, Tonk Road, Jaipur में booked है। 🏍️\n\n` +
+      `Vehicle ready रहेगी — बस अपना driving licence साथ लाइएगा।\n` +
+      `कोई बदलाव हो तो इसी number पर बता दीजिए। मिलते हैं! 😊`;
+
+    const ok = await sendWhatsAppMessage(lead.phone, msg).catch(() => false);
+    if (ok) {
+      await db.update(leadsTable).set({ visitReminderSentAt: new Date() }).where(eq(leadsTable.id, lead.id));
+      sent++;
+    }
+  }
+  if (sent > 0) logger.info({ sent }, "Visit reminders sent");
+  return sent;
 }
 
 // ── Weekly KB self-learning digest ───────────────────────────────────────────

@@ -1,0 +1,8 @@
+# Normalize all text files to LF — uploaded release bundles keep arriving with
+# CRLF and polluting diffs.
+* text=auto eol=lf
+*.wav binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary

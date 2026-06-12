@@ -58,10 +58,12 @@ let _kbCache: { value: string; expiresAt: number } | null = null;
 let _kbInflight: Promise<string> | null = null;
 let _fuelCache: { value: number; expiresAt: number } | null = null;
 let _fuelInflight: Promise<number> | null = null;
+let _festivalCache: { value: { name: string; offer: string; endDate: string } | null; expiresAt: number } | null = null;
 
 export function invalidateKnowledgeCache(): void {
   _kbCache = null;
   _fuelCache = null;
+  _festivalCache = null;
   // FIXED: also null out in-flight so the next caller re-queries from DB,
   // not from a still-running query that predates the admin edit.
   _kbInflight = null;
@@ -121,6 +123,9 @@ export async function getJaipurFuelPrice(): Promise<number> {
 // Format: title = 'Rakhi 2026', content = 'end_date|offer_description'
 // Example content: '2026-08-09|₹2,000 cashback on Splendor and Destini'
 export async function getActiveFestivalOffer(): Promise<{ name: string; offer: string; endDate: string } | null> {
+  // Cached — this runs on EVERY LLM turn inside buildSystemPrompt; an uncached
+  // DB roundtrip here adds latency to every single agent reply.
+  if (_festivalCache && _festivalCache.expiresAt > Date.now()) return _festivalCache.value;
   try {
     const rows = await db.select().from(knowledgeTable)
       .where(and(
@@ -130,6 +135,7 @@ export async function getActiveFestivalOffer(): Promise<{ name: string; offer: s
       ));
     const today = new Date();
     const window = 30 * 24 * 60 * 60 * 1000; // 30 days
+    let result: { name: string; offer: string; endDate: string } | null = null;
     for (const row of rows) {
       const parts = (row.content ?? "").split("|");
       if (parts.length < 2) continue;
@@ -137,10 +143,12 @@ export async function getActiveFestivalOffer(): Promise<{ name: string; offer: s
       if (isNaN(endDate.getTime())) continue;
       const startDate = new Date(endDate.getTime() - window);
       if (today >= startDate && today <= endDate) {
-        return { name: row.title, offer: parts[1]?.trim() ?? "", endDate: parts[0]?.trim() ?? "" };
+        result = { name: row.title, offer: parts[1]?.trim() ?? "", endDate: parts[0]?.trim() ?? "" };
+        break;
       }
     }
-    return null;
+    _festivalCache = { value: result, expiresAt: Date.now() + KB_CACHE_TTL_MS };
+    return result;
   } catch {
     return null;
   }
@@ -1092,7 +1100,7 @@ By turn 5 you MUST have proposed at least ONE concrete next step.
 ╔══ OBJECTION HANDLING (LAER framework) ══╗
 Listen → Acknowledge → Explore → Respond. Never argue.
 • "Sasti dusre dealer se mil rahi" → explain Hero service network + resale value → if they push → \`[TRANSFER]\`.
-• "Soch ke batata hoon" → ask what's unclear first.
+• "Soch ke batata hoon" / "dekhte hain" / "baad mein dekhenge" = a POLITE NO or stall, NOT interest. Treat it as an objection: ask ONE gentle question to find the real blocker (budget? family approval? comparing brands?), then offer ONE concrete low-commitment next step (test ride / WhatsApp price list). Never reply "ji bilkul, zaroor sochiye" and move on — that ends the sale.
 • Competitor mention → NEVER insult. Highlight Hero mileage/resale/service-network calmly.
 • "Budget tight hai" → lead with EMI + exchange.
 
@@ -1308,6 +1316,8 @@ export async function analyzeCallIntent(
   lostToDealer: string | null;
   lostReason: string | null;
   lostOfferFactor: string | null;
+  visitPlanned: boolean;
+  visitDate: string | null;
 }> {
   const langInstruction = sessionLanguage.startsWith("hi")
     ? "Write the summary field in Hindi (Devanagari script)."
@@ -1353,6 +1363,8 @@ Analyze the transcript and return JSON with:
 - lostToDealer: dealer name or city if mentioned, else null
 - lostReason: main reason they didn't choose Hero (price/service/waiting/offer), else null
 - lostOfferFactor: which competitor offer influenced them (cash discount/EMI/exchange), else null
+- visitPlanned: true if customer agreed to visit the showroom or take a test ride, else false
+- visitDate: ISO 8601 datetime of the agreed showroom visit / test ride (e.g. "Saturday 11 baje" → that Saturday 11:00 IST). If they agreed but gave no time, use the next day 11:00 AM IST. Null if visitPlanned is false.
 
 Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20
 If lostDeal=true, intent should be "not_interested" or "future_date" with score ≤30 unless they left door open.`,
@@ -1384,6 +1396,8 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
       lostToDealer: parsed.lostToDealer ?? null,
       lostReason: parsed.lostReason ?? null,
       lostOfferFactor: parsed.lostOfferFactor ?? null,
+      visitPlanned: Boolean(parsed.visitPlanned),
+      visitDate: parsed.visitDate ?? null,
     };
   } catch {
     logger.error("Failed to parse intent analysis JSON");
@@ -1394,6 +1408,7 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
       competitorMentioned: null, competitorReason: null, buyingTimeline: null,
       decisionMaker: null, lostDeal: false, lostToBrand: null, lostToDealer: null,
       lostReason: null, lostOfferFactor: null,
+      visitPlanned: false, visitDate: null,
     };
   }
 }
