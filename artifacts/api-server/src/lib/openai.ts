@@ -1316,6 +1316,8 @@ export async function analyzeCallIntent(
   lostToDealer: string | null;
   lostReason: string | null;
   lostOfferFactor: string | null;
+  visitPlanned: boolean;
+  visitDate: string | null;
 }> {
   const langInstruction = sessionLanguage.startsWith("hi")
     ? "Write the summary field in Hindi (Devanagari script)."
@@ -1361,6 +1363,8 @@ Analyze the transcript and return JSON with:
 - lostToDealer: dealer name or city if mentioned, else null
 - lostReason: main reason they didn't choose Hero (price/service/waiting/offer), else null
 - lostOfferFactor: which competitor offer influenced them (cash discount/EMI/exchange), else null
+- visitPlanned: true if customer agreed to visit the showroom or take a test ride, else false
+- visitDate: ISO 8601 datetime of the agreed showroom visit / test ride (e.g. "Saturday 11 baje" → that Saturday 11:00 IST). If they agreed but gave no time, use the next day 11:00 AM IST. Null if visitPlanned is false.
 
 Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20
 If lostDeal=true, intent should be "not_interested" or "future_date" with score ≤30 unless they left door open.`,
@@ -1392,6 +1396,8 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
       lostToDealer: parsed.lostToDealer ?? null,
       lostReason: parsed.lostReason ?? null,
       lostOfferFactor: parsed.lostOfferFactor ?? null,
+      visitPlanned: Boolean(parsed.visitPlanned),
+      visitDate: parsed.visitDate ?? null,
     };
   } catch {
     logger.error("Failed to parse intent analysis JSON");
@@ -1402,6 +1408,7 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
       competitorMentioned: null, competitorReason: null, buyingTimeline: null,
       decisionMaker: null, lostDeal: false, lostToBrand: null, lostToDealer: null,
       lostReason: null, lostOfferFactor: null,
+      visitPlanned: false, visitDate: null,
     };
   }
 }

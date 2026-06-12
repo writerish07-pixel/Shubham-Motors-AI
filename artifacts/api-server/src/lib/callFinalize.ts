@@ -6,7 +6,7 @@ import {
   learnFromTranscript,
   type DiscoverySignals,
 } from "./openai";
-import { resolveFollowupSchedule } from "./followupSchedule";
+import { resolveFollowupSchedule, parseLlmFollowupDate } from "./followupSchedule";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "./whatsapp";
 import { resolveModelOnRoad, computeEmi } from "./emiQuote";
 import { logger } from "./logger";
@@ -58,9 +58,14 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       lostToDealer: null,
       lostReason: null,
       lostOfferFactor: null,
+      visitPlanned: false,
+      visitDate: null,
     };
   }
   const festival = await getActiveFestivalOffer();
+
+  // Confirmed showroom visit / test ride → persist for the day-of reminder loop.
+  const visitDate = analysis.visitPlanned ? parseLlmFollowupDate(analysis.visitDate) : null;
   const mergedTimeline =
     analysis.buyingTimeline
     ?? discoverySignals.buyingTimeline
@@ -111,6 +116,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       ...(analysis.competitorMentioned ? { competitorMentioned: analysis.competitorMentioned } : {}),
       ...(analysis.competitorReason ? { competitorReason: analysis.competitorReason } : {}),
       ...(mergedTimeline ? { buyingTimeline: mergedTimeline } : {}),
+      ...(visitDate ? { visitScheduledAt: visitDate, visitReminderSentAt: null } : {}),
       notes: mergedNotes,
       ...(discoverySignals.segment ? { segment: discoverySignals.segment } : {}),
       ...(discoverySignals.km ? { dailyKm: discoverySignals.km } : {}),

@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import { Search, Plus, Upload, Phone, Trash2, ChevronRight, RefreshCw } from "lucide-react";
 import {
   useListLeads, useCreateLead, useImportLeads, useDeleteLead, useTriggerOutboundCall,
-  getListLeadsQueryKey
+  getListLeadsQueryKey, type Lead
 } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -158,7 +158,7 @@ export default function Leads() {
                 Array.from({ length: 5 }).map((_, i) => (
                   <tr key={i}><td colSpan={7} className="px-4 py-3"><div className="h-4 bg-muted rounded animate-pulse w-full" /></td></tr>
                 ))
-              ) : leads && leads.length > 0 ? leads.map((lead) => (
+              ) : leads && leads.length > 0 ? leads.map((lead: Lead) => (
                 <tr key={lead.id} data-testid={`lead-row-${lead.id}`} className="hover:bg-muted/30 transition-colors group">
                   <td className="px-4 py-3">
                     <Link href={`/leads/${lead.id}`}>
