@@ -58,10 +58,12 @@ let _kbCache: { value: string; expiresAt: number } | null = null;
 let _kbInflight: Promise<string> | null = null;
 let _fuelCache: { value: number; expiresAt: number } | null = null;
 let _fuelInflight: Promise<number> | null = null;
+let _festivalCache: { value: { name: string; offer: string; endDate: string } | null; expiresAt: number } | null = null;
 
 export function invalidateKnowledgeCache(): void {
   _kbCache = null;
   _fuelCache = null;
+  _festivalCache = null;
   // FIXED: also null out in-flight so the next caller re-queries from DB,
   // not from a still-running query that predates the admin edit.
   _kbInflight = null;
@@ -121,6 +123,9 @@ export async function getJaipurFuelPrice(): Promise<number> {
 // Format: title = 'Rakhi 2026', content = 'end_date|offer_description'
 // Example content: '2026-08-09|₹2,000 cashback on Splendor and Destini'
 export async function getActiveFestivalOffer(): Promise<{ name: string; offer: string; endDate: string } | null> {
+  // Cached — this runs on EVERY LLM turn inside buildSystemPrompt; an uncached
+  // DB roundtrip here adds latency to every single agent reply.
+  if (_festivalCache && _festivalCache.expiresAt > Date.now()) return _festivalCache.value;
   try {
     const rows = await db.select().from(knowledgeTable)
       .where(and(
@@ -130,6 +135,7 @@ export async function getActiveFestivalOffer(): Promise<{ name: string; offer: s
       ));
     const today = new Date();
     const window = 30 * 24 * 60 * 60 * 1000; // 30 days
+    let result: { name: string; offer: string; endDate: string } | null = null;
     for (const row of rows) {
       const parts = (row.content ?? "").split("|");
       if (parts.length < 2) continue;
@@ -137,10 +143,12 @@ export async function getActiveFestivalOffer(): Promise<{ name: string; offer: s
       if (isNaN(endDate.getTime())) continue;
       const startDate = new Date(endDate.getTime() - window);
       if (today >= startDate && today <= endDate) {
-        return { name: row.title, offer: parts[1]?.trim() ?? "", endDate: parts[0]?.trim() ?? "" };
+        result = { name: row.title, offer: parts[1]?.trim() ?? "", endDate: parts[0]?.trim() ?? "" };
+        break;
       }
     }
-    return null;
+    _festivalCache = { value: result, expiresAt: Date.now() + KB_CACHE_TTL_MS };
+    return result;
   } catch {
     return null;
   }
@@ -1092,7 +1100,7 @@ By turn 5 you MUST have proposed at least ONE concrete next step.
 ╔══ OBJECTION HANDLING (LAER framework) ══╗
 Listen → Acknowledge → Explore → Respond. Never argue.
 • "Sasti dusre dealer se mil rahi" → explain Hero service network + resale value → if they push → \`[TRANSFER]\`.
-• "Soch ke batata hoon" → ask what's unclear first.
+• "Soch ke batata hoon" / "dekhte hain" / "baad mein dekhenge" = a POLITE NO or stall, NOT interest. Treat it as an objection: ask ONE gentle question to find the real blocker (budget? family approval? comparing brands?), then offer ONE concrete low-commitment next step (test ride / WhatsApp price list). Never reply "ji bilkul, zaroor sochiye" and move on — that ends the sale.
 • Competitor mention → NEVER insult. Highlight Hero mileage/resale/service-network calmly.
 • "Budget tight hai" → lead with EMI + exchange.
 

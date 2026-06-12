@@ -22,7 +22,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq, desc } from "drizzle-orm";
 import { db, callsTable, leadsTable, contactsTable } from "@workspace/db";
 import { speechToText, textToSpeech, detectLanguage } from "./sarvam";
-import { detectIntentWithMeta, getCachedPhrasePcm, warmPhraseCache, THINKING_FILLERS } from "./voiceFastPath";
+import { detectIntentWithMeta, getCachedPhrasePcm, warmPhraseCache, pickThinkingFiller } from "./voiceFastPath";
 import { extractCustomerNameWithMeta } from "./nameExtractor";
 import { detectRepeatRequest, buildRepeatInstruction } from "./conversationHelpers";
 import { finalizeCompletedCall } from "./callFinalize";
@@ -562,13 +562,19 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const fastReply = fastMeta?.response ?? null;
   // Skip fast-path when customer wants a repeat — LLM/direct router handles context.
   if (fastReply && !repeatInstruction) {
-    const fastWithFollowUp = ensureSalesFollowUp(fastReply, {
-      signals: session.discoverySignals,
-      convStage: session.convStage,
-      turn: session.turn,
-      customerText: correctedText,
-      leadName: session.leadName,
-    });
+    // Terminal/exit intents must NOT get a sales question appended — the customer
+    // just said busy/not-interested/thanks; pushing "scooter ya bike?" here is
+    // tone-deaf and kills trust.
+    const TERMINAL_FAST_INTENTS = new Set(["busy", "not_interested", "callback", "thanks"]);
+    const fastWithFollowUp = TERMINAL_FAST_INTENTS.has(fastMeta?.name ?? "")
+      ? fastReply
+      : ensureSalesFollowUp(fastReply, {
+          signals: session.discoverySignals,
+          convStage: session.convStage,
+          turn: session.turn,
+          customerText: correctedText,
+          leadName: session.leadName,
+        });
     session.history.push({ role: "user", content: customerText });
     if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
     session.isSpeaking = true;
@@ -622,7 +628,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   // Conditional thinking filler — only if first sentence takes >900ms (reduced, not every turn).
   const FILLER_DELAY_MS = 900;
-  const fillerText = THINKING_FILLERS[session.turn % THINKING_FILLERS.length] ?? "";
+  const fillerText = pickThinkingFiller(correctedText, session.turn);
   let firstSentenceReady = false;
   const fillerDone: Promise<void> = fillerText
     ? (async () => {
@@ -923,14 +929,20 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
   session.transcript.push(`Agent: ${handoff}`);
   await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
 
+  let transferred = false;
   if (phone && session.callSid) {
     await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-    await transferCallToAgent(session.callSid, phone);
-  } else {
+    transferred = await transferCallToAgent(session.callSid, phone);
+  }
+
+  // A transfer that silently fails strands the customer on a dead line after
+  // "connect kar rahi hoon" — always speak the fallback and keep the lead hot.
+  if (!transferred) {
+    await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
     const sorry = `माफ़ कीजिए ${addrName}, अभी हमारा sales expert available नहीं है। मैं आपका नंबर note कर लेती हूँ, हम 5 मिनट में call back करेंगे।`;
     session.transcript.push(`Agent: ${sorry}`);
     await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
-    logger.warn({ callSid: session.callSid, tag, bankHint }, "Transfer requested but no contact configured");
+    logger.warn({ callSid: session.callSid, tag, bankHint, hadPhone: !!phone }, "Transfer not completed — spoke callback fallback");
   }
 }
 

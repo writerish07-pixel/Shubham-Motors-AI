@@ -47,9 +47,11 @@ export async function sendCallSummaryWhatsApp(
   summary: string,
   interestedModel: string | null | undefined,
   language = "hi-IN",
+  priceLine: string | null = null,
 ): Promise<boolean> {
   const isHindi = language.startsWith("hi");
   const nameStr = leadName?.trim() || "";
+  const priceBlock = priceLine ? `\n\n${priceLine}` : "";
 
   let message: string;
 
@@ -60,7 +62,7 @@ export async function sendCallSummaryWhatsApp(
     message =
       `नमस्ते ${addrName}! 🙏\n\n` +
       `*शुभम मोटर्स* (Hero MotoCorp) से बात करने के लिए धन्यवाद।\n\n` +
-      `📋 *बातचीत का सारांश:*\n${summary}${modelLine}\n\n` +
+      `📋 *बातचीत का सारांश:*\n${summary}${modelLine}${priceBlock}\n\n` +
       `📍 Test ride के लिए हमारे showroom पर पधारें!\n\n` +
       `कोई भी जानकारी चाहिए तो call करें। आपकी सेवा में हमेशा तत्पर हैं! 🏆`;
   } else {
@@ -70,7 +72,7 @@ export async function sendCallSummaryWhatsApp(
     message =
       `Hello ${addrName}! 👋\n\n` +
       `Thank you for speaking with us at *Shubham Motors* (Hero MotoCorp).\n\n` +
-      `📋 *Call Summary:*\n${summary}${modelLine}\n\n` +
+      `📋 *Call Summary:*\n${summary}${modelLine}${priceBlock}\n\n` +
       `📍 Visit us at our showroom for a test ride!\n\n` +
       `For any queries, feel free to call us back. We're here to help you find your perfect Hero bike! 🏆`;
   }

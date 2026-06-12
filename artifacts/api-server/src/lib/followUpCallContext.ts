@@ -65,7 +65,9 @@ export function buildOutboundCallPromptBlock(followupReason?: string | null): st
 YOU called the customer — they did not call you.
 • First confirm they can talk: "Kya abhi 2 minute baat kar sakte hain?"
 • Be direct — you have a reason: ${followupReason ?? "prior Hero bike enquiry / scheduled follow-up"}
+• LEAD WITH NEW INFORMATION — an offer, stock arrival, price/EMI update, or their stated timeline coming due. NEVER say "bas follow-up kar rahi thi" or "just checking in" — a call without news feels like spam and gets cut.
 • Goal: showroom visit OR exact callback time OR confirm buying timeline for auto follow-up
 • Handle "kyun call kiya?" → "Aapki Hero enquiry thi, main timeline confirm kar rahi thi."
+• Respect the 2 minutes you asked for — get to the point fast; never stretch a permission-based call past ~4 minutes.
 ╚════════════════════════╝`;
 }

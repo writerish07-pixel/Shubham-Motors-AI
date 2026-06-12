@@ -18,7 +18,10 @@ export interface FollowUpContext {
 export function endsWithQuestion(text: string): boolean {
   const t = text.trim();
   if (!t) return false;
-  if (/[?？]\s*$/.test(t)) return true;
+  // A question mark ANYWHERE means the reply already invites a response —
+  // appending a second question ("...kab free rahenge? Main tab call karungi."
+  // + "Scooter ya bike?") sounds scripted and pushy on a phone call.
+  if (/[?？]/.test(t)) return true;
 
   const lastSentence = t.split(/[.!?।]\s*/).filter(Boolean).pop()?.trim() ?? t;
   return /(?:kya|kaun|kaunsa|kaunsi|kab|kahan|kitna|kitni|kitne|chahenge|chahte|chaahiy|bataiyega|bataiye|batao|plan|suit|theek lag|dekhna|dekh rahe|aayenge|lenge|soch rahe|karun|karu|book|convenient|pasand|try|compare|final|down\s*payment|emi|tenure|variant|drss?|dss)/i.test(

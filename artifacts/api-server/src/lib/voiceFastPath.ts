@@ -161,15 +161,35 @@ export function detectIntent(text: string, turn: number, ctx?: FastPathContext):
 
 /** Rare thinking audio — only if LLM is slow (>900ms), not every turn. */
 export const THINKING_FILLERS: string[] = [
-  "Ek moment.",
-  "Haan, sun lijiye.",
+  "Ji, ek second.",
+  "Achha, ek second.",
 ];
+
+const FILLER_PRICE = "Ek second, price dekh rahi hoon.";
+const FILLER_EMI = "Ji, EMI nikal rahi hoon, ek second.";
+const FILLER_MODEL = "Achha, ek second.";
+
+/**
+ * Context-aware thinking filler: a price question gets "price dekh rahi hoon",
+ * an EMI question gets "EMI nikal rahi hoon" — never an unrelated phrase.
+ * All variants are pre-cached so the filler itself adds no TTS latency.
+ */
+export function pickThinkingFiller(customerText: string, turn: number): string {
+  const t = customerText.toLowerCase();
+  if (/\bemi\b|finance|\bloan\b|kist|किस्त|फाइनेंस|लोन|down\s*payment/i.test(t)) return FILLER_EMI;
+  if (/price|kitne\s*(ka|ki|mein)|kimat|qeemat|कीमत|on.?road|rate|कितने/i.test(t)) return FILLER_PRICE;
+  if (/splendor|glamour|xtreme|destini|pleasure|xoom|deluxe|passion|xpulse|vida|model/i.test(t)) return FILLER_MODEL;
+  return THINKING_FILLERS[turn % THINKING_FILLERS.length] ?? THINKING_FILLERS[0]!;
+}
 
 const CACHED_PHRASES: string[] = [
   ...Object.values(INTENTS).flatMap((i) =>
     typeof i.response === "function" ? [i.response({})] : [i.response],
   ),
   ...THINKING_FILLERS,
+  FILLER_PRICE,
+  FILLER_EMI,
+  FILLER_MODEL,
   "Samajh rahi hoon — thoda detail dijiye?",
   "Ek baar phir se bataiyega?",
   "WhatsApp par details bhej deti hoon.",

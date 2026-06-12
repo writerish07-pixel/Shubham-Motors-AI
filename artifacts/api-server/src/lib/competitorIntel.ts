@@ -12,7 +12,15 @@ export interface CompetitorIntel {
   competitorReasons: string[];
 }
 
+// Cached — fetchCompetitorIntel runs on EVERY LLM turn inside buildSystemPrompt.
+// Loss-reason aggregates change slowly; an uncached DB query per turn adds a
+// full DB roundtrip of latency to every agent reply.
+const INTEL_CACHE_TTL_MS = 10 * 60_000;
+let _intelCache: { value: CompetitorIntel; expiresAt: number } | null = null;
+
 export async function fetchCompetitorIntel(limit = 5): Promise<CompetitorIntel> {
+  if (_intelCache && _intelCache.expiresAt > Date.now()) return _intelCache.value;
+
   const codealerReasons: string[] = [];
   const competitorReasons: string[] = [];
 
@@ -42,9 +50,13 @@ export async function fetchCompetitorIntel(limit = 5): Promise<CompetitorIntel> 
     }
   } catch (err) {
     logger.warn({ err }, "competitorIntel fetch failed");
+    // Do not cache failures — retry on next turn.
+    return { codealerReasons, competitorReasons };
   }
 
-  return { codealerReasons, competitorReasons };
+  const value = { codealerReasons, competitorReasons };
+  _intelCache = { value, expiresAt: Date.now() + INTEL_CACHE_TTL_MS };
+  return value;
 }
 
 export function formatCompetitorIntelBlock(intel: CompetitorIntel): string {

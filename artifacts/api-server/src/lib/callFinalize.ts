@@ -8,7 +8,10 @@ import {
 } from "./openai";
 import { resolveFollowupSchedule } from "./followupSchedule";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "./whatsapp";
+import { resolveModelOnRoad, computeEmi } from "./emiQuote";
 import { logger } from "./logger";
+
+type CallAnalysis = Awaited<ReturnType<typeof analyzeCallIntent>>;
 
 export interface FinalizeCallParams {
   callDbId: number;
@@ -27,7 +30,36 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
   const [existingLead] = await db.select().from(leadsTable).where(eq(leadsTable.id, leadId));
   if (!existingLead) return;
 
-  const analysis = await analyzeCallIntent(transcript, sessionLanguage);
+  // Analysis must never block the post-call WhatsApp — if the LLM call fails,
+  // fall back to a neutral analysis so the customer still gets summary + price.
+  let analysis: CallAnalysis;
+  try {
+    analysis = await analyzeCallIntent(transcript, sessionLanguage);
+  } catch (err) {
+    logger.error({ err, callDbId }, "Call analysis failed — using fallback analysis");
+    analysis = {
+      intent: "needs_info",
+      score: existingLead.score ?? 40,
+      summary: sessionLanguage.startsWith("hi")
+        ? "कॉल पूरी हुई — हमारी टीम जल्द ही आपसे संपर्क करेगी।"
+        : "Call completed — our team will follow up with you shortly.",
+      followupDate: null,
+      followupReason: null,
+      language: sessionLanguage.slice(0, 2) || "hi",
+      familyInfo: null,
+      preferredModel: null,
+      objections: [],
+      competitorMentioned: null,
+      competitorReason: null,
+      buyingTimeline: null,
+      decisionMaker: null,
+      lostDeal: false,
+      lostToBrand: null,
+      lostToDealer: null,
+      lostReason: null,
+      lostOfferFactor: null,
+    };
+  }
   const festival = await getActiveFestivalOffer();
   const mergedTimeline =
     analysis.buyingTimeline
@@ -96,6 +128,8 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
     } as Record<string, unknown>)
     .where(eq(leadsTable.id, leadId));
 
+  // Follow-up scheduling must not block the WhatsApp sends below.
+  try {
   if (terminalForFollowup) {
     await db
       .update(followupsTable)
@@ -145,15 +179,35 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
         .where(eq(leadsTable.id, leadId));
     }
   }
+  } catch (err) {
+    logger.error({ err, leadId, callDbId }, "Follow-up scheduling failed — continuing to WhatsApp");
+  }
 
   const [lead] = await db.select().from(leadsTable).where(eq(leadsTable.id, leadId));
   if (lead) {
+    const modelOfInterest = analysis.preferredModel ?? lead.interestedModel;
+
+    // On-road price + reference EMI line for the customer's model — the price
+    // is what they asked about on the call; it belongs in the follow-up message.
+    let priceLine: string | null = null;
+    if (modelOfInterest) {
+      const resolved = resolveModelOnRoad(modelOfInterest, modelOfInterest);
+      if (resolved) {
+        const down = 25000;
+        const emi24 = computeEmi(resolved.onRoad - down, 24);
+        priceLine = sessionLanguage.startsWith("hi")
+          ? `💰 *${resolved.model}* — On-road Jaipur ₹${resolved.onRoad.toLocaleString("en-IN")}\n📊 EMI लगभग ₹${emi24.toLocaleString("en-IN")}/माह (₹${down.toLocaleString("en-IN")} down, 24 माह, 9% reference)`
+          : `💰 *${resolved.model}* — On-road Jaipur ₹${resolved.onRoad.toLocaleString("en-IN")}\n📊 EMI approx ₹${emi24.toLocaleString("en-IN")}/month (₹${down.toLocaleString("en-IN")} down, 24 months, 9% reference)`;
+      }
+    }
+
     const sent = await sendCallSummaryWhatsApp(
       lead.phone,
       lead.name,
       analysis.summary,
       lead.interestedModel,
       sessionLanguage,
+      priceLine,
     ).catch((err) => {
       logger.error({ err }, "WhatsApp summary failed");
       return false;
@@ -161,22 +215,30 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
 
     if (sent) {
       await db.update(callsTable).set({ whatsappSent: true }).where(eq(callsTable.id, callDbId));
+    } else {
+      logger.warn({ leadId, callDbId, phone: lead.phone }, "Post-call WhatsApp summary NOT sent — check BOTSPACE_API_KEY / BOTSPACE_PHONE_NUMBER_ID");
     }
 
-    const modelForBrochure = analysis.preferredModel ?? lead.interestedModel;
-    if (modelForBrochure) {
-      const [brochure] = await db
+    if (modelOfInterest) {
+      // Prefer a brochure whose title mentions the model; fall back to any brochure.
+      const brochures = await db
         .select()
         .from(knowledgeTable)
         .where(eq(knowledgeTable.category, "brochure"));
+      const modelKey = modelOfInterest.toLowerCase().split(/\s+/)[0] ?? "";
+      const brochure =
+        brochures.find((b) => b.fileUrl && modelKey && b.title?.toLowerCase().includes(modelKey))
+        ?? brochures.find((b) => b.fileUrl);
       if (brochure?.fileUrl) {
         await sendBrochureWhatsApp(
           lead.phone,
           lead.name,
-          modelForBrochure,
+          modelOfInterest,
           brochure.fileUrl,
           sessionLanguage,
         ).catch((err) => logger.error({ err }, "Brochure WhatsApp failed"));
+      } else {
+        logger.warn({ leadId, modelOfInterest }, "No brochure row with fileUrl in knowledge table (category='brochure') — brochure not sent");
       }
     }
   }
