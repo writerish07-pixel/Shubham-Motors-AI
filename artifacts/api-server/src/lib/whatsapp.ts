@@ -1,28 +1,40 @@
 import axios from "axios";
 import { logger } from "./logger";
+import { withRetry } from "./resilience";
 
-const BOTSPACE_API_KEY = process.env.BOTSPACE_API_KEY;
-const BOTSPACE_PHONE_ID = process.env.BOTSPACE_PHONE_NUMBER_ID;
 const BOTSPACE_BASE = "https://api.botspace.io/api";
 
-export async function sendWhatsAppMessage(phone: string, message: string): Promise<boolean> {
-  try {
-    const normalizedPhone = normalizePhone(phone);
+// Read secrets at call time so a secret rotation + restart is picked up without
+// a stale module-load snapshot (matches exotel.ts).
+function botspace() {
+  return {
+    apiKey: process.env.BOTSPACE_API_KEY ?? "",
+    phoneId: process.env.BOTSPACE_PHONE_NUMBER_ID ?? "",
+  };
+}
 
-    const response = await axios.post(
-      `${BOTSPACE_BASE}/v1/${BOTSPACE_PHONE_ID}/messages`,
-      {
-        to: normalizedPhone,
-        type: "text",
-        text: { body: message },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${BOTSPACE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 25000,
-      }
+export async function sendWhatsAppMessage(phone: string, message: string): Promise<boolean> {
+  const normalizedPhone = normalizePhone(phone);
+  const { apiKey, phoneId } = botspace();
+  try {
+    const response = await withRetry(
+      () =>
+        axios.post(
+          `${BOTSPACE_BASE}/v1/${phoneId}/messages`,
+          {
+            to: normalizedPhone,
+            type: "text",
+            text: { body: message },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            timeout: 25000,
+          }
+        ),
+      { label: "whatsapp.sendMessage" },
     );
 
     logger.info({ phone: normalizedPhone, status: response.status }, "WhatsApp message sent");
@@ -91,29 +103,34 @@ export async function sendBrochureWhatsApp(
     const normalizedPhone = normalizePhone(phone);
     const isHindi = language.startsWith("hi");
     const nameStr = leadName?.trim() || "";
+    const { apiKey, phoneId } = botspace();
 
     const caption = isHindi
       ? `नमस्ते ${nameStr ? nameStr + " जी" : ""}! Hero *${modelName}* की पूरी जानकारी भेज रही हूँ। Test ride के लिए शुभम मोटर्स में पधारें! 🏍️`
       : `Hi ${nameStr || "there"}! Here's the brochure for the *Hero ${modelName}* as discussed. Visit Shubham Motors for a test ride! 🏍️`;
 
-    await axios.post(
-      `${BOTSPACE_BASE}/v1/${BOTSPACE_PHONE_ID}/messages`,
-      {
-        to: normalizedPhone,
-        type: "document",
-        document: {
-          link: brochureUrl,
-          caption,
-          filename: `Hero_${modelName}_Brochure.pdf`,
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${BOTSPACE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 25000,
-      }
+    await withRetry(
+      () =>
+        axios.post(
+          `${BOTSPACE_BASE}/v1/${phoneId}/messages`,
+          {
+            to: normalizedPhone,
+            type: "document",
+            document: {
+              link: brochureUrl,
+              caption,
+              filename: `Hero_${modelName}_Brochure.pdf`,
+            },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            timeout: 25000,
+          }
+        ),
+      { label: "whatsapp.sendBrochure" },
     );
 
     return true;

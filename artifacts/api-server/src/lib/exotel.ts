@@ -1,6 +1,7 @@
 import axios from "axios";
 import { logger } from "./logger";
 import { getPublicBaseUrl } from "./publicUrl";
+import { withRetry } from "./resilience";
 
 // Read at call time so any secret update + restart picks up fresh values
 function creds() {
@@ -46,14 +47,18 @@ export async function makeOutboundCall(
   });
 
   try {
-    const response = await axios.post(
-      `${base}/Calls/connect.json`,
-      params.toString(),
-      {
-        auth: { username: apiKey, password: apiToken },
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        timeout: 15000,
-      }
+    const response = await withRetry(
+      () =>
+        axios.post(
+          `${base}/Calls/connect.json`,
+          params.toString(),
+          {
+            auth: { username: apiKey, password: apiToken },
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            timeout: 15000,
+          }
+        ),
+      { label: "exotel.makeOutboundCall", retries: 2 },
     );
     const call = response.data?.Call;
     logger.info({ callSid: call?.Sid, status: call?.Status, to: digits }, "Outbound call placed");
@@ -77,14 +82,19 @@ export async function transferCallToAgent(callSid: string, agentNumber: string):
   }
   const xmlUrl = `${pub}/api/webhooks/exotel/dial-agent.xml?to=${encodeURIComponent(agentNumber)}`;
   try {
-    await axios.post(
-      `${base}/Calls/${callSid}.json`,
-      new URLSearchParams({ Url: xmlUrl }).toString(),
-      {
-        auth: { username: apiKey, password: apiToken },
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        timeout: 10000,
-      }
+    await withRetry(
+      () =>
+        axios.post(
+          `${base}/Calls/${callSid}.json`,
+          new URLSearchParams({ Url: xmlUrl }).toString(),
+          {
+            auth: { username: apiKey, password: apiToken },
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            timeout: 10000,
+          }
+        ),
+      // Mid-call: keep retries quick so the customer is not left on hold.
+      { label: "exotel.transferCall", retries: 2, baseDelayMs: 200, maxDelayMs: 800 },
     );
     logger.info({ callSid, agentNumber, xmlUrl }, "Call transferred to agent");
     return true;

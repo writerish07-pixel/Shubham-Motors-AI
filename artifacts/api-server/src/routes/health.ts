@@ -29,11 +29,15 @@ router.get("/healthz", async (_req, res) => {
     ...data,
     status: dbOk && envOk ? "ok" : "degraded",
     db: dbOk ? "connected" : "error",
+    uptimeSec: Math.round(process.uptime()),
+    version: process.env.APP_VERSION ?? process.env.REPLIT_DEPLOYMENT_ID ?? "dev",
     env: {
       database: Boolean(process.env.DATABASE_URL),
       adminToken: Boolean(process.env.ADMIN_TOKEN),
       sarvam: Boolean(process.env.SARVAM_API_KEY),
       exotel: Boolean(process.env.EXOTEL_SID && process.env.EXOTEL_API_KEY),
+      openai: Boolean(process.env.OPENAI_API_KEY ?? process.env.AI_INTEGRATIONS_OPENAI_API_KEY),
+      whatsapp: Boolean(process.env.BOTSPACE_API_KEY && process.env.BOTSPACE_PHONE_NUMBER_ID),
     },
     scheduler: getSchedulerStatus().running,
     sttCircuit: {
