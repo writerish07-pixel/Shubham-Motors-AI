@@ -47,6 +47,11 @@ const MODEL_PREMIUM = process.env.OPENAI_MODEL_PREMIUM ?? "gpt-4o";
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY,
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  // Hardening: the SDK default request timeout is 600s — far too long for a
+  // live voice loop, where a hung LLM call would freeze the call until Exotel
+  // drops it. Cap it (configurable) and keep the SDK's transient-error retries.
+  timeout: Number(process.env.OPENAI_TIMEOUT_MS ?? 30_000),
+  maxRetries: Number(process.env.OPENAI_MAX_RETRIES ?? 2),
 });
 
 // ─── Cache: KB context + fuel price ─────────────────────────────────────────
