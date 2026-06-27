@@ -245,4 +245,74 @@ router.get("/analytics/intent-breakdown", async (_req, res): Promise<void> => {
   })));
 });
 
+// ── NEW: Revenue Engine — pipeline, expected & lifetime value (PRD Phase 13) ──
+router.get("/analytics/revenue-pipeline", async (_req, res): Promise<void> => {
+  const totals = await db.execute(sql`
+    SELECT
+      COALESCE(SUM(expected_revenue), 0) AS expected_revenue,
+      COALESCE(SUM(lifetime_value), 0) AS lifetime_value,
+      COALESCE(SUM(expected_revenue) FILTER (WHERE status NOT IN ('lost','not_interested','wrong_number','converted')), 0) AS open_pipeline,
+      COALESCE(SUM(expected_revenue) FILTER (WHERE status = 'lost'), 0) AS lost_revenue,
+      COALESCE(SUM(expected_revenue) FILTER (WHERE purchase_probability >= 60), 0) AS committed_revenue,
+      COALESCE(ROUND(AVG(purchase_probability)), 0) AS avg_probability
+    FROM leads
+  `);
+  const byStage = await db.execute(sql`
+    SELECT purchase_stage AS stage, COUNT(*) AS leads,
+      COALESCE(SUM(expected_revenue), 0) AS expected_revenue
+    FROM leads WHERE purchase_stage IS NOT NULL
+    GROUP BY purchase_stage ORDER BY expected_revenue DESC
+  `);
+  const t = (totals.rows[0] as any) ?? {};
+  res.json({
+    expectedRevenue: Number(t.expected_revenue ?? 0),
+    lifetimeValue: Number(t.lifetime_value ?? 0),
+    openPipeline: Number(t.open_pipeline ?? 0),
+    lostRevenue: Number(t.lost_revenue ?? 0),
+    committedRevenue: Number(t.committed_revenue ?? 0),
+    avgProbability: Number(t.avg_probability ?? 0),
+    byStage: (byStage.rows as Array<{ stage: string; leads: string; expected_revenue: string }>).map((r) => ({
+      stage: r.stage,
+      leads: parseInt(r.leads),
+      expectedRevenue: Number(r.expected_revenue ?? 0),
+    })),
+  });
+});
+
+// ── NEW: Relationship CRM — score distribution & persona mix (PRD Phase 3/11) ──
+router.get("/analytics/relationships", async (_req, res): Promise<void> => {
+  const agg = await db.execute(sql`
+    SELECT
+      COUNT(*) AS total_leads,
+      COALESCE(ROUND(AVG(relationship_score)), 0) AS avg_relationship,
+      COALESCE(ROUND(AVG(trust_score)), 0) AS avg_trust,
+      COALESCE(ROUND(AVG(engagement_score)), 0) AS avg_engagement,
+      COALESCE(ROUND(AVG(loyalty_score)), 0) AS avg_loyalty,
+      COUNT(*) FILTER (WHERE relationship_score >= 70) AS strong,
+      COUNT(*) FILTER (WHERE relationship_score >= 40 AND relationship_score < 70) AS warm,
+      COUNT(*) FILTER (WHERE relationship_score > 0 AND relationship_score < 40) AS at_risk
+    FROM leads
+  `);
+  const personas = await db.execute(sql`
+    SELECT customer_persona AS persona, COUNT(*) AS count
+    FROM leads WHERE customer_persona IS NOT NULL
+    GROUP BY customer_persona ORDER BY count DESC
+  `);
+  const a = (agg.rows[0] as any) ?? {};
+  res.json({
+    totalLeads: Number(a.total_leads ?? 0),
+    avgRelationshipScore: Number(a.avg_relationship ?? 0),
+    avgTrustScore: Number(a.avg_trust ?? 0),
+    avgEngagementScore: Number(a.avg_engagement ?? 0),
+    avgLoyaltyScore: Number(a.avg_loyalty ?? 0),
+    strong: Number(a.strong ?? 0),
+    warm: Number(a.warm ?? 0),
+    atRisk: Number(a.at_risk ?? 0),
+    personaMix: (personas.rows as Array<{ persona: string; count: string }>).map((r) => ({
+      persona: r.persona,
+      count: parseInt(r.count),
+    })),
+  });
+});
+
 export default router;

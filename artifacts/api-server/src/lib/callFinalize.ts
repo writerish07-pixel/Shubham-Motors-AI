@@ -1,4 +1,4 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, count } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, knowledgeTable } from "@workspace/db";
 import {
   analyzeCallIntent,
@@ -9,6 +9,7 @@ import {
 import { resolveFollowupSchedule, parseLlmFollowupDate } from "./followupSchedule";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "./whatsapp";
 import { resolveModelOnRoad, computeEmi } from "./emiQuote";
+import { computeLeadIntelligence } from "./relationshipIntel";
 import { logger } from "./logger";
 
 type CallAnalysis = Awaited<ReturnType<typeof analyzeCallIntent>>;
@@ -101,12 +102,62 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
           ? "interested"
           : "contacted";
 
+  // ── Relationship & Revenue Intelligence (Growth OS v2) ──────────────────────
+  // Deterministic, no extra LLM call: derive relationship/trust/engagement/
+  // loyalty/follow-up scores, purchase stage, persona, purchase probability and
+  // revenue from data we already have. Failure here must never block the CRM
+  // write or the customer's WhatsApp, so it is fully guarded.
+  let intelPatch: Record<string, unknown> = {};
+  try {
+    const [{ value: completedCalls } = { value: 0 }] = await db
+      .select({ value: count() })
+      .from(callsTable)
+      .where(and(eq(callsTable.leadId, leadId), eq(callsTable.status, "completed")));
+
+    const modelForPrice = analysis.preferredModel ?? existingLead.interestedModel ?? null;
+    const vehiclePrice = modelForPrice
+      ? (resolveModelOnRoad(modelForPrice, modelForPrice)?.onRoad ?? null)
+      : null;
+
+    const intel = computeLeadIntelligence({
+      intent: analysis.intent,
+      callScore: analysis.score,
+      objections: analysis.objections,
+      competitorMentioned: analysis.competitorMentioned,
+      buyingTimeline: mergedTimeline,
+      decisionMaker: analysis.decisionMaker ?? discoverySignals.decisionMaker ?? null,
+      visitPlanned: analysis.visitPlanned,
+      lostDeal: analysis.lostDeal,
+      segment: discoverySignals.segment ?? existingLead.segment ?? null,
+      stylePreference: discoverySignals.stylePreference ?? null,
+      budget: discoverySignals.budget ?? existingLead.budget ?? null,
+      dailyKm: discoverySignals.km ?? existingLead.dailyKm ?? null,
+      financeInterest: discoverySignals.financeInterest,
+      exchangeInterest: discoverySignals.exchangeInterest,
+      comparingBrands: discoverySignals.comparingBrands,
+      readyToBuy: discoverySignals.readyToBuy,
+      negotiating: discoverySignals.negotiating,
+      familyUse: discoverySignals.familyUse,
+      purpose: discoverySignals.purpose ?? null,
+      currentVehicle: discoverySignals.currentVehicle ?? existingLead.currentVehicle ?? null,
+      interestedModel: modelForPrice,
+      completedCalls: completedCalls || 1,
+      priorStatus: existingLead.status ?? null,
+      vehiclePrice,
+    });
+
+    intelPatch = { ...intel, intelligenceUpdatedAt: new Date() };
+  } catch (err) {
+    logger.error({ err, leadId, callDbId }, "Relationship intelligence compute failed — skipping scores");
+  }
+
   await db
     .update(leadsTable)
     .set({
       score: analysis.score,
       status: newStatus,
       language: analysis.language,
+      ...intelPatch,
       intentSummary: analysis.summary,
       lastCallId: callDbId,
       ...(analysis.preferredModel
