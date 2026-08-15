@@ -20,10 +20,9 @@ Always-on VM in `bom`, HTTPS + WSS for Exotel, closest region to Jaipur / Sarvam
    - [ ] Fly account email / org name  
    - [ ] `FLY_API_TOKEN` (deploy token) — add as GitHub secret `FLY_API_TOKEN` **or** paste to me privately  
    - [ ] Whether I should run `fly launch` and create `shubham-motors-ai` in **bom**  
-4. Postgres (pick one):
-   - [ ] **Neon** project in `aws-ap-south-1` (Mumbai) — create DB, send `DATABASE_URL`  
-   - [ ] **Fly Postgres** in `bom` — I can create this if you give Fly token + say yes  
-   - [ ] Existing Postgres URL (must be reachable from Fly Mumbai)
+4. Postgres — **Amazon RDS in Mumbai (`ap-south-1`)**. Click-by-click: `docs/AWS_RDS.md`.
+   - [ ] Send `DATABASE_URL` privately after the instance is Available
+   - Fallback only: Neon `aws-ap-south-1` or Fly Postgres in `bom`
 
 ### B — Mumbai/Bangalore VPS instead
 

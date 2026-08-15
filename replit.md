@@ -81,6 +81,7 @@ See `docs/ROADMAP.md` for the product map. `docs/WHAT_I_NEED.md` is the producti
 
 - Roadmap: `docs/ROADMAP.md`
 - What I need from you (Fly + secrets + ₹2/min): `docs/WHAT_I_NEED.md`
+- AWS RDS (Mumbai) create steps: `docs/AWS_RDS.md`
 - Cost and deploy: `docs/COST_AND_DEPLOY.md`
 - Production-grade audit (market + gaps): `docs/PRODUCTION_AUDIT.md`
 - Growth OS increment: `docs/GROWTH_OS_V2.md`
