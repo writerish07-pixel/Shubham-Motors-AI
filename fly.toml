@@ -1,9 +1,11 @@
-# Fly.io — Mumbai. Always-on: Exotel Voicebot WebSockets cannot survive scale-to-zero.
+# Fly.io — Singapore until Mumbai has capacity (bom is paid-plan + often full).
+# Always-on: Exotel Voicebot WebSockets cannot survive scale-to-zero.
 # Deploy: fly launch --copy-config  (first time) then fly deploy
 # Secrets: see .env.example / docs/WHAT_I_NEED.md
+# Move to bom later: fly scale count 1 --region bom && set primary_region = "bom"
 
 app = "shubham-motors-ai"
-primary_region = "bom"
+primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"
@@ -30,7 +32,7 @@ primary_region = "bom"
     soft_limit = 25
 
 [[vm]]
-  size = "shared-cpu-2x"
+  size = "shared-cpu-1x"
   memory = "2048mb"
 
 [[http_service.checks]]
