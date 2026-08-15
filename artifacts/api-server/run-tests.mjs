@@ -32,7 +32,7 @@ await build({
   // pino uses dynamic require("node:os") which can't be bundled into ESM —
   // keep it (and its logging deps) external so Node resolves them normally.
   // This lets tests import logger-backed modules (resilience, observability…).
-  external: ["node:*", "pino", "pino-pretty", "pino-http", "thread-stream"],
+  external: ["node:*", "pino", "pino-pretty", "pino-http", "thread-stream", "xlsx", "pdf-parse"],
   outExtension: { ".js": ".mjs" },
 });
 

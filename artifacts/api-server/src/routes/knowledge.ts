@@ -10,6 +10,14 @@ import {
   DeleteKnowledgeItemParams,
 } from "@workspace/api-zod";
 import { analyzeCallIntent, learnFromTranscript, invalidateKnowledgeCache } from "../lib/openai";
+import {
+  classifyOfferUpload,
+  OFFER_EXTRACT_INSTRUCTIONS,
+  parseOfferLlmJson,
+  parseOptionalIsoDate,
+  pdfBufferToText,
+  spreadsheetBufferToText,
+} from "../lib/offerIngest";
 
 const router: IRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
@@ -140,84 +148,100 @@ router.post("/knowledge/upload/price", upload.single("file"), async (req, res): 
   }
 });
 
-// ─── Offer image upload: OCR + understand a marketing flyer via GPT-4o vision ──
-// Accepts JPG/PNG/WebP/PDF-as-image, extracts structured offer text using
-// vision, and writes it into the KB as an "offer" row. The agent can then
-// quote the exact amounts and conditions on calls.
-router.post("/knowledge/upload/offer-image", upload.single("file"), async (req, res): Promise<void> => {
+// ─── Offer upload: image / PDF / Excel → structured KB offer rows ─────────────
+async function ingestOfferUpload(req: import("express").Request, res: import("express").Response): Promise<void> {
   if (!requireAdmin(req, res)) return;
-  if (!req.file) { res.status(400).json({ error: "image file required" }); return; }
+  if (!req.file) { res.status(400).json({ error: "file required (image, PDF, or Excel)" }); return; }
   const mime = (req.file.mimetype || "").toLowerCase();
-  const ALLOWED = ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"];
-  if (!ALLOWED.includes(mime)) {
-    res.status(400).json({ error: `unsupported file type "${mime}" — please upload a JPG, PNG, WebP or GIF image (PDFs not supported)` });
+  const kind = classifyOfferUpload(req.file.originalname, mime);
+  if (!kind) {
+    res.status(400).json({ error: `unsupported file type "${mime || req.file.originalname}" — upload JPG/PNG/WebP, PDF, or Excel/CSV` });
     return;
   }
+
   try {
     const { default: OpenAI } = await import("openai");
     const openai = new OpenAI({
       apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY,
       baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
     });
-    const b64 = req.file.buffer.toString("base64");
-    const dataUrl = `data:${mime};base64,${b64}`;
+
+    type ContentPart =
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string } }
+      | { type: "file"; file: { filename: string; file_data: string } };
+    let userContent: ContentPart[];
+    let model = "gpt-4o";
+
+    if (kind === "image") {
+      const dataUrl = `data:${mime || "image/jpeg"};base64,${req.file.buffer.toString("base64")}`;
+      userContent = [
+        { type: "text", text: OFFER_EXTRACT_INSTRUCTIONS },
+        { type: "image_url", image_url: { url: dataUrl } },
+      ];
+    } else if (kind === "pdf") {
+      const text = await pdfBufferToText(req.file.buffer);
+      if (text.length >= 80) {
+        model = "gpt-4o-mini";
+        userContent = [{ type: "text", text: `${OFFER_EXTRACT_INSTRUCTIONS}\n\n--- PDF TEXT ---\n${text.slice(0, 18_000)}` }];
+      } else {
+        // Scanned / image-only PDF: send the file to GPT-4o.
+        userContent = [
+          { type: "text", text: OFFER_EXTRACT_INSTRUCTIONS },
+          {
+            type: "file",
+            file: {
+              filename: req.file.originalname || "offer.pdf",
+              file_data: `data:application/pdf;base64,${req.file.buffer.toString("base64")}`,
+            },
+          },
+        ];
+      }
+    } else {
+      const text = spreadsheetBufferToText(req.file.buffer);
+      if (text.length < 20) {
+        res.status(400).json({ error: "spreadsheet is empty" });
+        return;
+      }
+      model = "gpt-4o-mini";
+      userContent = [{ type: "text", text: `${OFFER_EXTRACT_INSTRUCTIONS}\n\n--- SPREADSHEET ---\n${text}` }];
+    }
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text:
-                `You are reading a Hero MotoCorp dealer marketing image (offer flyer, scheme, EMI poster, festival promo, etc.). ` +
-                `Extract every actionable offer detail and return JSON:\n` +
-                `{\n` +
-                `  "items": [\n` +
-                `    {\n` +
-                `      "title": "<short — e.g. 'Pine Labs EMI Offer (May 2026)'>",\n` +
-                `      "content": "<concise but COMPLETE — every rupee amount, percentage, condition, eligible bank/card, applicable bike models, minimum txn, tenure, validity dates. If a % is given, ALSO compute and state the rupee amount on at least one example Hero bike price (e.g. Splendor ₹74,000 or whichever model is most relevant). Be precise.>"\n` +
-                `    }\n` +
-                `  ]\n` +
-                `}\n` +
-                `Multiple distinct offers in one image → multiple items. If the image is not a Hero offer, return {"items":[]}.`,
-            },
-            { type: "image_url", image_url: { url: dataUrl } },
-          ],
-        },
-      ],
+      model,
+      messages: [{ role: "user", content: userContent as never }],
       response_format: { type: "json_object" },
       temperature: 0.2,
-      max_tokens: 800,
+      max_tokens: 1200,
     });
 
-    const parsed = JSON.parse(completion.choices[0]?.message?.content ?? "{}");
-    const items: Array<{ title: string; content: string }> = parsed.items ?? [];
+    const items = parseOfferLlmJson(completion.choices[0]?.message?.content ?? "{}");
     if (items.length === 0) {
-      res.status(400).json({ error: "no offer details extracted — try a clearer image" });
+      res.status(400).json({ error: "no offer details extracted — try a clearer file" });
       return;
     }
 
-    const inserts = items
-      .filter((it) => it.title && it.content)
-      .map((it) => ({
-        title: it.title.slice(0, 120),
-        content: it.content.slice(0, 2000),
-        category: "offer",
-        isActive: true,
-      }));
-    if (inserts.length === 0) {
-      res.status(400).json({ error: "extracted items missing title/content" });
-      return;
-    }
+    const inserts = items.map((it) => ({
+      title: it.title,
+      content: it.content,
+      category: "offer" as const,
+      modelName: it.modelName ?? null,
+      isActive: true,
+      source: `offer-upload:${req.file!.originalname}`,
+      effectiveFrom: parseOptionalIsoDate(it.validFrom) ?? new Date(),
+      effectiveUntil: parseOptionalIsoDate(it.validUntil),
+    }));
 
     await db.insert(knowledgeTable).values(inserts);
-    res.json({ ok: true, items: inserts, source: req.file.originalname });
+    invalidateKnowledgeCache();
+    res.json({ ok: true, kind, items: inserts.map((i) => ({ title: i.title, content: i.content })), source: req.file.originalname });
   } catch (err) {
     res.status(500).json({ error: String((err as Error).message) });
   }
-});
+}
+
+router.post("/knowledge/upload/offer", upload.single("file"), ingestOfferUpload);
+router.post("/knowledge/upload/offer-image", upload.single("file"), ingestOfferUpload);
 
 router.get("/knowledge", async (req, res): Promise<void> => {
   const params = ListKnowledgeItemsQueryParams.safeParse(req.query);

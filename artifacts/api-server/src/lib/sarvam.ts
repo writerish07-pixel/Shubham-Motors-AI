@@ -3,6 +3,7 @@ import http from "http";
 import https from "https";
 import { logger } from "./logger";
 import { prepareTtsText } from "./ttsPrep";
+import { ttsLanguageCode } from "./agentTools";
 
 const SARVAM_BASE = "https://api.sarvam.ai";
 
@@ -156,7 +157,7 @@ export async function textToSpeech(
   language: string = "hi-IN"
 ): Promise<string> {
   try {
-    const langCode = normalizeLangCode(language);
+    const langCode = ttsLanguageCode(language);
     const speakable = prepareTtsText(text);
 
     const response = await axios.post(
@@ -164,17 +165,13 @@ export async function textToSpeech(
       {
         inputs: [speakable.slice(0, 500)],
         target_language_code: langCode,
-        speaker: "anushka",
+        speaker: process.env.SARVAM_TTS_SPEAKER || "anushka",
         // v2 is required for the ₹2/min cap; v3 is ~2×. Override only after a cost review.
         model: process.env.SARVAM_TTS_MODEL || "bulbul:v2",
         enable_preprocessing: true,
-        // ── Clarity tuning — customer feedback: voice was fast / fumbled ──
-        // pace < 1 slows delivery so every word is distinct; loudness lifts it
-        // above phone-line noise. Generate at full 22.05 kHz and let the
-        // anti-aliased resampler downsample to 8 kHz — far clearer than
-        // synthesising natively at 8 kHz (which sounds thin and slurred).
-        pace: 0.85,
-        loudness: 1.2,
+        // Conversational Jaipur pace — 0.85 sounded like a slow IVR.
+        pace: Number(process.env.SARVAM_TTS_PACE ?? 0.95),
+        loudness: 1.15,
         speech_sample_rate: 22050,
       },
       {

@@ -35,7 +35,7 @@ export default function Settings() {
     toast.success("Admin token saved on this device");
   }
 
-  async function upload(kind: "stock" | "price" | "offer-image", file: File) {
+  async function upload(kind: "stock" | "price" | "offer-image" | "offer", file: File) {
     if (!adminToken) { toast.error("Set the Admin Token first"); return; }
     const setBusy = kind === "stock" ? setStockBusy : kind === "price" ? setPriceBusy : setOfferBusy;
     setBusy(true);
@@ -43,14 +43,15 @@ export default function Settings() {
       const fd = new FormData();
       fd.append("file", file);
       const base = (import.meta.env.BASE_URL ?? "/").replace(/\/$/, "");
-      const r = await fetch(`${base}/api/knowledge/upload/${kind}`, {
+      const endpoint = kind === "offer-image" ? "offer" : kind;
+      const r = await fetch(`${base}/api/knowledge/upload/${endpoint}`, {
         method: "POST",
         headers: { "X-Admin-Token": adminToken },
         body: fd,
       });
       const j = await r.json();
       if (!r.ok) { toast.error(j.error ?? `Upload failed (${r.status})`); return; }
-      if (kind === "offer-image") {
+      if (kind === "offer-image" || kind === "offer") {
         toast.success(`Offer extracted — ${j.items?.length ?? 0} offer(s) added to knowledge base`);
         const stamp = `${file.name} · ${j.items?.length ?? 0} offer(s) · ${new Date().toLocaleString()}`;
         setLastOffer(stamp); localStorage.setItem("shubham_last_offer_upload", stamp);
@@ -201,18 +202,18 @@ export default function Settings() {
           {lastPrice && <div className="text-[10px] text-green-400 flex items-center gap-1"><CheckCircle size={10} />Last: {lastPrice}</div>}
         </div>
 
-        {/* Offer image upload — uses GPT-4o vision to read marketing flyers */}
+        {/* Offer file upload — image / PDF / Excel */}
         <div className="pl-10 space-y-2 pt-2 border-t border-border/50">
           <div className="flex items-center justify-between">
             <div>
-              <Label className="text-xs font-medium">Offer / Scheme Image Upload</Label>
-              <div className="text-[10px] text-muted-foreground">Upload any offer flyer (JPG/PNG) — AI reads it, computes rupee amounts, adds to knowledge base</div>
+              <Label className="text-xs font-medium">Offer / Scheme Upload</Label>
+              <div className="text-[10px] text-muted-foreground">PDF, Excel/CSV, or flyer image — AI reads amounts, models, validity and adds live offer rows to the knowledge base</div>
             </div>
             <Button size="sm" variant="outline" disabled={offerBusy || !adminToken} onClick={() => offerInputRef.current?.click()} className="gap-1.5 text-xs">
-              <Upload size={12} />{offerBusy ? "Reading…" : "Upload Offer Image"}
+              <Upload size={12} />{offerBusy ? "Reading…" : "Upload Offer File"}
             </Button>
-            <input ref={offerInputRef} type="file" accept="image/*" className="hidden"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) upload("offer-image", f); e.target.value = ""; }}
+            <input ref={offerInputRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" className="hidden"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) upload("offer", f); e.target.value = ""; }}
               data-testid="input-offer-file" />
           </div>
           {lastOffer && <div className="text-[10px] text-green-400 flex items-center gap-1"><CheckCircle size={10} />Last: {lastOffer}</div>}

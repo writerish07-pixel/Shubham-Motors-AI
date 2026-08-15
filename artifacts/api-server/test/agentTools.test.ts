@@ -12,6 +12,9 @@ import {
   parseAndStripTags,
   retrieveKnowledgeForUtterance,
   scoreCallShadow,
+  shouldAutoApplyLearning,
+  ttsLanguageCode,
+  applySessionLanguage,
   whatsappTemplatesOnly,
 } from "../src/lib/agentTools";
 
@@ -105,4 +108,23 @@ test("shadow scorecard rewards visit + punishes filler monologues", () => {
   assert.ok(strong.overall > weak.overall);
   assert.equal(strong.booking, 100);
   assert.ok(weak.fillerPenalty > 0);
+});
+
+test("TTS stays Hindi even when LID returns en-IN on Hinglish", () => {
+  assert.equal(ttsLanguageCode("en-IN"), "hi-IN");
+  assert.equal(ttsLanguageCode("hi-IN"), "hi-IN");
+  assert.equal(applySessionLanguage("hi-IN", "en-IN", "haan splendor dekhna hai"), "hi-IN");
+  assert.equal(applySessionLanguage("hi-IN", "hi-IN", "splendor chahiye"), "hi-IN");
+  assert.equal(
+    applySessionLanguage("hi-IN", "en-IN", "I want to know the on road price of the splendor plus please"),
+    "en-IN",
+  );
+});
+
+test("self-learning auto-applies objections but not price corrections", () => {
+  assert.equal(shouldAutoApplyLearning("new_objection", "Family approval needed before booking"), true);
+  assert.equal(shouldAutoApplyLearning("missing_info", "Asked about BH registration for commercial use"), true);
+  assert.equal(shouldAutoApplyLearning("price_correction", "On-road is actually 95377"), false);
+  assert.equal(shouldAutoApplyLearning("new_objection", "They said EMI of ₹4000 is high"), false);
+  assert.equal(shouldAutoApplyLearning("missing_info", "ok", { KB_AUTO_LEARN: "0" }), false);
 });
