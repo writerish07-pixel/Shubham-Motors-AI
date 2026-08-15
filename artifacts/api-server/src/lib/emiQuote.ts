@@ -1,5 +1,7 @@
 /** Reference EMI @ 9% p.a. — actual rate depends on customer CIBIL (typically 8.5%–12%). */
 
+import { MODEL_ALIASES, ON_ROAD_JAIPUR as CATALOG_ON_ROAD } from "@workspace/db/heroCatalog";
+
 const EMI_FACTORS_9PA: Record<number, number> = {
   12: 0.087451,
   18: 0.059602,
@@ -7,52 +9,8 @@ const EMI_FACTORS_9PA: Record<number, number> = {
   36: 0.031800,
 };
 
-/** On-road Jaipur prices — keep in sync with openai.ts EMI table. */
-export const ON_ROAD_JAIPUR: Record<string, number> = {
-  "HF Deluxe Kick": 74698,
-  "HF Deluxe DRS": 77423,
-  "HF Deluxe Pro": 83348,
-  "Splendor AHO": 91272,
-  "Splendor i3S": 92564,
-  "Splendor XTEC": 95377,
-  "Splendor XTEC Disc": 98695,
-  "Splendor+ XTEC 2.0": 97973,
-  "Passion Plus": 94605,
-  "Super Splendor XTEC": 98169,
-  "Super Splendor XTEC DSS": 102777,
-  "Glamour X DRS": 104555,
-  "Glamour X DSS": 111587,
-  "Xtreme 125R IBS": 108088,
-  "Xtreme 125R ABS": 113247,
-  "Xtreme 125R ABS DC": 126275,
-  "Xtreme 160R 2V SD": 130320,
-  "Xtreme 160R 2V DD": 135224,
-  "Xtreme 160R 4V": 161109,
-  "Pleasure+ VX": 89023,
-  "Pleasure XTEC": 93177,
-  "Destini 110 VX": 89547,
-  "Destini 110 ZX": 98775,
-  "Destini Prime": 90841,
-  "Destini 125 VX": 95857,
-  "Destini 125 ZX": 106122,
-  "Destini 125 ZX+": 107287,
-  "Xoom 125 VX": 103178,
-  "Xoom 125 ZX": 110647,
-};
-
-const MODEL_ALIASES: Array<[RegExp, string]> = [
-  [/destini\s*110/i, "Destini 110 VX"],
-  [/destini\s*125/i, "Destini 125 VX"],
-  [/splendor/i, "Splendor XTEC"],
-  [/glamour|galemar|galaimer|glemor/i, "Glamour X DRS"],
-  [/dss/i, "Glamour X DSS"],
-  [/xoom\s*125/i, "Xoom 125 VX"],
-  [/pleasure/i, "Pleasure+ VX"],
-  [/hf\s*deluxe/i, "HF Deluxe DRS"],
-  [/super\s*splendor/i, "Super Splendor XTEC"],
-  [/xtreme\s*125/i, "Xtreme 125R IBS"],
-  [/xtreme\s*160/i, "Xtreme 160R 2V SD"],
-];
+/** On-road Jaipur prices — single source: @workspace/db/heroCatalog */
+export const ON_ROAD_JAIPUR: Record<string, number> = CATALOG_ON_ROAD;
 
 export function resolveModelOnRoad(text: string, fallback?: string): { model: string; onRoad: number } | null {
   const hay = `${text} ${fallback ?? ""}`;

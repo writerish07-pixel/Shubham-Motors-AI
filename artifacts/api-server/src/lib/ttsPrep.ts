@@ -125,10 +125,10 @@ function stripMarkdown(text: string): string {
   return t;
 }
 
-/** Light filler trim — only removes 2+ consecutive filler words at start (PDF: reduce, not eliminate). */
+/** Strip leading filler tokens so TTS never says "ji/achha/ek second". */
 export function sanitizeAgentSpeech(text: string): string {
   let t = text.trim();
-  const fillerToken = /^(?:जी|ji|अच्छा|achha|accha|बिल्कुल|bilkul|ठीक है|theek hai|thik hai|समझ गयी|समझ गई|samajh gayi|samajh gay|हाँ जी|haan ji|perfect)[,!.?\s]+/i;
+  const fillerToken = /^(?:जी\s*सर|ji\s*sir|जी|ji|अच्छा|achha|accha|बिल्कुल|bilkul|ठीक है|theek hai|thik hai|समझ गयी|समझ गई|samajh gayi|samajh gay|हाँ जी|haan ji|perfect|ek second|एक सेकंड|dekhti hoon|dekh rahi hoon|देखती हूँ)[,!.?\s:—-]+/i;
   let prev = "";
   while (t !== prev) {
     prev = t;
@@ -138,7 +138,7 @@ export function sanitizeAgentSpeech(text: string): string {
 }
 
 export function prepareTtsText(text: string): string {
-  let t = stripMarkdown(text);
+  let t = sanitizeAgentSpeech(stripMarkdown(text));
   for (const [re, rep] of PRONOUNCE) t = t.replace(re, rep);
   t = softenLists(t);
   return t.trim();
