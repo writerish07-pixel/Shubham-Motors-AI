@@ -201,7 +201,9 @@ export default function Knowledge() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold">Knowledge Base</h1>
-          <p className="text-xs text-muted-foreground mt-0.5">The AI agent's brain — models, prices, offers, FAQs</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Models, prices, offers, FAQs. Upload offer PDFs/Excel/images in Settings. After each call Sakshi learns — objections can go live; price changes wait in the review queue below.
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <input ref={audioInputRef} type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm" hidden onChange={handleAudioUpload} />

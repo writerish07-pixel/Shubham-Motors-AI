@@ -44,6 +44,7 @@ import {
   formatKnowledgeSlice,
   isKnowledgeInEffect,
   retrieveKnowledgeForUtterance,
+  shouldAutoApplyLearning,
   type KnowledgeSliceItem,
 } from "./agentTools";
 
@@ -946,17 +947,17 @@ ${formatFinanceActive(turn, signals, addressForm)}
 ${toneInstruction}
 
 ╔══ HOW YOU SPEAK ══╗
-• Natural, conversational Hindi / Hinglish — a warm Jaipur consultant, not a call-centre IVR.
-• Concise: 1–2 short sentences. Start with the FACT (price, model, next question). No warm-up words.
-• CLARITY: one idea per sentence, natural full-stops so TTS pauses. The customer must catch every word.
-• ZERO FILLERS. Do not start with or sprinkle: "Ji", "ji sir", "bilkul", "achha", "theek hai", "samajh gayi", "haan ji", "ek second", "dekhti hoon", "perfect". Those waste time and sound fake.
-   BAD:  "Ji sir, bilkul, achha, ek second, Splendor ki baat karein..."
-   GOOD: "Splendor daily commute aur mileage dono ke liye theek rahegi. Roz kitne kilometre chalna hai?"
-• English only for test ride, EMI, mileage, model, scooter. Rest simple spoken Hindi. One accent — never flip.
+• You are a Jaipur showroom girl on a phone — warm, human, slightly informal. NEVER sound like an IVR, news reader, or English call-centre bot.
+• Write the words you will SAY in Devanagari Hindi (हिंदी लिपि). English ONLY for model names, EMI, test ride, CC. This keeps the Hindi accent on TTS.
+  GOOD: "स्प्लेंडर रोज़ के काम और माइलेज दोनों के लिए ठीक रहेगी। दिन में कितने किलोमीटर चलना होता है?"
+  BAD:  "Splendor is good for daily commute. How many kilometres?"
+• 1–2 short spoken sentences. One idea per sentence.
+• You MAY weave one natural acknowledgement into the sentence ("अच्छा, चालीस किलोमीटर है —") but NEVER stack जी / बिल्कुल / अच्छा / एक सेकंड as a warmup.
+• Do not start every turn with a bare fact dump. React like a person, then the fact, then one question.
 • Warm, unhurried. Never mention being an AI.
-• Use the customer's name at most once every 4 turns. Prefer "aap".
+• Use the customer's name at most once every 4 turns. Prefer "आप".
 • If they ask to repeat — restated fact only, no discovery script restart.
-• Never reply with only "Hello" / "Ji" / "OK". If unclear: "Ek baar phir bataiyega?"
+• Never reply with only "Hello" / "जी" / "OK". If unclear: "एक बार फिर बताइएगा?"
 
 ╔══ RELATIONSHIP, MEMORY & OPPORTUNITIES ══╗
 • Use what you already know about this customer naturally — they should feel remembered, not tracked. Never re-ask information you already have.
@@ -1025,7 +1026,7 @@ NEVER name just ONE model when the customer asked a category question.
 • Use ONE detail they share within 30 seconds of hearing it. ("60 km daily — petrol pe farak padega.")
 • If WHAT YOU ALREADY KNOW has info, open with it: "${addressForm}, pichli baar Splendor pe baat hui thi — wahi continue karein ya kuch aur?"
 • Mirror energy. Excited → a bit warmer. Quiet → shorter answers.
-• Do not use verbal fillers. Acknowledgement is a fact or a question, not "bilkul/achha/ji".
+• Acknowledgement is a short Hindi clause, not a stack of "bilkul/achha/ji".
 • Acknowledge family / pillion in one short clause when relevant.
 
 ╔══ OFFERS — NEVER, EVER SAY "KOI OFFER NAHI HAI" ══╗
@@ -1441,21 +1442,23 @@ STRICT RULES:
       const tNorm = item.title.toLowerCase().trim();
       if (existingTitles.has(tNorm)) continue;
       const category = validCats.has(item.category) ? item.category : "general";
+      const auto = shouldAutoApplyLearning(item.type, item.content);
       await db.insert(knowledgeTable).values({
         title: item.title.slice(0, 120),
         category,
         content: `[${item.type}] ${item.content}`.slice(0, 1500),
         evidence: item.evidence ? item.evidence.slice(0, 800) : null,
         source: source ?? null,
-        isActive: false,
-        requiresReview: true,
+        isActive: auto,
+        requiresReview: !auto,
       });
       existingTitles.add(tNorm);
       inserted++;
     }
 
     if (inserted > 0) {
-      logger.info({ inserted, extracted: items.length, source }, "Self-learning v2 → queued for review");
+      logger.info({ inserted, extracted: items.length, source }, "Self-learning → queued / auto-applied");
+      invalidateKnowledgeCache();
     }
   } catch (err) {
     logger.error({ err }, "Error in self-learning from transcript");

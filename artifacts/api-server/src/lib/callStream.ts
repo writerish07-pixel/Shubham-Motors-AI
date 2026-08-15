@@ -46,7 +46,7 @@ import { ensureSalesFollowUp } from "./salesFollowUp";
 import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
-import { isBackchannel, parseAndStripTags, type AgentTag } from "./agentTools";
+import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode } from "./agentTools";
 import { executeAgentTools } from "./agentActions";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
@@ -332,9 +332,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     );
   } else if (isOutbound && outboundCtx?.followupReason) {
     const addrName = leadName === "Sir" ? "" : `${leadName} जी`;
-    greeting = `नमस्ते ${addrName}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। ${outboundCtx.followupReason} — क्या अभी 2 minute baat kar sakte hain?`;
+    greeting = `नमस्ते ${addrName}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। ${outboundCtx.followupReason} — क्या अभी दो मिनट बात कर सकते हैं?`;
   } else if (leadName !== "Sir") {
-    greeting = `नमस्ते ${leadName} जी! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। बताइए, मैं आपकी क्या help कर सकती हूँ?`;
+    greeting = `नमस्ते ${leadName} जी! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। बताइए, मैं आपकी क्या मदद कर सकती हूँ?`;
   } else {
     greeting = `नमस्ते! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
   }
@@ -526,10 +526,10 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   session.transcript.push(`Customer: ${customerText}`);
 
-  // Language detection on first turn
+  // Language detection on first turn — never flip Hinglish to en-IN (kills Hindi accent).
   if (session.turn === 0) {
     void detectLanguage(customerText)
-      .then((lang) => { session.language = lang; })
+      .then((lang) => { session.language = applySessionLanguage(session.language, lang, customerText); })
       .catch(() => { /* keep hi-IN */ });
   }
   session.turn++;
@@ -1020,13 +1020,14 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
 
 // ── TTS helpers (unchanged from original) ────────────────────────────────────
 async function synthesizeTts(text: string, language: string): Promise<Int16Array | null> {
-  const cached = getCachedPhrasePcm(text, language);
+  const ttsLang = ttsLanguageCode(language);
+  const cached = getCachedPhrasePcm(text, ttsLang) ?? getCachedPhrasePcm(text, language);
   if (cached) return cached;
   try {
-    let ttsB64 = await textToSpeech(text, language);
+    let ttsB64 = await textToSpeech(text, ttsLang);
     if (!ttsB64) {
       await new Promise((r) => setTimeout(r, 200));
-      ttsB64 = await textToSpeech(text, language);
+      ttsB64 = await textToSpeech(text, ttsLang);
     }
     if (!ttsB64) { logger.warn({ textLen: text.length }, "TTS returned empty after retry"); return null; }
     const wavBuf = Buffer.from(ttsB64, "base64");

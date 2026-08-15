@@ -36,6 +36,35 @@ const TAG_RE = /\[(EMI|STOCK|VISIT|WHATSAPP|TRANSFER)(?::([^\]]*))?\]/gi;
 
 const BACKCHANNEL = /^(haan+|han+|ha+|hmm+|hum+|achha+|acha+|accha+|aa+|ji+|ok+|okay+|theek|sahi|bilkul|hmm ji|haan ji|ji haan|han ji|ok sir|hmm hmm|हां+|हाँ+|अच्छा+|जी+|ठीक|बिल्कुल)$/i;
 
+/** Pin TTS to Hindi. Hinglish LID often returns en-IN and Sarvam then speaks with an English accent. */
+export function ttsLanguageCode(_sessionLanguage?: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (env.TTS_ALLOW_ENGLISH === "1" && (_sessionLanguage ?? "").startsWith("en")) return "en-IN";
+  return env.TTS_LANGUAGE ?? "hi-IN";
+}
+
+/**
+ * Do not flip the live call to English on a Hinglish first utterance.
+ * Only accept English if the customer actually spoke mostly English words.
+ */
+export function applySessionLanguage(current: string, detected: string, utterance: string): string {
+  const d = (detected || "").trim() || current;
+  if (!d.toLowerCase().startsWith("en")) return d.includes("-") ? d : `${d}-IN`;
+  const words = utterance.trim().split(/\s+/).filter(Boolean);
+  const english = words.filter((w) => /^[A-Za-z']+$/.test(w.replace(/[.,!?]/g, "")));
+  const ratio = words.length === 0 ? 0 : english.length / words.length;
+  if (english.length >= 6 && ratio >= 0.8) return "en-IN";
+  return current || "hi-IN";
+}
+
+/** Price/EMI corrections stay in the GM review queue; objections/missing-info can go live. */
+export function shouldAutoApplyLearning(type: string, content: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.KB_AUTO_LEARN === "0") return false;
+  const risky = /₹|rs\.?\s*\d|on-road|on road|price|emi\b|किस्त|कीमत/i.test(content);
+  if (risky) return false;
+  if (type === "price_correction" || type === "agent_mistake") return false;
+  return type === "new_objection" || type === "missing_info" || type === "faq";
+}
+
 export function getReplacementMode(env: NodeJS.ProcessEnv = process.env): ReplacementMode {
   const v = String(env.REPLACEMENT_MODE ?? "full").toLowerCase().trim();
   if (v === "shadow" || v === "inbound" || v === "full") return v;
