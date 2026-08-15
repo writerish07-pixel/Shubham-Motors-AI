@@ -45,6 +45,7 @@ import { getOutboundContext } from "./scheduler";  // FIX #6: outbound context
 import { ensureSalesFollowUp } from "./salesFollowUp";
 import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
 import { buyingTimelineQuestion } from "./buyingTimeline";
+import { CallCostCounters } from "./costMeter";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
   const n = buf.length >> 1;
@@ -119,6 +120,8 @@ interface Session {
   proactiveCount: number;
   /** Timestamp of last agent speech — prevents nudge firing during TTS */
   lastAgentSpokeAt: number;
+  /** Per-call ₹ estimate (₹2/min budget). */
+  cost: CallCostCounters;
 }
 
 // ── WebSocket server ─────────────────────────────────────────────────────────
@@ -314,6 +317,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     proactiveTimer: null,
     proactiveCount: 0,
     lastAgentSpokeAt: Date.now(),
+    cost: new CallCostCounters(),
   };
 
   // Greeting — follow-up calls ask purchase outcome first (reference agent.py)
@@ -345,6 +349,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
 
   const cachedPcm = GREETING_CACHE.get(greeting);
   if (cachedPcm) {
+    session.cost.addTtsText(greeting);
     session.isSpeaking = true;
     session.ttsAbort = false;
     session.bargeInCount = 0;
@@ -453,6 +458,11 @@ async function handleStop(session: Session): Promise<void> {
   logger.info({ callSid: session.callSid }, "Call stream stopped — analysing");
   session.ttsAbort = true;
   session.isSpeaking = false;
+  const cost = session.cost.snapshot(session.isOutbound ? "outbound" : "inbound");
+  logger.info({ callSid: session.callSid, cost }, "Call cost estimate (INR)");
+  if (cost.overBudget) {
+    logger.warn({ callSid: session.callSid, perMinInr: cost.perMinInr }, "Call exceeded ₹/min budget");
+  }
   session.ttsGen++;
 
   const transcript = session.transcript.join("\n");
@@ -501,6 +511,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   let customerText = await speechToText(wavBuf, session.language);
   if (!customerText?.trim()) return;
+  session.cost.addSttSamples(pcm16k.length, STT_SAMPLE_RATE);
 
   logger.info({ callSid: session.callSid, customerText }, "STT result");
   session.transcript.push(`Customer: ${customerText}`);
@@ -597,6 +608,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     session.ttsAbort = false;
     session.bargeInCount = 0;
     session.speakingStartedAt = Date.now();
+    session.cost.addTtsText(fastWithFollowUp);
     const myGen = ++session.ttsGen;
     let actuallyPlayed = false;
     try {
@@ -680,6 +692,8 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       if (session.ttsAbort || session.isClosed) break;
       if (/^\s*\[TRANSFER/i.test(sentence)) { transferText = sentence; break; }
       attemptedCount++;
+      session.cost.addTtsText(sentence);
+      if (attemptedCount === 1) session.cost.addLlmCall("mini");
       const isFirstSentence = attemptedCount === 1;
       const myTts = synthesizeTts(sentence, session.language);
       const prev = playChain;
@@ -1023,6 +1037,7 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     session.ttsAbort = false;
     session.bargeInCount = 0;
     session.speakingStartedAt = Date.now();
+    session.cost.addTtsText(text);
     myGen = ++session.ttsGen;
   }
   try {

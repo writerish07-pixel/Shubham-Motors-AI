@@ -125,7 +125,7 @@ export async function resolveOutboundFollowupOutcome(
 }
 
 // ─── IST helpers ──────────────────────────────────────────────────────────────
-// Replit servers run UTC. All scheduling must be done in IST (UTC+5:30).
+// Hosts run UTC. All scheduling must be done in IST (UTC+5:30).
 function nowIST(): Date {
   return new Date(new Date().getTime() + 5.5 * 3600_000);
 }

@@ -30,7 +30,8 @@ router.get("/healthz", async (_req, res) => {
     status: dbOk && envOk ? "ok" : "degraded",
     db: dbOk ? "connected" : "error",
     uptimeSec: Math.round(process.uptime()),
-    version: process.env.APP_VERSION ?? process.env.REPLIT_DEPLOYMENT_ID ?? "dev",
+    version: process.env.APP_VERSION ?? "dev",
+    costMode: process.env.COST_MODE ?? "strict",
     env: {
       database: Boolean(process.env.DATABASE_URL),
       adminToken: Boolean(process.env.ADMIN_TOKEN),

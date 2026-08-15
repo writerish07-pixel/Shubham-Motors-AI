@@ -165,7 +165,8 @@ export async function textToSpeech(
         inputs: [speakable.slice(0, 500)],
         target_language_code: langCode,
         speaker: "anushka",
-        model: "bulbul:v2",
+        // v2 is required for the ₹2/min cap; v3 is ~2×. Override only after a cost review.
+        model: process.env.SARVAM_TTS_MODEL || "bulbul:v2",
         enable_preprocessing: true,
         // ── Clarity tuning — customer feedback: voice was fast / fumbled ──
         // pace < 1 slows delivery so every word is distinct; loudness lifts it

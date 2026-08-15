@@ -136,7 +136,9 @@ pnpm --filter @workspace/api-server test   # relationshipIntel + existing suites
 
 ## 4. Roadmap — remaining PRD phases
 
-The remaining phases build naturally on this foundation. Suggested order:
+The living product map is **`docs/ROADMAP.md`**. The August 2026 market +
+macro/micro production-grade audit is **`docs/PRODUCTION_AUDIT.md`**. The
+remaining phases below build naturally on this foundation. Suggested order:
 
 1. **Phase 2 — Customer Intelligence Engine:** promote the richest fields into a
    dedicated `customer_profiles` view/table keyed by phone; persist conversation

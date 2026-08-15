@@ -77,7 +77,7 @@ export async function transferCallToAgent(callSid: string, agentNumber: string):
   const { apiKey, apiToken, base } = creds();
   const pub = getPublicBaseUrl();
   if (!pub) {
-    logger.error({ callSid }, "Cannot transfer — REPLIT_DOMAINS / PUBLIC_BASE_URL not set");
+    logger.error({ callSid }, "Cannot transfer — PUBLIC_BASE_URL not set");
     return false;
   }
   const xmlUrl = `${pub}/api/webhooks/exotel/dial-agent.xml?to=${encodeURIComponent(agentNumber)}`;

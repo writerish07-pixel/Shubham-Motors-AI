@@ -136,7 +136,7 @@ export default function Settings() {
             <Button size="sm" onClick={saveToken} disabled={!adminToken}>Save</Button>
           </div>
           <div className="text-[10px] text-muted-foreground/70">
-            Set the matching value in Replit Secrets as <code className="font-mono">ADMIN_TOKEN</code>. Required for uploads.
+            Set the matching value as the server env <code className="font-mono">ADMIN_TOKEN</code> (Fly secrets). Required for uploads.
           </div>
         </div>
 
@@ -194,7 +194,7 @@ export default function Settings() {
         {!adminToken && (
           <div className="ml-10 flex items-start gap-2 text-[11px] text-amber-400 bg-amber-500/5 border border-amber-500/20 rounded px-2.5 py-1.5">
             <AlertCircle size={11} className="mt-0.5 shrink-0" />
-            <div>Set the Admin Token above before uploading. Add the same value in Replit Secrets as <code className="font-mono">ADMIN_TOKEN</code>.</div>
+            <div>Set the Admin Token above before uploading. Add the same value as server env <code className="font-mono">ADMIN_TOKEN</code>.</div>
           </div>
         )}
       </div>
@@ -205,7 +205,7 @@ export default function Settings() {
           <CheckCircle size={14} className="text-green-400 mt-0.5 shrink-0" />
           <div>
             <div className="font-medium text-sm">API credentials are stored as environment secrets</div>
-            <div className="text-xs text-muted-foreground mt-0.5">Update them via Replit Secrets — values shown here are masked for security.</div>
+            <div className="text-xs text-muted-foreground mt-0.5">Update them via Fly.io / host secrets — values shown here are masked for security.</div>
           </div>
         </div>
       </div>
@@ -225,7 +225,7 @@ export default function Settings() {
                 <div key={f.env}>
                   <Label className="text-xs mb-1 block text-muted-foreground">{f.label}</Label>
                   <Input type="password" placeholder={f.placeholder} defaultValue="••••••••••••••••" className="text-sm font-mono" data-testid={`setting-${f.env.toLowerCase()}`} readOnly />
-                  <div className="text-[10px] text-muted-foreground/60 mt-0.5">Env: <code className="font-mono">{f.env}</code> — update via Replit Secrets</div>
+                  <div className="text-[10px] text-muted-foreground/60 mt-0.5">Env: <code className="font-mono">{f.env}</code> — update via server secrets</div>
                 </div>
               ))}
             </div>
