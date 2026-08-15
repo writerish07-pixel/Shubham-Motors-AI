@@ -26,9 +26,12 @@ ENV NODE_ENV=production
 ENV PORT=8080
 ENV BASE_PATH=/
 ENV STATIC_DIR=/app/public
+ENV NODE_EXTRA_CA_CERTS=/app/certs/rds-ca.pem
+ENV DATABASE_SSL_CA=/app/certs/rds-ca.pem
 
 RUN addgroup --system sakshi && adduser --system --ingroup sakshi sakshi
 
+COPY lib/db/certs/ap-south-1-bundle.pem /app/certs/rds-ca.pem
 COPY --from=build /app/artifacts/api-server/dist ./dist
 COPY --from=build /app/artifacts/shubham-motors/dist/public ./public
 

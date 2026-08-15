@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # fly.toml app configuration file generated for shubham-motors-ai on 2026-08-15T20:19:17Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
@@ -5,6 +6,16 @@
 
 app = 'shubham-motors-ai'
 primary_region = 'sin'
+=======
+# Fly.io — Singapore until Mumbai has capacity (bom is paid-plan + often full).
+# Always-on: Exotel Voicebot WebSockets cannot survive scale-to-zero.
+# Deploy: fly launch --copy-config  (first time) then fly deploy
+# Secrets: see .env.example / docs/WHAT_I_NEED.md
+# Move to bom later: fly scale count 1 --region bom && set primary_region = "bom"
+
+app = "shubham-motors-ai"
+primary_region = "sin"
+>>>>>>> origin/main
 
 [build]
   dockerfile = 'Dockerfile'
@@ -30,12 +41,18 @@ primary_region = 'sin'
     hard_limit = 40
     soft_limit = 25
 
+<<<<<<< HEAD
   [[http_service.checks]]
     interval = '30s'
     timeout = '5s'
     grace_period = '15s'
     method = 'GET'
     path = '/api/healthz'
+=======
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "2048mb"
+>>>>>>> origin/main
 
 [[vm]]
   size = 'shared-cpu-2x'

@@ -4,7 +4,7 @@
 
 Replit GCE (`[deployment] router = application`) is **removed**. Voice needs a process that never sleeps: Exotel opens `wss://…/call/stream` for the whole call.
 
-**Chosen host: Fly.io, region `bom` (Mumbai).** Same country as customers, Exotel, and Sarvam. HTTPS and WSS included. One always-on 2 GB VM serves API + WebSocket + CRM.
+**Chosen host: Fly.io.** Prefer region `bom` (Mumbai). GitHub Launch currently fails there (`no capacity`; Mumbai often needs a paid Fly plan), so `fly.toml` ships `primary_region = "sin"` (Singapore) — next closest, and this Exotel account is already Singapore. One always-on 2 GB VM serves API + WebSocket + CRM. After a paid Fly org, move with `fly scale count 1 --region bom`.
 
 Fallback: `docker compose` on a Mumbai/Bangalore VPS (`docker-compose.yml`).
 
