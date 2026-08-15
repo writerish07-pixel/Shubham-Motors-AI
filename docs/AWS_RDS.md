@@ -86,6 +86,8 @@ postgresql://sakshi:YOUR_PASSWORD@ENDPOINT:5432/sakshi?sslmode=require
 
 That entire string is `DATABASE_URL`.
 
+Fly/Node must trust Amazon's RDS CA (not in the public store). The image ships `lib/db/certs/ap-south-1-bundle.pem` as `NODE_EXTRA_CA_CERTS`. Without that, `/api/healthz` shows `"db":"error"` even when the password is correct.
+
 Paste it into Fly after the app exists:
 
 ```bash
