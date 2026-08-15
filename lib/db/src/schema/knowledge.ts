@@ -13,6 +13,9 @@ export const knowledgeTable = pgTable("knowledge", {
   requiresReview: boolean("requires_review").notNull().default(false),
   evidence: text("evidence"),
   source: text("source"),
+  /** Inclusive start — expired / not-yet-live rows are skipped at retrieve time. */
+  effectiveFrom: timestamp("effective_from", { withTimezone: true }),
+  effectiveUntil: timestamp("effective_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

@@ -1,5 +1,5 @@
 import { eq, and, sql, count } from "drizzle-orm";
-import { db, callsTable, leadsTable, followupsTable, knowledgeTable } from "@workspace/db";
+import { db, callsTable, leadsTable, followupsTable, knowledgeTable, shadowScoresTable } from "@workspace/db";
 import {
   analyzeCallIntent,
   getActiveFestivalOffer,
@@ -11,6 +11,7 @@ import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "./whatsapp";
 import { resolveModelOnRoad, computeEmi } from "./emiQuote";
 import { computeLeadIntelligence } from "./relationshipIntel";
 import { logger } from "./logger";
+import { scoreCallShadow } from "./agentTools";
 
 type CallAnalysis = Awaited<ReturnType<typeof analyzeCallIntent>>;
 
@@ -89,6 +90,27 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       languageDetected: analysis.language,
     })
     .where(eq(callsTable.id, callDbId));
+
+  try {
+    const card = scoreCallShadow(transcript, {
+      visitBooked: Boolean(visitDate || existingLead.visitScheduledAt || /\[VISIT\]/i.test(transcript)),
+      transferred: /\[TRANSFER/i.test(transcript),
+    });
+    await db.insert(shadowScoresTable).values({
+      callId: callDbId,
+      leadId,
+      completeness: card.completeness,
+      grounding: card.grounding,
+      booking: card.booking,
+      handoff: card.handoff,
+      talkRatio: card.talkRatio,
+      fillerPenalty: card.fillerPenalty,
+      overall: card.overall,
+      notes: card.notes,
+    });
+  } catch (err) {
+    logger.warn({ err, callDbId }, "Shadow score write failed");
+  }
 
   const terminalIntent = analysis.intent === "not_interested" || analysis.intent === "wrong_number";
   const terminalForFollowup = terminalIntent || Boolean(analysis.lostDeal);

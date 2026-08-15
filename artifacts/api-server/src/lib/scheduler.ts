@@ -19,6 +19,8 @@ import { makeOutboundCall } from "./exotel";
 import { getWebhookBaseUrl } from "./publicUrl";
 import { sendWhatsAppMessage } from "./whatsapp";
 import { logger } from "./logger";
+import { outboundDialingAllowed } from "./agentTools";
+import { evaluateOutboundGates } from "./agentActions";
 
 // ─── Outbound context map ─────────────────────────────────────────────────────
 // Keyed by phone number (10-digit). Set by the scheduler before dialling;
@@ -227,6 +229,11 @@ export async function runAutoDialer(): Promise<RunResult> {
     return { attempted: 0, succeeded: 0, failed: 0, skipped: 1, whatsappFallback: 0, details: [] };
   }
 
+  if (!outboundDialingAllowed()) {
+    logger.info({ mode: process.env.REPLACEMENT_MODE ?? "full" }, "Auto-dialer skipped — replacement mode is not full");
+    return { attempted: 0, succeeded: 0, failed: 0, skipped: 1, whatsappFallback: 0, details: [{ followupId: 0, leadName: "system", phone: "", success: false, reason: "replacement_mode blocks autodialer" }] };
+  }
+
   manualRunInProgress = true;
   schedulerStatus.running = true;
   const startTime = new Date().toISOString();
@@ -258,6 +265,7 @@ export async function runAutoDialer(): Promise<RunResult> {
         leadPhone: leadsTable.phone,
         leadStatus: leadsTable.status,
         leadDoNotCall: leadsTable.doNotCall,
+        leadNcprStatus: leadsTable.ncprStatus,
         leadInterestedModel: leadsTable.interestedModel,
         leadNotes: leadsTable.notes,
         leadIntentSummary: leadsTable.intentSummary,
@@ -299,6 +307,17 @@ export async function runAutoDialer(): Promise<RunResult> {
         result.skipped++;
         result.details.push({ followupId: followup.followupId, leadName: followup.leadName ?? `Lead #${followup.leadId}`, phone: followup.leadPhone, success: false, reason: "Lead is do-not-call — cancelled" });
         await db.update(followupsTable).set({ status: "cancelled" }).where(eq(followupsTable.id, followup.followupId));
+        continue;
+      }
+
+      const gates = await evaluateOutboundGates({
+        id: followup.leadId,
+        doNotCall: followup.leadDoNotCall,
+        ncprStatus: followup.leadNcprStatus as string | null,
+      });
+      if (!gates.ok) {
+        result.skipped++;
+        result.details.push({ followupId: followup.followupId, leadName: followup.leadName ?? `Lead #${followup.leadId}`, phone: followup.leadPhone, success: false, reason: gates.reason });
         continue;
       }
 

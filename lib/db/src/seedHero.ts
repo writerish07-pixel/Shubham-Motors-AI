@@ -36,10 +36,48 @@ export async function seedHeroKnowledge(): Promise<number> {
         [r.title, r.category, r.content, r.modelName, HERO_CATALOG_SOURCE],
       );
     }
+    await seedPlaybooks(pool);
   } finally {
     await pool.end();
   }
   return rows.length;
+}
+
+const PLAYBOOK_SOURCE = "sakshi-playbook";
+
+const PLAYBOOKS: Array<{ title: string; content: string }> = [
+  {
+    title: "Discovery playbook",
+    content:
+      "Pehle segment (scooter vs bike, CC), roz ka km, family/pillion, budget. Ek sawaal ek baar. Jo mil gaya woh dubara mat poochho. 2 signals ke baad recommend karo.",
+  },
+  {
+    title: "Test-ride close",
+    content:
+      "Price/EMI ke baad seedha slot: 'Aaj 11 baje test ride kar lein ya shaam 4?' Customer haan kahe toh [VISIT] tag. Address: Lal Kothi, Tonk Road, Jaipur. DL saath laana.",
+  },
+  {
+    title: "Soch ke batata hoon",
+    content:
+      "Stall hai, interest nahi. Ek blocker poochho (budget / family / compare). Phir ek low-commitment next step: test ride ya WhatsApp price. 'Ji bilkul sochiye' mat bolo.",
+  },
+  {
+    title: "EMI without math",
+    content:
+      "Kabhi calculate mat karo. [PRECOMPUTED EMI TABLE] se tenure ke saath padho. Down payment customer ka ho toh wahi repeat karo. Exact CIBIL rate → [TRANSFER:FINANCE].",
+  },
+];
+
+async function seedPlaybooks(pool: pg.Pool): Promise<void> {
+  const existing = await pool.query("SELECT 1 FROM knowledge WHERE source = $1 LIMIT 1", [PLAYBOOK_SOURCE]);
+  if (existing.rowCount && existing.rowCount > 0) return;
+  for (const p of PLAYBOOKS) {
+    await pool.query(
+      `INSERT INTO knowledge (title, category, content, is_active, requires_review, source)
+       VALUES ($1, 'playbook', $2, true, false, $3)`,
+      [p.title, p.content, PLAYBOOK_SOURCE],
+    );
+  }
 }
 
 seedHeroKnowledge()

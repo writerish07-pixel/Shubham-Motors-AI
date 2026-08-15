@@ -40,6 +40,12 @@ import {
   buildOutboundCallPromptBlock,
 } from "./followUpCallContext";
 import { fetchCompetitorIntel, formatCompetitorIntelBlock } from "./competitorIntel";
+import {
+  formatKnowledgeSlice,
+  isKnowledgeInEffect,
+  retrieveKnowledgeForUtterance,
+  type KnowledgeSliceItem,
+} from "./agentTools";
 
 // ─── Model IDs ───────────────────────────────────────────────────────────────
 const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
@@ -60,37 +66,50 @@ const openai = new OpenAI({
 // call invalidateKnowledgeCache() immediately, so stale data only persists
 // for uncommitted in-flight queries (max ~500ms).
 const KB_CACHE_TTL_MS = 5 * 60_000;
-let _kbCache: { value: string; expiresAt: number } | null = null;
-let _kbInflight: Promise<string> | null = null;
+let _kbItemsCache: { items: KnowledgeSliceItem[]; expiresAt: number } | null = null;
+let _kbItemsInflight: Promise<KnowledgeSliceItem[]> | null = null;
 let _fuelCache: { value: number; expiresAt: number } | null = null;
 let _fuelInflight: Promise<number> | null = null;
 let _festivalCache: { value: { name: string; offer: string; endDate: string } | null; expiresAt: number } | null = null;
 
 export function invalidateKnowledgeCache(): void {
-  _kbCache = null;
+  _kbItemsCache = null;
   _fuelCache = null;
   _festivalCache = null;
   // FIXED: also null out in-flight so the next caller re-queries from DB,
   // not from a still-running query that predates the admin edit.
-  _kbInflight = null;
+  _kbItemsInflight = null;
   _fuelInflight = null;
 }
 
-export async function buildKnowledgeContext(): Promise<string> {
+export async function loadPublishedKnowledgeItems(): Promise<KnowledgeSliceItem[]> {
   const now = Date.now();
-  if (_kbCache && _kbCache.expiresAt > now) return _kbCache.value;
-  if (_kbInflight) return _kbInflight;
-  _kbInflight = (async () => {
-    const items = await db.select().from(knowledgeTable)
+  if (_kbItemsCache && _kbItemsCache.expiresAt > now) return _kbItemsCache.items;
+  if (_kbItemsInflight) return _kbItemsInflight;
+  _kbItemsInflight = (async () => {
+    const rows = await db.select().from(knowledgeTable)
       .where(and(eq(knowledgeTable.isActive, true), eq(knowledgeTable.requiresReview, false)));
-    const value = items.length === 0 ? "" : items
-      .map((i) => `[${i.category.toUpperCase()}] ${i.title}: ${i.content}`)
-      .join("\n");
-    _kbCache = { value, expiresAt: Date.now() + KB_CACHE_TTL_MS };
-    return value;
+    const items: KnowledgeSliceItem[] = rows
+      .filter((i) => isKnowledgeInEffect(i))
+      .map((i) => ({
+        category: i.category,
+        title: i.title,
+        content: i.content,
+        modelName: i.modelName,
+        effectiveFrom: i.effectiveFrom,
+        effectiveUntil: i.effectiveUntil,
+      }));
+    _kbItemsCache = { items, expiresAt: Date.now() + KB_CACHE_TTL_MS };
+    return items;
   })();
-  try { return await _kbInflight; }
-  finally { _kbInflight = null; }
+  try { return await _kbItemsInflight; }
+  finally { _kbItemsInflight = null; }
+}
+
+/** Admin KB slice for this utterance — DEFAULT_HERO_KNOWLEDGE is always merged separately. */
+export async function buildKnowledgeContext(userText = ""): Promise<string> {
+  const items = await loadPublishedKnowledgeItems();
+  return formatKnowledgeSlice(retrieveKnowledgeForUtterance(userText, items));
 }
 
 const FUEL_CACHE_TTL_MS = 5 * 60_000;
@@ -643,7 +662,7 @@ export async function generateAgentReply(
   nameNeedsConfirmation?: boolean,
 ): Promise<string> {
   const [knowledge, fuelPrice, festival] = await Promise.all([
-    buildKnowledgeContext(),
+    buildKnowledgeContext(customerText),
     getJaipurFuelPrice(),
     getActiveFestivalOffer(),
   ]);
@@ -715,7 +734,7 @@ export async function* generateAgentReplyStream(
   nameNeedsConfirmation?: boolean,
 ): AsyncGenerator<string, void, void> {
   const [knowledge, fuelPrice, festival] = await Promise.all([
-    buildKnowledgeContext(),
+    buildKnowledgeContext(customerText),
     getJaipurFuelPrice(),
     getActiveFestivalOffer(),
   ]);
@@ -1136,6 +1155,14 @@ Output ONLY the tag, nothing else:
 • [TRANSFER:FINANCE] → any finance query (CIBIL, locked rate, approval)
 • [TRANSFER:FINANCE:HDFC] → specific bank
 A TRANSFER is a WIN. A farewell on a hot lead is a lost sale.
+
+╔══ ACTION TAGS (never spoken — appended after your last sentence) ══╗
+EMI numbers still come ONLY from [PRECOMPUTED EMI TABLE]. Tags fire side effects:
+• Customer wants a test ride / showroom visit → speak the invite, then \`[VISIT]\` (or \`[VISIT:ISO-datetime]\` if they named a time).
+• Customer asks to WhatsApp brochure / price list → \`[WHATSAPP:brochure]\`.
+• After quoting EMI from the table, optionally \`[EMI:Model|down|months]\` so CRM stores the quote. Do not invent EMI in the tag.
+• Stock/available question after you checked KB → optional \`[STOCK:Model]\`.
+Never put tags in the middle of a spoken sentence.
 
 KNOWLEDGE BASE (your ONLY source of truth for prices, stock, offers):
 ${knowledge}

@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Plus, Edit2, Trash2, Check, X, BookOpen, Sparkles, Upload, Download, FileAudio } from "lucide-react";
 import {
   useListKnowledgeItems, getListKnowledgeItemsQueryKey,
-  useCreateKnowledgeItem, useUpdateKnowledgeItem, useDeleteKnowledgeItem
+  useUpdateKnowledgeItem, useDeleteKnowledgeItem
 } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -12,31 +12,33 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 
-const CATEGORIES = ["model", "price", "offer", "brochure", "faq", "policy", "general"];
+const CATEGORIES = ["model", "price", "offer", "playbook", "stock", "brochure", "faq", "policy", "general"];
 const CAT_COLORS: Record<string, string> = {
   model: "bg-blue-500/20 text-blue-400 border-blue-500/30",
   price: "bg-green-500/20 text-green-400 border-green-500/30",
   offer: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
+  playbook: "bg-pink-500/20 text-pink-400 border-pink-500/30",
+  stock: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
   brochure: "bg-purple-500/20 text-purple-400 border-purple-500/30",
   faq: "bg-orange-500/20 text-orange-400 border-orange-500/30",
   policy: "bg-red-500/20 text-red-400 border-red-500/30",
   general: "bg-muted text-muted-foreground border-border",
 };
 
-const emptyForm = { title: "", category: "general", content: "", modelName: "", fileUrl: "" };
+const emptyForm = { title: "", category: "general", content: "", modelName: "", fileUrl: "", effectiveFrom: "", effectiveUntil: "" };
 
 export default function Knowledge() {
   const [catFilter, setCatFilter] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [form, setForm] = useState({ ...emptyForm });
+  const [creating, setCreating] = useState(false);
   const qc = useQueryClient();
 
   const { data: items, isLoading } = useListKnowledgeItems(
     { category: catFilter || undefined },
     { query: { queryKey: getListKnowledgeItemsQueryKey({ category: catFilter || undefined }) } }
   );
-  const create = useCreateKnowledgeItem();
   const update = useUpdateKnowledgeItem();
   const remove = useDeleteKnowledgeItem();
 
@@ -144,15 +146,42 @@ export default function Knowledge() {
 
   function handleCreate() {
     if (!form.title || !form.content) { toast.error("Title and content required"); return; }
-    create.mutate({ data: form }, {
-      onSuccess: () => { toast.success("Added to knowledge base"); setAddOpen(false); setForm({ ...emptyForm }); invalidate(); },
-      onError: () => toast.error("Failed"),
-    });
+    setCreating(true);
+    fetch("/api/knowledge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: form.title,
+        category: form.category,
+        content: form.content,
+        modelName: form.modelName || undefined,
+        fileUrl: form.fileUrl || undefined,
+        effectiveFrom: form.effectiveFrom || undefined,
+        effectiveUntil: form.effectiveUntil || undefined,
+      }),
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await r.text());
+        toast.success("Added to knowledge base");
+        setAddOpen(false);
+        setForm({ ...emptyForm });
+        invalidate();
+      })
+      .catch(() => toast.error("Failed"))
+      .finally(() => setCreating(false));
   }
 
   function startEdit(item: NonNullable<typeof items>[0]) {
     setEditId(item.id);
-    setForm({ title: item.title, category: item.category, content: item.content, modelName: item.modelName ?? "", fileUrl: item.fileUrl ?? "" });
+    setForm({
+      title: item.title,
+      category: item.category,
+      content: item.content,
+      modelName: item.modelName ?? "",
+      fileUrl: item.fileUrl ?? "",
+      effectiveFrom: "",
+      effectiveUntil: "",
+    });
   }
 
   function saveEdit() {
@@ -208,7 +237,11 @@ export default function Knowledge() {
                 <div><Label className="text-xs mb-1 block">Model Name</Label><Input placeholder="e.g. Splendor Plus" value={form.modelName} onChange={(e) => setForm(f => ({ ...f, modelName: e.target.value }))} /></div>
                 <div><Label className="text-xs mb-1 block">File/Brochure URL</Label><Input placeholder="https://..." value={form.fileUrl} onChange={(e) => setForm(f => ({ ...f, fileUrl: e.target.value }))} /></div>
               </div>
-              <Button className="w-full text-xs" onClick={handleCreate} disabled={create.isPending}>Add to Knowledge Base</Button>
+              <div className="grid grid-cols-2 gap-3">
+                <div><Label className="text-xs mb-1 block">Effective from</Label><Input type="datetime-local" value={form.effectiveFrom} onChange={(e) => setForm(f => ({ ...f, effectiveFrom: e.target.value }))} /></div>
+                <div><Label className="text-xs mb-1 block">Effective until</Label><Input type="datetime-local" value={form.effectiveUntil} onChange={(e) => setForm(f => ({ ...f, effectiveUntil: e.target.value }))} /></div>
+              </div>
+              <Button className="w-full text-xs" onClick={handleCreate} disabled={creating}>Add to Knowledge Base</Button>
             </div>
           </DialogContent>
         </Dialog>

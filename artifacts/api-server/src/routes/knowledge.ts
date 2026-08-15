@@ -28,11 +28,24 @@ function requireAdmin(req: import("express").Request, res: import("express").Res
   return true;
 }
 
+function endOfNextIstDay(): Date {
+  const ist = new Date(Date.now() + 5.5 * 3600_000);
+  const end = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + 1, 18, 29, 59, 0); // 23:59:59 IST
+  return new Date(end);
+}
+
+function parseOptionalDate(v: unknown): Date | null {
+  if (!v) return null;
+  const d = new Date(String(v));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 // ─── Daily stock upload: wipes old stock rows then ingests fresh Excel ────────
 // Expected columns: Model | SKU | SKU Description | SKU wise Inventory Qty
 router.post("/knowledge/upload/stock", upload.single("file"), async (req, res): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   if (!req.file) { res.status(400).json({ error: "file required" }); return; }
+  const stockFileName = req.file.originalname;
   try {
     const wb = XLSX.read(req.file.buffer, { type: "buffer" });
     const rows = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets[wb.SheetNames[0]!]!, { defval: "", raw: false });
@@ -50,6 +63,9 @@ router.post("/knowledge/upload/stock", upload.single("file"), async (req, res): 
     const inserts = Object.entries(byModel).map(([m, d]) => ({
       title: m, category: "stock", isActive: true,
       content: `Total in stock: ${d.total}. Variants: ${d.variants.slice(0, 8).join("; ")}`,
+      effectiveFrom: new Date(),
+      effectiveUntil: endOfNextIstDay(),
+      source: `stock-upload:${stockFileName}`,
     }));
     if (inserts.length === 0) {
       res.status(400).json({ error: "no valid stock rows found — refusing to wipe existing KB" });
@@ -72,6 +88,7 @@ router.post("/knowledge/upload/stock", upload.single("file"), async (req, res): 
 router.post("/knowledge/upload/price", upload.single("file"), async (req, res): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   if (!req.file) { res.status(400).json({ error: "file required" }); return; }
+  const priceFileName = req.file.originalname;
   try {
     const wb = XLSX.read(req.file.buffer, { type: "buffer" });
     const raw = XLSX.utils.sheet_to_json<string[]>(wb.Sheets[wb.SheetNames[0]!]!, { defval: "", raw: false, header: 1 });
@@ -105,6 +122,8 @@ router.post("/knowledge/upload/price", upload.single("file"), async (req, res): 
     const inserts = rows.map((r) => ({
       title: String(r[1]).trim(), category: "price", isActive: true,
       content: `Ex-showroom: Rs.${r[2]} | RC: Rs.${r[3]} | Insurance: Rs.${r[4]} | On-road: Rs.${r[6]} | With Accessory Kit: Rs.${r[8]}`,
+      effectiveFrom: new Date(),
+      source: `price-upload:${priceFileName}`,
     }));
     if (inserts.length === 0) {
       res.status(400).json({ error: "no valid price rows found — refusing to wipe existing KB" });
@@ -273,7 +292,7 @@ router.post("/knowledge/upload/recording", uploadAudio.single("file"), async (re
 // fields (requiresReview, evidence, source) and pending rows are excluded so
 // unreviewed call-derived data never propagates between environments. The
 // review queue must be approved in each environment independently.
-const KB_SAFE_FIELDS = ["id", "title", "category", "content", "modelName", "fileUrl", "isActive", "createdAt", "updatedAt"] as const;
+const KB_SAFE_FIELDS = ["id", "title", "category", "content", "modelName", "fileUrl", "isActive", "effectiveFrom", "effectiveUntil", "createdAt", "updatedAt"] as const;
 const MAX_IMPORT_ROWS = 5000;
 
 router.get("/knowledge/export", async (req, res): Promise<void> => {
@@ -311,6 +330,8 @@ router.post("/knowledge/import", async (req, res): Promise<void> => {
       requiresReview: false as const,
       evidence: null,
       source: null,
+      effectiveFrom: it.effectiveFrom ? new Date(String(it.effectiveFrom)) : null,
+      effectiveUntil: it.effectiveUntil ? new Date(String(it.effectiveUntil)) : null,
     }))
     .filter((it) => it.title && it.content);
 
@@ -384,6 +405,8 @@ router.post("/knowledge", async (req, res): Promise<void> => {
     modelName: body.modelName ?? null,
     fileUrl: body.fileUrl ?? null,
     isActive: true,
+    effectiveFrom: parseOptionalDate(body.effectiveFrom),
+    effectiveUntil: parseOptionalDate(body.effectiveUntil),
   }).returning();
 
   invalidateKnowledgeCache();

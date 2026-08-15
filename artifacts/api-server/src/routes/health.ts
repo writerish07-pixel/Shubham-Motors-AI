@@ -4,6 +4,7 @@ import { HealthCheckResponse } from "@workspace/api-zod";
 import { db } from "@workspace/db";
 import { getSttCircuitStatus } from "../lib/sarvam";
 import { getSchedulerStatus } from "../lib/scheduler";
+import { getReplacementMode, whatsappTemplatesOnly } from "../lib/agentTools";
 
 const router: IRouter = Router();
 
@@ -32,6 +33,9 @@ router.get("/healthz", async (_req, res) => {
     uptimeSec: Math.round(process.uptime()),
     version: process.env.APP_VERSION ?? "dev",
     costMode: process.env.COST_MODE ?? "strict",
+    replacementMode: getReplacementMode(),
+    whatsappTemplatesOnly: whatsappTemplatesOnly(),
+    ncprRequireClear: process.env.NCPR_REQUIRE_CLEAR === "1",
     env: {
       database: Boolean(process.env.DATABASE_URL),
       adminToken: Boolean(process.env.ADMIN_TOKEN),

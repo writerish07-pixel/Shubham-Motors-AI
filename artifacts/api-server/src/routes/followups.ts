@@ -11,6 +11,7 @@ import {
 import { makeOutboundCall } from "../lib/exotel";
 import { getWebhookBaseUrl } from "../lib/publicUrl";
 import { setOutboundContext, type OutboundLeadContext } from "../lib/scheduler";
+import { evaluateManualOutboundGates } from "../lib/agentActions";
 
 const router: IRouter = Router();
 
@@ -125,6 +126,12 @@ router.post("/followups/:id/execute", async (req, res): Promise<void> => {
   const [lead] = await db.select().from(leadsTable).where(eq(leadsTable.id, followup.leadId));
   if (!lead) {
     res.status(404).json({ error: "Lead not found" });
+    return;
+  }
+
+  const gates = await evaluateManualOutboundGates(lead);
+  if (!gates.ok) {
+    res.status(409).json({ error: gates.reason, success: false });
     return;
   }
 
