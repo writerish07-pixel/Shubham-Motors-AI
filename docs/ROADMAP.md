@@ -8,7 +8,9 @@ This document answers two things: what this repository actually is, and what to 
 
 Related docs:
 
-- `docs/PRODUCTION_AUDIT.md` — **August 2026 macro/micro audit vs market voice agents** (use this for production-grade gaps)
+- `docs/WHAT_I_NEED.md` — **what you must send** to leave Replit and stay under ₹2/min
+- `docs/COST_AND_DEPLOY.md` — Fly.io Mumbai deploy + cost math
+- `docs/PRODUCTION_AUDIT.md` — **August 2026 macro/micro audit vs market voice agents**
 - `docs/GROWTH_OS_V2.md` — Phase 1 audit + relationship/revenue intelligence increment
 - `docs/PRODUCTION_HARDENING.md` — reliability, security, and scale-out findings
 - `attached_assets/Shubham-Motors-AI-Audit-and-Fixes-Report_*.md` — June 2026 production-fix pass

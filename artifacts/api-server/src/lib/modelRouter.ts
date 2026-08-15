@@ -116,7 +116,17 @@ const ADDRESS_QUERY_RE = new RegExp(
 const YESNO_RE = /^(?:haan|han|ji|yes|ok|okay|theek|sahi|nahi|no|nope)[\s.!?]*$/i;
 const GREETING_RE = /^(?:hello|hi|namaste|namaskaar|namaskar|नमस्ते|jai mata di|salaam|salam)[\s.!?]*$/i;
 
+/** strict (default) keeps live turns on gpt-4o-mini so cost stays under ₹2/min. */
+export function costMode(): "strict" | "balanced" | "quality" {
+  const m = (process.env.COST_MODE ?? "strict").toLowerCase();
+  if (m === "quality" || m === "balanced") return m;
+  return "strict";
+}
+
 export function classifyTurn(customerText: string, history: ConversationTurn[]): ModelTier {
+  const mode = costMode();
+  if (mode === "strict") return "mini";
+  if (mode === "quality") return "premium";
   if (PREMIUM_KEYWORDS_RE.test(customerText)) return "premium";
   if (customerText.length > 220 || customerText.split(/\s+/).length > 40) return "premium";
   void history;

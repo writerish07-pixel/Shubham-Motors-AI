@@ -3,6 +3,7 @@ export function getPublicBaseUrl(): string {
   if (process.env.PUBLIC_BASE_URL) {
     return process.env.PUBLIC_BASE_URL.replace(/\/$/, "");
   }
+  // Legacy Replit hostnames — do not set these on Fly/VPS.
   const domains = (process.env.REPLIT_DOMAINS ?? "")
     .split(",")
     .map((s) => s.trim())

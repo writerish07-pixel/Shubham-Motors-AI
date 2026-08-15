@@ -2,7 +2,7 @@
 
 Hindi/Hinglish voice sales agent and dealer CRM for Shubham Motors (Hero MotoCorp, Jaipur). Customers call or get called back; Sakshi discovers intent, quotes real on-road prices and precomputed EMIs, books test rides, and writes the CRM. After the call: WhatsApp summary, follow-up scheduling, relationship/revenue scores.
 
-See `docs/ROADMAP.md` for the product map and what to build next. `docs/PRODUCTION_AUDIT.md` is the August 2026 market + macro/micro production-grade audit. `docs/GROWTH_OS_V2.md` and `docs/PRODUCTION_HARDENING.md` cover the intelligence layer and the June reliability pass.
+See `docs/ROADMAP.md` for the product map. `docs/WHAT_I_NEED.md` is the production cutover checklist (Fly.io Mumbai, secrets, ₹2/min). `docs/COST_AND_DEPLOY.md` is the cost model. `docs/PRODUCTION_AUDIT.md` is the August 2026 market + macro/micro audit.
 
 ## Run & Operate
 
@@ -15,7 +15,8 @@ See `docs/ROADMAP.md` for the product map and what to build next. `docs/PRODUCTI
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only; then republish for prod)
 - Required env: `DATABASE_URL` — Postgres connection string
 - Also required for a real call: `ADMIN_TOKEN`, `SARVAM_API_KEY`, Exotel credentials, `PORT`
-- Recommended: `PUBLIC_BASE_URL` or `REPLIT_DOMAINS`, `OPENAI_API_KEY`, `STREAM_SECRET`, `CORS_ORIGINS`, `SALES_TRANSFER_NUMBER`
+- Recommended: `PUBLIC_BASE_URL`, `OPENAI_API_KEY`, `STREAM_SECRET`, `CORS_ORIGINS`, `SALES_TRANSFER_NUMBER`
+- Production host: Fly.io Mumbai — `docs/COST_AND_DEPLOY.md`. Do not deploy this app on Replit.
 
 ## Stack
 
@@ -79,6 +80,8 @@ See `docs/ROADMAP.md` for the product map and what to build next. `docs/PRODUCTI
 ## Pointers
 
 - Roadmap: `docs/ROADMAP.md`
+- What I need from you (Fly + secrets + ₹2/min): `docs/WHAT_I_NEED.md`
+- Cost and deploy: `docs/COST_AND_DEPLOY.md`
 - Production-grade audit (market + gaps): `docs/PRODUCTION_AUDIT.md`
 - Growth OS increment: `docs/GROWTH_OS_V2.md`
 - Hardening report: `docs/PRODUCTION_HARDENING.md`
