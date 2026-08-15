@@ -159,27 +159,22 @@ export function detectIntent(text: string, turn: number, ctx?: FastPathContext):
   return detectIntentWithMeta(text, turn, ctx)?.response ?? null;
 }
 
-/** Rare thinking audio — only if LLM is slow (>900ms), not every turn. */
-export const THINKING_FILLERS: string[] = [
-  "Ji, ek second.",
-  "Achha, ek second.",
-];
+/** Thinking audio only for slow EMI/price lookups — not every turn. */
+export const THINKING_FILLERS: string[] = [];
 
-const FILLER_PRICE = "Ek second, price dekh rahi hoon.";
-const FILLER_EMI = "Ji, EMI nikal rahi hoon, ek second.";
-const FILLER_MODEL = "Achha, ek second.";
+const FILLER_PRICE = "Price dekh rahi hoon.";
+const FILLER_EMI = "EMI nikal rahi hoon.";
 
 /**
- * Context-aware thinking filler: a price question gets "price dekh rahi hoon",
- * an EMI question gets "EMI nikal rahi hoon" — never an unrelated phrase.
- * All variants are pre-cached so the filler itself adds no TTS latency.
+ * Almost never speak a filler. Live calls stacked "ek second" every turn.
+ * Only EMI / price questions after turn 1 may get a short hold line.
  */
 export function pickThinkingFiller(customerText: string, turn: number): string {
+  if (turn < 2) return "";
   const t = customerText.toLowerCase();
   if (/\bemi\b|finance|\bloan\b|kist|किस्त|फाइनेंस|लोन|down\s*payment/i.test(t)) return FILLER_EMI;
   if (/price|kitne\s*(ka|ki|mein)|kimat|qeemat|कीमत|on.?road|rate|कितने/i.test(t)) return FILLER_PRICE;
-  if (/splendor|glamour|xtreme|destini|pleasure|xoom|deluxe|passion|xpulse|vida|model/i.test(t)) return FILLER_MODEL;
-  return THINKING_FILLERS[turn % THINKING_FILLERS.length] ?? THINKING_FILLERS[0]!;
+  return "";
 }
 
 const CACHED_PHRASES: string[] = [
@@ -189,7 +184,6 @@ const CACHED_PHRASES: string[] = [
   ...THINKING_FILLERS,
   FILLER_PRICE,
   FILLER_EMI,
-  FILLER_MODEL,
   "Samajh rahi hoon — thoda detail dijiye?",
   "Ek baar phir se bataiyega?",
   "WhatsApp par details bhej deti hoon.",

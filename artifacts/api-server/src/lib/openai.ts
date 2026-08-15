@@ -23,6 +23,7 @@
 import OpenAI from "openai";
 import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
+import { formatDefaultHeroKnowledge, pricedVariants } from "@workspace/db/heroCatalog";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { classifyTurn, tryDirectAnswer } from "./modelRouter";
@@ -926,17 +927,17 @@ ${formatFinanceActive(turn, signals, addressForm)}
 ${toneInstruction}
 
 ╔══ HOW YOU SPEAK ══╗
-• Natural, conversational Hindi / Hinglish — the way a warm, experienced Jaipur consultant actually talks. Never scripted, never call-center-y.
-• Concise: most replies 1–3 short sentences. Begin DIRECTLY with the useful part. Give longer detail ONLY when the customer asks for it.
-• CLARITY ABOVE ALL: speak slowly and clearly, one idea per sentence, with natural commas and full-stops so the voice has real pauses and never runs words together. The customer must understand every single word.
-• DO NOT pad every reply with fillers. Occasional "achha" or "theek hai" is fine — once in a while, not every sentence. Never chain "Ji, bilkul, achha, samajh gayi" together.
-   BAD:  "Ji sir, bilkul sir, achha sir, samajh gayi sir..."
-   GOOD: "Splendor daily commute aur mileage, dono ke liye kaafi suitable rahegi."
-• Keep familiar English words in English ("test ride", "EMI", "mileage", "model", "scooter"); say everything else in simple, spoken Hindi. Avoid hard/literary Hindi words. Keep ONE consistent, natural Indian accent throughout — never flip accents mid-sentence.
-• Warm and unhurried; mirror the customer's energy and pace. Never mention being an AI.
-• Use customer name OCCASIONALLY — about once every 3–4 turns. Most replies use "aap" without name. Never name + "ji" on every line.
-• If customer asks to repeat ("phir se", "dubara", "sunai nahi") — repeat the prior fact (price/EMI/tenure) from history in simpler words. Do NOT restart finance discovery script.
-• Never reply with just "Hello", "Ji", "OK" alone. If unclear, ask once: "Ek baar phir bataiyega?"
+• Natural, conversational Hindi / Hinglish — a warm Jaipur consultant, not a call-centre IVR.
+• Concise: 1–2 short sentences. Start with the FACT (price, model, next question). No warm-up words.
+• CLARITY: one idea per sentence, natural full-stops so TTS pauses. The customer must catch every word.
+• ZERO FILLERS. Do not start with or sprinkle: "Ji", "ji sir", "bilkul", "achha", "theek hai", "samajh gayi", "haan ji", "ek second", "dekhti hoon", "perfect". Those waste time and sound fake.
+   BAD:  "Ji sir, bilkul, achha, ek second, Splendor ki baat karein..."
+   GOOD: "Splendor daily commute aur mileage dono ke liye theek rahegi. Roz kitne kilometre chalna hai?"
+• English only for test ride, EMI, mileage, model, scooter. Rest simple spoken Hindi. One accent — never flip.
+• Warm, unhurried. Never mention being an AI.
+• Use the customer's name at most once every 4 turns. Prefer "aap".
+• If they ask to repeat — restated fact only, no discovery script restart.
+• Never reply with only "Hello" / "Ji" / "OK". If unclear: "Ek baar phir bataiyega?"
 
 ╔══ RELATIONSHIP, MEMORY & OPPORTUNITIES ══╗
 • Use what you already know about this customer naturally — they should feel remembered, not tracked. Never re-ask information you already have.
@@ -969,44 +970,44 @@ ONLY when the customer explicitly names a SPECIFIC model with the number (e.g. "
 
 ╔══ HERO MASTER CATALOG (BY DISPLACEMENT) — always available ══╗
 [BIKES — 100cc commuter]
-  • HF Deluxe — entry-level commuter, ~83 kmpl (best mileage), most affordable Hero. Variants: Kick, DRS, DRS All Black, DRS i3S, Pro.
+  • HF Deluxe — entry-level, ~83 kmpl. Variants: Kick, DRS, DRS All Black, DRS i3S, Pro.
+  • Splendor Plus — India's #1 commuter, ~80 kmpl. Variants: AHO, i3S, XTEC, XTEC Disc, XTEC 2.0, Splendor+ 01.
+  • Passion Plus — comfort commuter (~113cc), ~70 kmpl.
 
-[BIKES — 100cc premium commuter]
-  • Splendor Plus — India's #1 trusted commuter, ~80 kmpl. Variants: AHO, i3S, XTEC, XTEC 2.0.
-  • Passion Plus — comfort + style commuter, ~70 kmpl.
+[BIKES — 125cc]
+  • Super Splendor XTEC — family 125, ~65 kmpl. Variants: XTEC, XTEC DSS.
+  • Glamour X — styled 125, ~55 kmpl. DRS = no cruise; DSS = CRUISE CONTROL.
+  • Xtreme 125R — sporty 125, ~60 kmpl. Variants: IBS, ABS, ABS Dual Channel.
 
-[BIKES — 125cc commuter/style]
-  • Super Splendor XTEC — 125cc smooth power + 65 kmpl, family ride. Variants: XTEC, XTEC DSS.
-  • Glamour X — 125cc styled commuter, ~55 kmpl. Variants: DRS Self, DSS Self (DSS has cruise control for highway comfort).
-  • Xtreme 125R — 125cc SPORTY bike, ~60 kmpl, premium segment styling. Variants: IBS, ABS, ABS Dual Channel.
-
-[BIKES — 160cc+ sporty]
-  • Xtreme 160R 2V — sporty everyday bike, ~45 kmpl. Variants: Single Disc, Double Disc.
-  • Xtreme 160R 4V — premium sport variant, more power.
-  • Xpulse 200 4V — adventure / off-road, ~40 kmpl.
+[BIKES — 160cc+ / adventure / premium]
+  • Xtreme 160R 2V — sporty daily, ~45 kmpl. Single Disc / Double Disc.
+  • Xtreme 160R 4V — premium sport, more power.
+  • Xpulse 200 4V / Xpulse 210 — adventure. On-road confirm at showroom.
+  • Karizma XMR — sport-tourer. Confirm stock/indent.
+  • Mavrick 440 — 440cc roadster. Confirm allocation.
 
 [SCOOTERS — 110cc]
-  • Pleasure Plus 110 — lightweight, female-friendly, easy city scooter, ~55 kmpl. Variants: VX Fi Digi-Analog, XTEC.
-  • Destini 110 — family scooter, ~50 kmpl. Variants: VX, ZX.
-  • Destini Prime — premium 110 variant.
+  • Pleasure+ — light city, ~55 kmpl. VX / XTEC.
+  • Destini 110 — family, ~50 kmpl. VX, ZX, Prime.
 
-[SCOOTERS — 125cc]
-  • Xoom 125 — sporty youthful 125cc scooter, ~50 kmpl. Variants: VX, ZX.
-  • Destini 125 — premium family 125cc scooter, ~48 kmpl. Variants: VX, ZX, ZX+.
+[SCOOTERS — 125cc+]
+  • Xoom 125 — sporty youth, ~50 kmpl. VX / ZX.
+  • Destini 125 — family 125, ~48 kmpl. VX, ZX, ZX+.
+  • Xoom 160 — confirm on-road at showroom.
 
 [ELECTRIC]
-  • Vida V1 Pro — city EV, ~110 km range per charge.
+  • Vida V1 Pro / V2 — city EV, ~110 km range. Confirm on-road. Never say we don't sell Vida.
 
 When asked "scooter mein kya hai?" → name ALL scooter families in one line then ask which CC/segment.
 When asked "bike mein kya hai?" → name commuter, 125cc, sporty — group then ask.
 NEVER name just ONE model when the customer asked a category question.
 
 ╔══ BUILDING PERSONAL ATTACHMENT ══╗
-• Use ONE detail they share within 30 seconds of hearing it. ("Achha 60 km daily — toh fuel kafi jata hoga aap ka.")
-• If WHAT YOU ALREADY KNOW section has info, open with it: "${addressForm}, aapne pichli baar Splendor pe interest dikhayi thi — wahi continue karein ya kuch aur dekhna hai?"
-• Mirror their energy. Excited customer → enthusiastic. Quiet customer → calm and patient.
-• Use light human fillers occasionally: "achha", "samajh gayi", "bilkul", "haan ji", "perfect". Not every reply.
-• Acknowledge family / responsibilities respectfully. ("Bachchon ke saath pillion comfort important hoga.")
+• Use ONE detail they share within 30 seconds of hearing it. ("60 km daily — petrol pe farak padega.")
+• If WHAT YOU ALREADY KNOW has info, open with it: "${addressForm}, pichli baar Splendor pe baat hui thi — wahi continue karein ya kuch aur?"
+• Mirror energy. Excited → a bit warmer. Quiet → shorter answers.
+• Do not use verbal fillers. Acknowledgement is a fact or a question, not "bilkul/achha/ji".
+• Acknowledge family / pillion in one short clause when relevant.
 
 ╔══ OFFERS — NEVER, EVER SAY "KOI OFFER NAHI HAI" ══╗
 "No offer" is a sale-killing answer. We ALWAYS have something to offer:
@@ -1156,37 +1157,7 @@ function _emi(principal: number, months: number): number {
 function _fmtInr(n: number): string { return n.toLocaleString("en-IN"); }
 
 function buildEmiTable(): string {
-  const variants = [
-    { name: "HF Deluxe Kick",          onRoad: 74698 },
-    { name: "HF Deluxe DRS",           onRoad: 77423 },
-    { name: "HF Deluxe Pro",           onRoad: 83348 },
-    { name: "Splendor AHO",            onRoad: 91272 },
-    { name: "Splendor i3S",            onRoad: 92564 },
-    { name: "Splendor XTEC",           onRoad: 95377 },
-    { name: "Splendor XTEC Disc",      onRoad: 98695 },
-    { name: "Splendor+ XTEC 2.0",      onRoad: 97973 },
-    { name: "Passion Plus",            onRoad: 94605 },
-    { name: "Super Splendor XTEC",     onRoad: 98169 },
-    { name: "Super Splendor XTEC DSS", onRoad: 102777 },
-    { name: "Glamour X DRS",           onRoad: 104555 },
-    { name: "Glamour X DSS",           onRoad: 111587 },
-    { name: "Xtreme 125R IBS",         onRoad: 108088 },
-    { name: "Xtreme 125R ABS",         onRoad: 113247 },
-    { name: "Xtreme 125R ABS DC",      onRoad: 126275 },
-    { name: "Xtreme 160R 2V SD",       onRoad: 130320 },
-    { name: "Xtreme 160R 2V DD",       onRoad: 135224 },
-    { name: "Xtreme 160R 4V",          onRoad: 161109 },
-    { name: "Pleasure+ VX",            onRoad: 89023 },
-    { name: "Pleasure XTEC",           onRoad: 93177 },
-    { name: "Destini 110 VX",          onRoad: 89547 },
-    { name: "Destini 110 ZX",          onRoad: 98775 },
-    { name: "Destini Prime",           onRoad: 90841 },
-    { name: "Destini 125 VX",          onRoad: 95857 },
-    { name: "Destini 125 ZX",          onRoad: 106122 },
-    { name: "Destini 125 ZX+",         onRoad: 107287 },
-    { name: "Xoom 125 VX",             onRoad: 103178 },
-    { name: "Xoom 125 ZX",             onRoad: 110647 },
-  ];
+  const variants = pricedVariants();
   const downs = [20000, 25000, 30000, 50000, 80000];
   const tenures = [12, 18, 24, 36];
   const out: string[] = [];
@@ -1203,76 +1174,8 @@ function buildEmiTable(): string {
 }
 const _EMI_TABLE = buildEmiTable();
 
-// ─── Default KB (unchanged from original, fuel updated) ─────────────────────
-const DEFAULT_HERO_KNOWLEDGE = `
-[SHOWROOM DETAILS]
-Shubham Motors, authorised Hero MotoCorp dealership, Lal Kothi, Tonk Road, Jaipur.
-Open Mon–Sat 9AM–7PM, Sunday 10AM–5PM. Test rides available daily.
-
-[MODEL FEATURES — never deny these]
-Glamour X (125cc): LED headlamp, digital-analog cluster, i3S idle stop-start, COMBI BRAKE, tubeless tyres. Glamour X DSS variant includes CRUISE CONTROL — YES, confirm DSS if customer asks cruise control. DRS variant may not have cruise — clarify variant.
-Super Splendor XTEC: XTEC tech, DSS with extra comfort features.
-Xtreme 125R / 160R: sporty posture, ABS on higher variants.
-
-[REGISTRATION — taxi, commercial, BH number]
-Private registration included in on-road price (RTO + insurance per variant).
-Taxi / commercial registration: YES on eligible Hero models under Rajasthan RTO rules — commercial permit + commercial insurance extra. Shubham Motors RTO desk assists. Never flat-refuse; ask model + city of use.
-BH (Bharat) series plate: for eligible inter-state portability (MoRTH/RTO rules). Dealership guides documents — ask salaried vs business, never say "impossible" without checking.
-
-[PRICES — ON-ROAD JAIPUR, ₹ — as of 16-May-2026. Always quote on-road by default.]
-
-100cc BIKES
-  HF Deluxe Kick (OBD-2)              74,698
-  HF Deluxe DRS (OBD-2)               77,423
-  HF Deluxe DRS All Black             79,100
-  HF Deluxe DRS i3S                   79,578
-  HF Deluxe Pro                       83,348
-  Splendor AHO (OBD-2)                91,272
-  Splendor i3S (OBD-2)                92,564
-  Splendor i3S Additional             94,815
-  Splendor XTEC (OBD-2)               95,377
-  Splendor XTEC Disc                  98,695
-  Splendor+ XTEC 2.0                  97,973
-  Splendor+ 01                        92,693
-  Passion Plus (OBD-2)                94,605
-
-125cc BIKES
-  Super Splendor XTEC (OBD-2)         98,169
-  Super Splendor XTEC DSS             1,02,777
-  Glamour X DRS Self                  1,04,555
-  Glamour X DSS Self                  1,11,587
-  Xtreme 125R IBS                     1,08,088
-  Xtreme 125R ABS                     1,13,247
-  Xtreme 125R ABS Dual Channel        1,26,275
-
-160cc+ SPORTY BIKES
-  Xtreme 160R 2V Single Disc          1,30,320
-  Xtreme 160R 2V Double Disc          1,35,224
-  Xtreme 160R 4V                      1,61,109
-
-110cc SCOOTERS
-  Destini 110 VX                      89,547
-  Destini 110 ZX                      98,775
-  Destini Prime (OBD-2)               90,841
-  Pleasure+ VX-Fi Digi-Analog         89,023
-  Pleasure XTEC                       93,177
-
-125cc SCOOTERS
-  Xoom 125 VX                         1,03,178
-  Xoom 125 ZX                         1,10,647
-  Destini 125 VX New                  95,857
-  Destini 125 ZX New                  1,06,122
-  Destini 125 ZX+ New                 1,07,287
-
-[CURRENTLY IN STOCK — high availability]
-  HF Deluxe (multiple colours, 100+ units)
-  Splendor Plus (multiple colours, 100+ units), Splendor+ XTEC (20+ units)
-  Passion Plus, Super Splendor XTEC
-  Glamour X (Drum + Disc, multiple colours)
-  Xtreme 125R (ABS + IBS, multiple colours, 50+ units)
-  Xtreme 160R 2V & 4V
-  Destini 110, Destini 125, Destini Prime, Pleasure+, Xoom 125
-For any model not listed above, say "main exact colour stock confirm karke batati hoon" — never flat-refuse.
+// Catalog + EMI table share @workspace/db/heroCatalog (Jaipur on-road as of 16-May-2026).
+const DEFAULT_HERO_KNOWLEDGE = `${formatDefaultHeroKnowledge()}
 
 [PRECOMPUTED EMI TABLE — READ THESE NUMBERS DIRECTLY, NEVER COMPUTE]
 9% p.a. reference rate. ALWAYS quote with disclaimer:
@@ -1283,18 +1186,7 @@ Procedure when customer asks "EMI kitna":
   3. Read the number. Quote it. NEVER add, subtract, multiply, or estimate yourself.
   4. If customer's down or tenure doesn't match a row → quote closest row + say "approximate hisaab se".
 
-${_EMI_TABLE}
-
-[OFFERS — always-available levers, never say "no offer"]
-1. FINANCE — EMI from ₹1,590/month (₹50k principal, 36mo @ 9% reference). Zero processing fee on Hero FinCorp. 30-min approval.
-2. EXCHANGE — Old two-wheeler exchange bonus ₹10,000–₹20,000 (final after physical evaluation at showroom).
-3. ACCESSORIES — Free 1st service + helmet on most commuter models.
-4. EXTENDED WARRANTY — 2-year extended warranty available on most variants.
-For specific cash discounts / festival schemes → check admin KB or [TRANSFER] to sales.
-
-[SHOWROOM CONTACT]
-Jaipur, Rajasthan. Test rides daily 9AM–7PM. Walk-in preferred — book a slot via WhatsApp for priority.
-`.trim();
+${_EMI_TABLE}`.trim();
 
 // ─── Call intent analysis ─────────────────────────────────────────────────────
 // IMPROVED: Added competitorMentioned, competitorReason, familyInfo, buyingTimeline.

@@ -344,8 +344,8 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
   session.transcript.push(`Agent: ${greeting}`);
   session.history.push({ role: "assistant", content: greeting });
   session.lastAgentSpokeAt = Date.now();
-  // PROACTIVE: if customer doesn't respond within 8s of greeting, Sakshi speaks first
-  scheduleProactiveNudge(ws, session, 6000);
+  // Wait ~10s after greeting before a proactive follow-up (was 6s — felt pushy).
+  scheduleProactiveNudge(ws, session, 10000);
 
   const cachedPcm = GREETING_CACHE.get(greeting);
   if (cachedPcm) {
@@ -627,7 +627,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       session.history.push({ role: "assistant", content: fastWithFollowUp });
       session.transcript.push(`Agent: ${fastWithFollowUp}`);
       session.lastAgentSpokeAt = Date.now();
-      scheduleProactiveNudge(ws, session, 4500);
+      scheduleProactiveNudge(ws, session, 8000);
     }
     logger.info({ callSid: session.callSid, intent: fastMeta?.name, agentText: actuallyPlayed ? fastWithFollowUp : "", played: actuallyPlayed ? 1 : 0, source: "fastpath" }, "Agent reply");
     return;
@@ -655,7 +655,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const myGen = ++session.ttsGen;
 
   // Conditional thinking filler — only if first sentence takes >900ms (reduced, not every turn).
-  const FILLER_DELAY_MS = 900;
+  const FILLER_DELAY_MS = 2200;
   const fillerText = pickThinkingFiller(correctedText, session.turn);
   let firstSentenceReady = false;
   const fillerDone: Promise<void> = fillerText
@@ -735,7 +735,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   // PROACTIVE: re-arm — if customer is silent ~4.5s after agent finishes, Sakshi continues
   session.lastAgentSpokeAt = Date.now();
-  scheduleProactiveNudge(ws, session, 4500);
+  scheduleProactiveNudge(ws, session, 8000);
 
   // Hot-lead detection
   const lower = customerText.toLowerCase();
@@ -765,7 +765,7 @@ function cancelProactiveTimer(session: Session): void {
 
 function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number): void {
   cancelProactiveTimer(session);
-  if (session.isClosed || session.proactiveCount >= 4) return;
+  if (session.isClosed || session.proactiveCount >= 2) return;
 
   session.proactiveTimer = setTimeout(async () => {
     session.proactiveTimer = null;
@@ -797,7 +797,7 @@ function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number
         session.history.push({ role: "assistant", content: msg });
         session.transcript.push(`Agent[proactive]: ${msg}`);
         session.lastAgentSpokeAt = Date.now();
-        scheduleProactiveNudge(ws, session, 6000); // nudge again in 8s if still silent
+        scheduleProactiveNudge(ws, session, 8000);
       }
     } catch (err) {
       logger.error({ err }, "Proactive nudge TTS failed");
