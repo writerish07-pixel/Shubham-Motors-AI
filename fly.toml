@@ -2,7 +2,7 @@
 # Deploy: fly launch --copy-config  (first time) then fly deploy
 # Secrets: see .env.example / docs/WHAT_I_NEED.md
 
-app = "shubham-motors-sakshi"
+app = "shubham-motors-ai"
 primary_region = "bom"
 
 [build]

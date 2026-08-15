@@ -14,7 +14,7 @@ Cutover checklist and secrets: **`docs/WHAT_I_NEED.md`**. I cannot deploy until 
 
 ```bash
 # after fly auth and secrets
-fly launch --copy-config --yes     # first time only, app name in fly.toml
+fly launch --copy-config --yes     # first time only; app name is shubham-motors-ai
 fly secrets set DATABASE_URL=... ADMIN_TOKEN=... SARVAM_API_KEY=... # etc
 fly deploy
 ```
