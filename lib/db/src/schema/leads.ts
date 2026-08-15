@@ -67,6 +67,10 @@ export const leadsTable = pgTable("leads", {
    *  Hard gate: the auto-dialer and instant-call trigger must NEVER dial this lead. */
   doNotCall: boolean("do_not_call").notNull().default(false),
 
+  /** National Do Not Call / NCPR registry status: unknown | clear | registered.
+   *  Dialer skips `registered`. When NCPR_REQUIRE_CLEAR=1 it also skips `unknown`. */
+  ncprStatus: text("ncpr_status").notNull().default("unknown"),
+
   /** Confirmed showroom visit / test ride appointment (from call analysis) */
   visitScheduledAt: timestamp("visit_scheduled_at", { withTimezone: true }),
   /** When the day-of WhatsApp visit reminder was sent — booked-but-no-show killer */

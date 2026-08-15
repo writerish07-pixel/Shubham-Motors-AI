@@ -1,7 +1,7 @@
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard, Users, Phone, Calendar, BookOpen,
-  Settings, Bike, Menu, X, PhoneCall, Megaphone
+  Settings, Bike, Menu, X, PhoneCall, Megaphone, CalendarClock, ClipboardCheck
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,8 @@ const navItems = [
   { path: "/calls", label: "Call Logs", icon: Phone },
   { path: "/followups", label: "Follow-ups", icon: Calendar },
   { path: "/campaigns", label: "Campaigns", icon: Megaphone },
+  { path: "/visits", label: "Visits", icon: CalendarClock },
+  { path: "/shadow", label: "Shadow", icon: ClipboardCheck },
   { path: "/knowledge", label: "Knowledge Base", icon: BookOpen },
   { path: "/settings", label: "Settings", icon: Settings },
 ];

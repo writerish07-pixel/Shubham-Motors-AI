@@ -9,6 +9,8 @@ import webhooksRouter from "./webhooks";
 import schedulerRouter from "./scheduler";
 import campaignsRouter from "./campaigns";
 import contactsRouter from "./contacts";
+import visitsRouter from "./visits";
+import shadowRouter from "./shadow";
 
 const router: IRouter = Router();
 
@@ -22,5 +24,7 @@ router.use(webhooksRouter);
 router.use(schedulerRouter);
 router.use(campaignsRouter);
 router.use(contactsRouter);
+router.use(visitsRouter);
+router.use(shadowRouter);
 
 export default router;

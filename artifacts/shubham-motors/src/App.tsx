@@ -10,6 +10,8 @@ import Calls from "@/pages/Calls";
 import CallDetail from "@/pages/CallDetail";
 import Followups from "@/pages/Followups";
 import Campaigns from "@/pages/Campaigns";
+import Visits from "@/pages/Visits";
+import Shadow from "@/pages/Shadow";
 import Knowledge from "@/pages/Knowledge";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -29,6 +31,8 @@ function Router() {
         <Route path="/calls/:id" component={CallDetail} />
         <Route path="/followups" component={Followups} />
         <Route path="/campaigns" component={Campaigns} />
+        <Route path="/visits" component={Visits} />
+        <Route path="/shadow" component={Shadow} />
         <Route path="/knowledge" component={Knowledge} />
         <Route path="/settings" component={Settings} />
         <Route component={NotFound} />

@@ -20,11 +20,14 @@ export default function Settings() {
   const priceInputRef = useRef<HTMLInputElement>(null);
   const offerInputRef = useRef<HTMLInputElement>(null);
 
+  const [health, setHealth] = useState<{ replacementMode?: string; whatsappTemplatesOnly?: boolean; ncprRequireClear?: boolean } | null>(null);
+
   useEffect(() => {
     setAdminToken(localStorage.getItem(ADMIN_TOKEN_KEY) ?? "");
     setLastStock(localStorage.getItem("shubham_last_stock_upload") ?? "");
     setLastPrice(localStorage.getItem("shubham_last_price_upload") ?? "");
     setLastOffer(localStorage.getItem("shubham_last_offer_upload") ?? "");
+    fetch("/api/healthz").then((r) => r.json()).then(setHealth).catch(() => {});
   }, []);
 
   function saveToken() {
@@ -92,6 +95,30 @@ export default function Settings() {
       <div>
         <h1 className="text-xl font-bold flex items-center gap-2"><Settings2 size={20} />Settings</h1>
         <p className="text-xs text-muted-foreground mt-1">Configure your AI voice agent integrations and update product data</p>
+      </div>
+
+      {/* ── REPLACEMENT / COMPLIANCE ──────────────────────────────────────── */}
+      <div className="bg-card border border-card-border rounded-lg p-5 space-y-2">
+        <div className="text-sm font-semibold">Replacement &amp; compliance</div>
+        <div className="text-xs text-muted-foreground">
+          Live from the API. Change with Fly secrets: <code className="font-mono">REPLACEMENT_MODE</code> (shadow | inbound | full),
+          {" "}<code className="font-mono">NCPR_REQUIRE_CLEAR=1</code>, <code className="font-mono">WHATSAPP_TEMPLATES_ONLY=1</code>,
+          {" "}<code className="font-mono">WHATSAPP_TEMPLATE_FOLLOWUP</code>.
+        </div>
+        <div className="grid grid-cols-3 gap-2 pt-1 text-xs">
+          <div className="rounded-md border border-border p-2">
+            <div className="text-muted-foreground">Mode</div>
+            <div className="font-semibold">{health?.replacementMode ?? "…"}</div>
+          </div>
+          <div className="rounded-md border border-border p-2">
+            <div className="text-muted-foreground">WhatsApp templates</div>
+            <div className="font-semibold">{health?.whatsappTemplatesOnly ? "required" : "freeform ok"}</div>
+          </div>
+          <div className="rounded-md border border-border p-2">
+            <div className="text-muted-foreground">NCPR</div>
+            <div className="font-semibold">{health?.ncprRequireClear ? "must be clear" : "skip registered only"}</div>
+          </div>
+        </div>
       </div>
 
       {/* ── SALES & FINANCE TRANSFER CONTACTS ───────────────────────────── */}

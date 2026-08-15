@@ -1,6 +1,7 @@
 import axios from "axios";
 import { logger } from "./logger";
 import { withRetry } from "./resilience";
+import { whatsappTemplatesOnly } from "./agentTools";
 
 const BOTSPACE_BASE = "https://api.botspace.io/api";
 
@@ -13,9 +14,63 @@ function botspace() {
   };
 }
 
+export async function sendWhatsAppTemplate(
+  phone: string,
+  templateName: string,
+  bodyParams: string[],
+  languageCode = "hi",
+): Promise<boolean> {
+  const normalizedPhone = normalizePhone(phone);
+  const { apiKey, phoneId } = botspace();
+  if (!apiKey || !phoneId || !templateName) return false;
+  try {
+    const response = await withRetry(
+      () =>
+        axios.post(
+          `${BOTSPACE_BASE}/v1/${phoneId}/messages`,
+          {
+            to: normalizedPhone,
+            type: "template",
+            template: {
+              name: templateName,
+              language: { code: languageCode },
+              components: bodyParams.length
+                ? [{
+                    type: "body",
+                    parameters: bodyParams.slice(0, 8).map((text) => ({ type: "text", text: String(text).slice(0, 500) })),
+                  }]
+                : [],
+            },
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            timeout: 25000,
+          },
+        ),
+      { label: "whatsapp.sendTemplate" },
+    );
+    logger.info({ phone: normalizedPhone, templateName, status: response.status }, "WhatsApp template sent");
+    return true;
+  } catch (err) {
+    logger.error({ err, phone, templateName }, "Failed to send WhatsApp template");
+    return false;
+  }
+}
+
 export async function sendWhatsAppMessage(phone: string, message: string): Promise<boolean> {
   const normalizedPhone = normalizePhone(phone);
   const { apiKey, phoneId } = botspace();
+  if (whatsappTemplatesOnly()) {
+    const name = process.env.WHATSAPP_TEMPLATE_FOLLOWUP ?? "";
+    if (!name) {
+      logger.warn({ phone: normalizedPhone }, "WHATSAPP_TEMPLATES_ONLY set but WHATSAPP_TEMPLATE_FOLLOWUP missing — skip freeform");
+      return false;
+    }
+    return sendWhatsAppTemplate(normalizedPhone, name, [message.slice(0, 500)]);
+  }
   try {
     const response = await withRetry(
       () =>
@@ -108,6 +163,15 @@ export async function sendBrochureWhatsApp(
     const caption = isHindi
       ? `नमस्ते ${nameStr ? nameStr + " जी" : ""}! Hero *${modelName}* की पूरी जानकारी भेज रही हूँ। Test ride के लिए शुभम मोटर्स में पधारें! 🏍️`
       : `Hi ${nameStr || "there"}! Here's the brochure for the *Hero ${modelName}* as discussed. Visit Shubham Motors for a test ride! 🏍️`;
+
+    if (whatsappTemplatesOnly()) {
+      const tpl = process.env.WHATSAPP_TEMPLATE_BROCHURE ?? process.env.WHATSAPP_TEMPLATE_FOLLOWUP ?? "";
+      if (!tpl) {
+        logger.warn({ phone: normalizedPhone }, "templates-only: no brochure template — skip");
+        return false;
+      }
+      return sendWhatsAppTemplate(normalizedPhone, tpl, [nameStr || "ji", modelName]);
+    }
 
     await withRetry(
       () =>

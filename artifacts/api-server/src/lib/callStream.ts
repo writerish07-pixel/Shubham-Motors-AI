@@ -46,6 +46,8 @@ import { ensureSalesFollowUp } from "./salesFollowUp";
 import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
+import { isBackchannel, parseAndStripTags, type AgentTag } from "./agentTools";
+import { executeAgentTools } from "./agentActions";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
   const n = buf.length >> 1;
@@ -62,7 +64,7 @@ import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 const SILENCE_RMS = 0.008;
-const SILENCE_CHUNKS = 12;        // 240 ms silence → trigger STT
+const SILENCE_CHUNKS = Number(process.env.VOICE_SILENCE_CHUNKS ?? 8); // ~160 ms EOU @ 20 ms
 const MIN_SPEECH_CHUNKS = 8;      // 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 12 s max before forced trigger
 const STT_SAMPLE_RATE = 16000;
@@ -71,7 +73,7 @@ const CHUNK_BYTES = 320;          // 20 ms @ 8 kHz × 2 bytes/sample
 
 // ── Barge-in / echo-guard ──────────────────────────────────────────────────────
 const BARGE_IN_RMS = SILENCE_RMS * 12;   // 0.096
-const BARGE_IN_FRAMES = 10;
+const BARGE_IN_FRAMES = Number(process.env.VOICE_BARGE_FRAMES ?? 18); // ~360 ms — haan/achha must not steal the floor
 const BARGE_IN_GRACE_MS = 400;
 
 // ── Per-call session ──────────────────────────────────────────────────────────
@@ -514,6 +516,14 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.cost.addSttSamples(pcm16k.length, STT_SAMPLE_RATE);
 
   logger.info({ callSid: session.callSid, customerText }, "STT result");
+
+  // Backchannel (haan / achha / ji) must not start an LLM turn or steal the floor.
+  if (isBackchannel(customerText)) {
+    session.transcript.push(`Customer: ${customerText} [backchannel]`);
+    logger.info({ callSid: session.callSid, customerText }, "Backchannel — keeping floor");
+    return;
+  }
+
   session.transcript.push(`Customer: ${customerText}`);
 
   // Language detection on first turn
@@ -655,7 +665,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const myGen = ++session.ttsGen;
 
   // Conditional thinking filler — only if first sentence takes >900ms (reduced, not every turn).
-  const FILLER_DELAY_MS = 2200;
+  const FILLER_DELAY_MS = Number(process.env.VOICE_FILLER_DELAY_MS ?? 700);
   const fillerText = pickThinkingFiller(correctedText, session.turn);
   let firstSentenceReady = false;
   const fillerDone: Promise<void> = fillerText
@@ -674,6 +684,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   let attemptedCount = 0;
   let ttsFailures = 0;
   const MAX_REPLY_SENTENCES = 3;
+  const collectedTags: AgentTag[] = [];
 
   try {
     for await (const sentence of generateAgentReplyStream(
@@ -690,12 +701,18 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       session.nameNeedsConfirmation && !session.nameConfirmed,
     )) {
       if (session.ttsAbort || session.isClosed) break;
-      if (/^\s*\[TRANSFER/i.test(sentence)) { transferText = sentence; break; }
+      const parsed = parseAndStripTags(sentence);
+      collectedTags.push(...parsed.tags);
+      if (parsed.tags.some((t) => t.kind === "TRANSFER")) {
+        transferText = sentence;
+        if (!parsed.spoken) break;
+      }
+      if (!parsed.spoken) continue;
       attemptedCount++;
-      session.cost.addTtsText(sentence);
+      session.cost.addTtsText(parsed.spoken);
       if (attemptedCount === 1) session.cost.addLlmCall("mini");
       const isFirstSentence = attemptedCount === 1;
-      const myTts = synthesizeTts(sentence, session.language);
+      const myTts = synthesizeTts(parsed.spoken, session.language);
       const prev = playChain;
       playChain = (async () => {
         const pcm = await myTts;
@@ -704,7 +721,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         if (!pcm) { ttsFailures++; return; }
         if (session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
         await playPcm8k(ws, session.streamSid, pcm, session);
-        if (!session.ttsAbort && session.ttsGen === myGen) played.push(sentence);
+        if (!session.ttsAbort && session.ttsGen === myGen) played.push(parsed.spoken);
       })();
       if (attemptedCount >= MAX_REPLY_SENTENCES) break;
     }
@@ -726,10 +743,28 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     session.history.push({ role: "assistant", content: transferText });
     session.transcript.push(`Agent[tag]: ${transferText}`);
   }
-  logger.info({ callSid: session.callSid, agentText, attempted: attemptedCount, played: played.length, ttsFailures, transfer: !!transferText }, "Agent reply");
+  logger.info({ callSid: session.callSid, agentText, attempted: attemptedCount, played: played.length, ttsFailures, transfer: !!transferText, tags: collectedTags.map((t) => t.kind) }, "Agent reply");
 
-  if (/^\s*\[TRANSFER/i.test(agentText)) {
-    await runTransfer(ws, session, agentText);
+  const actionTags = collectedTags.filter((t) => t.kind !== "TRANSFER");
+  if (actionTags.length > 0 && session.leadId) {
+    try {
+      const tools = await executeAgentTools(actionTags, {
+        leadId: session.leadId,
+        callSid: session.callSid,
+        language: session.language,
+        customerText: correctedText,
+        leadName: session.leadName,
+      });
+      if (tools.visitBookedAt) {
+        session.transcript.push(`Agent[tag]: [VISIT] ${tools.visitBookedAt.toISOString()}`);
+      }
+    } catch (err) {
+      logger.warn({ err, callSid: session.callSid }, "Agent tools failed");
+    }
+  }
+
+  if (transferText || collectedTags.some((t) => t.kind === "TRANSFER")) {
+    await runTransfer(ws, session, transferText ?? "[TRANSFER]");
     return;
   }
 

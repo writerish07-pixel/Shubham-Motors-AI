@@ -6,3 +6,6 @@ export * from "./campaigns";
 export * from "./campaignRecipients";
 export * from "./contacts";
 export * from "./financerBanks";
+export * from "./visitSlots";
+export * from "./visitBookings";
+export * from "./shadowScores";
