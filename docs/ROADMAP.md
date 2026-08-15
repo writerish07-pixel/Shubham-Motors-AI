@@ -8,6 +8,7 @@ This document answers two things: what this repository actually is, and what to 
 
 Related docs:
 
+- `docs/PRODUCTION_AUDIT.md` — **August 2026 macro/micro audit vs market voice agents** (use this for production-grade gaps)
 - `docs/GROWTH_OS_V2.md` — Phase 1 audit + relationship/revenue intelligence increment
 - `docs/PRODUCTION_HARDENING.md` — reliability, security, and scale-out findings
 - `attached_assets/Shubham-Motors-AI-Audit-and-Fixes-Report_*.md` — June 2026 production-fix pass
@@ -199,9 +200,11 @@ Order is **value and risk**, not calendar. Stay additive. Preserve every existin
 
 ### Now — make shipped intelligence usable and the call path measurable
 
+Full P0 list (latency, barge-in truncate, NCPR, WhatsApp templates, signed webhooks) is in `docs/PRODUCTION_AUDIT.md` §6 Wave A. Immediate coding order:
+
 1. **CRM intelligence UI + OpenAPI sync** (§4.1, §4.3). Dealer-visible Growth OS.
-2. **Wire `StageTimer` through `callStream`** and persist a per-call timing/quality blob (§4.2).
-3. **Exotel webhook verification** (IP allowlist and/or shared secret).
+2. **Wire `StageTimer` through `callStream`** and persist a per-call timing/quality blob (§4.2). Change the SLO from 3 s to **p50 < 800 ms**.
+3. **Exotel webhook hardening** — IP allowlist / shared secret, and **stop taking raw `?to=` on dial-agent.xml**.
 4. **Rate limiting** on webhooks and outbound dial.
 
 Exit criteria: a GM can open the dashboard and see pipeline ₹ and at-risk relationships; a live call emits per-stage timings; spoofed webhooks are rejected.

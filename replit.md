@@ -2,7 +2,7 @@
 
 Hindi/Hinglish voice sales agent and dealer CRM for Shubham Motors (Hero MotoCorp, Jaipur). Customers call or get called back; Sakshi discovers intent, quotes real on-road prices and precomputed EMIs, books test rides, and writes the CRM. After the call: WhatsApp summary, follow-up scheduling, relationship/revenue scores.
 
-See `docs/ROADMAP.md` for the product map and what to build next. `docs/GROWTH_OS_V2.md` and `docs/PRODUCTION_HARDENING.md` cover the intelligence layer and production audit.
+See `docs/ROADMAP.md` for the product map and what to build next. `docs/PRODUCTION_AUDIT.md` is the August 2026 market + macro/micro production-grade audit. `docs/GROWTH_OS_V2.md` and `docs/PRODUCTION_HARDENING.md` cover the intelligence layer and the June reliability pass.
 
 ## Run & Operate
 
@@ -79,6 +79,7 @@ See `docs/ROADMAP.md` for the product map and what to build next. `docs/GROWTH_O
 ## Pointers
 
 - Roadmap: `docs/ROADMAP.md`
+- Production-grade audit (market + gaps): `docs/PRODUCTION_AUDIT.md`
 - Growth OS increment: `docs/GROWTH_OS_V2.md`
 - Hardening report: `docs/PRODUCTION_HARDENING.md`
 - Agent invariants: `.agents/memory/MEMORY.md`
