@@ -8,11 +8,8 @@ import { resolveOutboundFollowupOutcome } from "../lib/scheduler";
 import { knowledgeTable } from "@workspace/db";
 import { logger } from "../lib/logger";
 import { findOrCreateLead } from "../lib/leadLookup";
-import {
-  extractDialWhomNumber,
-  resolveConnectNumbers,
-  resolveTransferredToLabel,
-} from "../lib/humanTransfer";
+import { extractDialWhomNumber, resolveConnectNumbers, resolveTransferredToLabel } from "../lib/humanTransfer";
+import { ingestExotelRecording } from "../lib/recordingIngest";
 import axios from "axios";
 import { sql } from "drizzle-orm";
 
@@ -449,6 +446,12 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
   }
 
   conversations.delete(CallSid);
+  const recordingUrl = String(params.RecordingUrl ?? params.recordingUrl ?? params.RecordUrl ?? "");
+  if (["completed", "missed"].includes(dbStatus) || callRecord.transferredTo) {
+    void ingestExotelRecording(CallSid, recordingUrl).catch((err) => {
+      req.log.warn({ err, CallSid }, "Recording ingest failed");
+    });
+  }
   res.json({ received: true });
 });
 

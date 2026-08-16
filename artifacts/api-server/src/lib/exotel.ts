@@ -104,3 +104,36 @@ export async function transferCallToAgent(callSid: string, agentNumber: string):
     return false;
   }
 }
+
+export async function fetchCallRecordingUrl(callSid: string): Promise<string> {
+  const { apiKey, apiToken, base } = creds();
+  if (!callSid || !apiKey || !apiToken) return "";
+  try {
+    const response = await axios.get(`${base}/Calls/${callSid}.json`, {
+      auth: { username: apiKey, password: apiToken },
+      timeout: 15000,
+    });
+    const call = response.data?.Call ?? response.data?.call ?? {};
+    return String(call.RecordingUrl ?? call.recording_url ?? call.Uri ?? "").trim();
+  } catch (err: unknown) {
+    const ae = err as { response?: { status?: number } };
+    logger.warn({ httpStatus: ae.response?.status, callSid }, "Failed to fetch Exotel call recording URL");
+    return "";
+  }
+}
+
+export async function downloadExotelMedia(url: string): Promise<Buffer | null> {
+  const { apiKey, apiToken } = creds();
+  if (!url) return null;
+  try {
+    const response = await axios.get(url, {
+      auth: { username: apiKey, password: apiToken },
+      responseType: "arraybuffer",
+      timeout: 30000,
+    });
+    return Buffer.from(response.data);
+  } catch (err: unknown) {
+    logger.warn({ err, url: url.slice(0, 80) }, "Failed to download Exotel recording");
+    return null;
+  }
+}

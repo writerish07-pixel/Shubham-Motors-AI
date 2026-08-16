@@ -41,8 +41,8 @@ export function isTimelineAnswer(text: string): boolean {
 
 /** Standard follow-up question when timeline is still unknown (turn 3+). */
 export function buyingTimelineQuestion(model?: string): string {
-  const modelBit = model ? ` ${model} ke liye` : "";
-  return `Ek important sawaal${modelBit} — aap bike kab tak lena plan kar rahe hain? Is hafte, is mahine, ya festival ke baad?`;
+  const modelBit = model ? ` ${model} के लिए` : "";
+  return `एक ज़रूरी सवाल${modelBit} — आप कब तक लेना चाहते हैं? इस हफ़्ते, इस महीने, या त्योहार के बाद?`;
 }
 
 export function buyingTimelineLabel(t: BuyingTimeline): string {

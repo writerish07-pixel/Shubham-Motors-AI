@@ -184,9 +184,13 @@ function leftoverLatinToHindi(text: string): string {
       rahegi: "रहेगी", rahega: "रहेगा", chahenge: "चाहेंगे", dekhna: "देखना",
       aap: "आप", kya: "क्या", aur: "और", ke: "के", ka: "का", ki: "की",
       styled: "स्टाइल", commuter: "कम्यूटर", youth: "युवा", sporty: "स्पोर्टी",
-      confirm: "कन्फर्म", please: "प्लीज़", actually: "असल में",
+      confirm: "कन्फर्म", please: "प्लीज़",       actually: "असल में",
       exactly: "एकदम", currently: "अभी", really: "सच में",
       plus: "प्लस", free: "फ्री", ride: "राइड",
+      sun: "सुन", pa: "पा", hain: "हैं",
+      main: "मैं", bol: "बोल", rahi: "रही", hoon: "हूँ",
+      koi: "कोई", bhi: "भी", baare: "बारे", batayein: "बताइए",
+      sawaal: "सवाल", dekh: "देख",
     };
     return extra[w.toLowerCase()] ?? w;
   });

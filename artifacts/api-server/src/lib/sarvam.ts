@@ -151,6 +151,38 @@ export async function speechToText(
   }
 }
 
+/** Full-call recording (mp3/wav) after human transfer — longer timeout than live turns. */
+export async function transcribeCallRecording(
+  audioBuf: Buffer,
+  language: string = "hi-IN",
+  mime = "audio/mpeg",
+): Promise<string> {
+  const k = whisperKey();
+  const ext = mime.includes("wav") ? "wav" : "mp3";
+  if (k) {
+    try {
+      const form = new FormData();
+      form.append("model", "whisper-1");
+      form.append("language", language.startsWith("en") ? "en" : "hi");
+      form.append("file", new Blob([new Uint8Array(audioBuf)], { type: mime }), `recording.${ext}`);
+      const response = await axios.post(
+        "https://api.openai.com/v1/audio/transcriptions",
+        form,
+        {
+          headers: { Authorization: `Bearer ${k}` },
+          timeout: 45_000,
+          ...KEEP_ALIVE,
+        },
+      );
+      const text = String(response.data?.text ?? "").trim();
+      if (text) return text;
+    } catch (err) {
+      logger.warn({ err }, "Whisper recording STT failed — trying Sarvam");
+    }
+  }
+  return speechToText(audioBuf, language);
+}
+
 // ── Public: textToSpeech ─────────────────────────────────────────────────────
 export async function textToSpeech(
   text: string,

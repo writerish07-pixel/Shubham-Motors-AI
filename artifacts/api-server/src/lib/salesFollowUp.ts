@@ -41,65 +41,76 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
 
   if (/cruise|glamour|dss|drs|centro|क्रूज|ग्लैमर/i.test(combined)) {
     if (!/dss|drs/i.test(customer)) {
-      return "Aap DRS dekh rahe hain ya DSS with cruise control?";
+      return "आप डी आर एस देख रहे हैं या क्रूज़ कंट्रोल वाला डी एस एस?";
     }
   }
 
   if (s.financeInterest) {
     if (/down|hajar|hazaar|lakh|lac|डाउन|हज़ार|लाख/i.test(customer)) {
-      return "24 mahine ya 36 mahine — kis tenure par EMI calculate karun?";
+      return "चौबीस महीने या छत्तीस — किस पर ई एम आई निकालूँ?";
     }
     if (model) {
-      return `Kitna down payment de sakte hain ${model} ke liye — main exact EMI bata deti hoon?`;
+      return `${model} के लिए कितना डाउन पेमेंट दे सकते हैं — मैं ई एम आई बता दूँ?`;
     }
-    return "Kitna down payment plan hai — main 24 aur 36 mahine ki EMI bata deti hoon?";
+    return "कितना डाउन पेमेंट सोच रहे हैं — मैं चौबीस और छत्तीस महीने की ई एम आई बता दूँ?";
   }
 
   if (/price|kitne|kimat|qeemat|कीमत|on.?road|rate/i.test(customer)) {
-    if (model) return `${model} ka test ride kab convenient hoga?`;
-    return "Kaun sa variant aapke liye suit karega?";
+    if (model) return `${model} की टेस्ट राइड कब ठीक रहेगी?`;
+    return "कौन सा वेरिएंट आपको सूट करेगा?";
   }
 
   if (/feature|mileage|spec|engine|warranty|माइलेज/i.test(customer)) {
-    if (model) return "Showroom pe dekhna chahenge ya pehle WhatsApp pe details bhej doon?";
-    return "Daily kitne km chalate hain — us hisaab se exact model suggest karungi?";
+    if (model) return "शोरूम पर देखना चाहेंगे या पहले वॉट्सऐप पर डिटेल भेज दूँ?";
+    return "रोज़ कितने किलोमीटर चलते हैं — उसी हिसाब से मॉडल बताऊँगी?";
   }
 
   if (stage === "booking" || stage === "ready") {
-    return "Test ride book kar doon — Saturday subah ya shaam suit karega?";
+    return "टेस्ट राइड बुक कर दूँ — शनिवार सुबह या शाम?";
   }
   if (stage === "planning" || (!s.buyingTimeline && (ctx.turn ?? 0) >= 3 && (s.segment || s.interestedModel))) {
     return buyingTimelineQuestion(model || undefined);
   }
   if (stage === "negotiating") {
-    return "EMI se comfortable hoga ya exchange option explore karein?";
+    return "ई एम आई से आराम रहेगा या एक्सचेंज भी देखें?";
   }
   if (stage === "shortlisting" && model) {
-    return `${model} pe test ride kar lenge — kaun sa din aayenge?`;
+    return `${model} की टेस्ट राइड कर लेंगे — कौन सा दिन आएँगे?`;
   }
   if (stage === "comparing") {
-    return "Aapke liye sabse important kya hai — mileage, style, ya EMI?";
+    return "आपके लिए सबसे ज़रूरी क्या है — माइलेज, स्टाइल, या ई एम आई?";
   }
 
-  if (!s.segment) return "Pehle ye bataiye — scooter chahiye ya bike?";
-  if (!s.km) return "Roz kitne km chalana padta hai approximately?";
+  if (!s.segment) return "पहले बताइए — स्कूटर चाहिए या बाइक?";
+  if (!s.km) return "रोज़ लगभग कितने किलोमीटर चलना पड़ता है?";
   if (s.segment?.startsWith("scooter") && s.familyUse === undefined) {
-    return "Sirf aap chalayenge ya family ke saath bhi?";
+    return "सिर्फ़ आप चलाएँगे या परिवार के साथ भी?";
   }
-  if (!s.budget) return "Budget cash mein hai ya EMI se lena chahenge?";
+  if (!s.budget) return "कैश में लेंगे या ई एम आई पर?";
   if (!s.interestedModel) {
     if (s.segment === "125cc") {
-      return "125cc mein style Glamour ya sporty Xtreme 125R — kya pasand aayega?";
+      return "एक सौ पच्चीस सीसी में स्टाइल ग्लैमर या स्पोर्टी एक्सट्रीम — क्या पसंद है?";
     }
     if (s.segment?.startsWith("scooter")) {
-      return "Destini family ke liye ya Xoom sporty look — kaun sa try karna hai?";
+      return "परिवार के लिए डेस्टिनी या स्पोर्टी ज़ूम — कौन सा ट्राई करें?";
     }
-    if (s.segment === "100cc") return "HF Deluxe mileage ke liye ya Splendor premium comfort — kaun sa?";
-    return "Kaun sa model naam se dekh rahe hain?";
+    if (s.segment === "100cc") return "माइलेज के लिए एच एफ डिलक्स या आराम के लिए स्प्लेंडर — कौन सा?";
+    return "कौन सा मॉडल नाम से देख रहे हैं?";
   }
 
-  if (model) return "Test ride ke liye kab aana convenient hoga?";
-  return "Aur kya jaanna chahenge — price, EMI, ya test ride?";
+  if (model) return "टेस्ट राइड के लिए कब आना ठीक रहेगा?";
+  return "और क्या जानना है — कीमत, ई एम आई, या टेस्ट राइड?";
+}
+
+/**
+ * Live call #12 spoke only "कोई बात नहीं" because we cut after sentence 1.
+ * Keep going until we have a question, two sentences, or a long enough turn.
+ */
+export function shouldSpeakAnotherSentence(spokenSoFar: string, attempted: number): boolean {
+  if (attempted >= 2) return false;
+  if (attempted >= 1 && endsWithQuestion(spokenSoFar)) return false;
+  if (attempted >= 1 && spokenSoFar.replace(/\s+/g, " ").trim().length >= 140) return false;
+  return true;
 }
 
 /** Append a follow-up question when the reply ends without one. */

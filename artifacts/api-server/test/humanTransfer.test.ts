@@ -130,3 +130,11 @@ test("prepareTtsText keeps a cruise line in Hindi accent", () => {
   assert.match(spoken, /क्रूज़ कंट्रोल|क्रूज़/);
   assert.doesNotMatch(spoken, /comfortable|highway ride/i);
 });
+
+test("prepareTtsText: old Latin proactive line is spoken as Hindi", () => {
+  const spoken = prepareTtsText(
+    "aap sun pa rahe hain? Main Shubham Motors se Sakshi bol rahi hoon — koi bhi Hero bike ya scooter ke baare mein batayein.",
+  );
+  assert.doesNotMatch(spoken, /aap sun pa rahe hain/i);
+  assert.match(spoken, /सुन|बाइक|स्कूटर|साक्षी|शुभम/);
+});
