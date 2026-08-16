@@ -18,6 +18,9 @@ import {
   applySessionLanguage,
   whatsappTemplatesOnly,
   bargeInArmed,
+  bargeInFramesNeeded,
+  bargeInRmsThreshold,
+  nextBargeInCount,
   clampSarvamTtsPace,
   mergeJsonStringLists,
 } from "../src/lib/agentTools";
@@ -151,11 +154,19 @@ test("self-learning auto-applies objections but not price corrections", () => {
   assert.equal(shouldAutoApplyLearning("missing_info", "ok", { KB_AUTO_LEARN: "0" }), false);
 });
 
-test("barge-in stays disarmed while TTS is synthesizing (no speakingStartedAt)", () => {
+test("barge-in stays disarmed during greeting TTS wait", () => {
   const now = 1_000_000;
-  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: undefined }, now), false);
-  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: 0 }, now), false);
+  assert.equal(
+    bargeInArmed({ isSpeaking: true, speakingStartedAt: undefined, greetingProtectedUntil: now + 25_000 }, now),
+    false,
+  );
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: 0, greetingProtectedUntil: now + 1000 }, now), false);
   assert.equal(bargeInArmed({ isSpeaking: false, speakingStartedAt: now - 2000 }, now), false);
+});
+
+test("mid-call barge-in is armed during TTS wait so the customer can interrupt", () => {
+  const now = 1_000_000;
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: undefined }, now), true);
 });
 
 test("barge-in grace window and greeting protection block abort", () => {
@@ -166,6 +177,16 @@ test("barge-in grace window and greeting protection block abort", () => {
     false,
   );
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000 }, now), true);
+});
+
+test("barge-in threshold is reachable for phone speech and count decays instead of resetting", () => {
+  assert.ok(bargeInRmsThreshold() < 0.06);
+  assert.ok(bargeInRmsThreshold() > 0.02);
+  assert.equal(bargeInFramesNeeded(), 8);
+  assert.equal(nextBargeInCount(0, 0.05, 0.04), 1);
+  assert.equal(nextBargeInCount(7, 0.05, 0.04), 8);
+  assert.equal(nextBargeInCount(7, 0.01, 0.04), 6);
+  assert.equal(nextBargeInCount(1, 0.0, 0.04), 0);
 });
 
 test("Sarvam TTS pace rejects NaN/0 so the API never gets a 400", () => {
