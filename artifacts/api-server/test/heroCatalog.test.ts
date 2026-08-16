@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HERO_VARIANTS, ON_ROAD_JAIPUR, knowledgeSeedRows, formatDefaultHeroKnowledge, formatDefaultHeroKnowledgeWithLiveEmi } from "@workspace/db/heroCatalog";
+import { HERO_VARIANTS, ON_ROAD_JAIPUR, knowledgeSeedRows, formatDefaultHeroKnowledge, formatDefaultHeroKnowledgeWithLiveEmi, kindForModelName, sanitizeIntentSummary } from "@workspace/db/heroCatalog";
 import { ON_ROAD_JAIPUR as EMI_PRICES } from "../src/lib/emiQuote";
 import { pickThinkingFiller } from "../src/lib/voiceFastPath";
 import { sanitizeAgentSpeech, prepareTtsText } from "../src/lib/ttsPrep";
@@ -56,4 +56,17 @@ test("prepareTtsText clips a late-call catalog dump at a Hindi sentence, not mid
   const spoken = prepareTtsText(dump);
   assert.ok(spoken.length <= 260);
   assert.ok(spoken.endsWith("।") || spoken.length < 80);
+});
+
+test("Glamour X and Super Splendor are bikes, Destini is a scooter", () => {
+  assert.equal(kindForModelName("Glamour X DSS"), "bike");
+  assert.equal(kindForModelName("Super Splendor"), "bike");
+  assert.equal(kindForModelName("Destini 125 ZX"), "scooter");
+});
+
+test("sanitizeIntentSummary: call-9 must not call Glamour a scooter", () => {
+  const raw = "The customer, Shivay, is very interested in purchasing a scooter, specifically the 'Glamour X DSS' or 'Super Splendor'.";
+  const fixed = sanitizeIntentSummary(raw, "Glamour X DSS");
+  assert.match(fixed, /bike/i);
+  assert.doesNotMatch(fixed, /purchasing a scooter/i);
 });
