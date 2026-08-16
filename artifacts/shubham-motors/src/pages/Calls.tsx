@@ -41,6 +41,7 @@ export default function Calls() {
                 <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider hidden md:table-cell">Duration</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider hidden md:table-cell">Language</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider hidden lg:table-cell">Score After</th>
+                <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider hidden lg:table-cell">Transferred To</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider hidden lg:table-cell">WhatsApp</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider hidden xl:table-cell">Summary</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Date</th>
@@ -50,7 +51,7 @@ export default function Calls() {
             <tbody className="divide-y divide-border">
               {isLoading ? (
                 Array.from({ length: 6 }).map((_, i) => (
-                  <tr key={i}><td colSpan={10} className="px-4 py-3"><div className="h-4 bg-muted rounded animate-pulse w-full" /></td></tr>
+                  <tr key={i}><td colSpan={11} className="px-4 py-3"><div className="h-4 bg-muted rounded animate-pulse w-full" /></td></tr>
                 ))
               ) : calls && calls.length > 0 ? calls.map((call) => (
                 <tr key={call.id} data-testid={`call-row-${call.id}`} className="hover:bg-muted/30 transition-colors group">
@@ -71,6 +72,9 @@ export default function Calls() {
                   <td className="px-4 py-3 text-muted-foreground hidden md:table-cell">{call.languageDetected ?? "—"}</td>
                   <td className="px-4 py-3 hidden lg:table-cell">{call.scoreAfterCall != null ? <ScoreBadge score={call.scoreAfterCall} /> : "—"}</td>
                   <td className="px-4 py-3 hidden lg:table-cell">
+                    <div className="text-xs max-w-[160px] truncate" title={call.transferredTo ?? undefined}>{call.transferredTo ?? "—"}</div>
+                  </td>
+                  <td className="px-4 py-3 hidden lg:table-cell">
                     {call.whatsappSent
                       ? <span className="flex items-center gap-1 text-green-400 text-xs"><MessageSquare size={12} />Sent</span>
                       : <span className="text-muted-foreground text-xs">No</span>}
@@ -90,7 +94,7 @@ export default function Calls() {
                   </td>
                 </tr>
               )) : (
-                <tr><td colSpan={10} className="px-4 py-12 text-center text-muted-foreground text-sm">No calls recorded yet.</td></tr>
+                <tr><td colSpan={11} className="px-4 py-12 text-center text-muted-foreground text-sm">No calls recorded yet.</td></tr>
               )}
             </tbody>
           </table>

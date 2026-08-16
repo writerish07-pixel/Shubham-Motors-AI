@@ -100,7 +100,7 @@ export default function ContactsManager() {
           <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center text-primary"><Users size={16} /></div>
           <div className="flex-1">
             <div className="text-sm font-semibold">Sales Team Transfer Numbers</div>
-            <div className="text-xs text-muted-foreground">When Sakshi says <code className="font-mono">[TRANSFER]</code>, call routes to the first active sales contact below.</div>
+            <div className="text-xs text-muted-foreground">Add every salesperson. When a customer asks for a human, all <strong>Active</strong> numbers ring together. Whoever picks up is saved on Call Detail → Transferred To.</div>
           </div>
         </div>
 

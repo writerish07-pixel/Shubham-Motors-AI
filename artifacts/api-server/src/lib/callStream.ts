@@ -52,8 +52,11 @@ import { executeAgentTools } from "./agentActions";
 import { prepareTtsText } from "./ttsPrep";
 import {
   bargeEnergyHits,
+  formatAnsweredTransfer,
+  formatQueuedTransfer,
   isCustomerAskingForHuman,
-  queueHumanTransfer,
+  queueHumanTransferTeam,
+  type TransferLeg,
 } from "./humanTransfer";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
@@ -1110,44 +1113,64 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
   const tag = (m?.[1] ?? "SALES").toUpperCase();
   const bankHint = m?.[2]?.trim().toUpperCase() ?? "";
 
-  let target: typeof contactsTable.$inferSelect | undefined;
   const contacts = await db.select().from(contactsTable);
   const active = contacts.filter(c => c.isActive);
+  let legs: TransferLeg[] = [];
   if (tag === "FINANCE") {
-    target = active.find(c => c.type === "finance" && bankHint && (c.bankName ?? "").toUpperCase().includes(bankHint))
-      ?? active.find(c => c.type === "finance");
+    const finance = active.filter(c => c.type === "finance");
+    const preferred = finance.find(c => bankHint && (c.bankName ?? "").toUpperCase().includes(bankHint))
+      ?? finance[0];
+    if (preferred) legs = [{ phone: preferred.phone, name: preferred.bankName ?? preferred.name }];
   } else {
-    target = active.find(c => c.type === "sales");
+    legs = active
+      .filter(c => c.type === "sales")
+      .map(c => ({ phone: c.phone, name: c.name }));
   }
-  const phone = target?.phone ?? process.env.SALES_TRANSFER_NUMBER ?? "";
-  const targetLabel = target
-    ? (target.type === "finance" ? (target.bankName ?? "फाइनेंस टीम") : target.name)
-    : "सीनियर सेल्स";
+  if (!legs.length && process.env.SALES_TRANSFER_NUMBER) {
+    legs = [{ phone: process.env.SALES_TRANSFER_NUMBER, name: tag === "FINANCE" ? "फाइनेंस टीम" : "सीनियर सेल्स" }];
+  }
 
+  const teamLabel = legs.map(l => l.name).filter(Boolean).join(", ") || "सेल्स टीम";
   const addrName = session.leadName === "Sir" ? "सर" : session.leadName + " जी";
   const handoff = tag === "FINANCE"
-    ? `एक मिनट ${addrName}, मैं आपको ${targetLabel} से जोड़ रही हूँ। लाइन पर रहिए।`
-    : `एक मिनट ${addrName}, मैं आपको हमारे सीनियर सेल्स ${target ? target.name : "एक्सपर्ट"} से जोड़ रही हूँ। लाइन पर रहिए।`;
+    ? `एक मिनट ${addrName}, मैं आपको ${teamLabel} से जोड़ रही हूँ। लाइन पर रहिए।`
+    : legs.length === 1
+      ? `एक मिनट ${addrName}, मैं आपको हमारे सीनियर सेल्स ${legs[0]!.name} से जोड़ रही हूँ। लाइन पर रहिए।`
+      : `एक मिनट ${addrName}, मैं आपको हमारे सेल्स टीम से जोड़ रही हूँ। जो भी एक्सपर्ट फ्री होगा, वो लाइन ले लेगा। लाइन पर रहिए।`;
   session.transcript.push(`Agent: ${handoff}`);
   await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
 
-  const queued = queueHumanTransfer(session.callSid, phone, targetLabel);
+  const queued = queueHumanTransferTeam(session.callSid, legs);
+  const transferRecord = legs.length === 1
+    ? formatAnsweredTransfer(legs[0]!.name, legs[0]!.phone)
+    : formatQueuedTransfer(legs);
+  if (session.callSid && legs.length) {
+    try {
+      await db.update(callsTable)
+        .set({ transferredTo: transferRecord })
+        .where(eq(callsTable.exotelCallSid, session.callSid));
+    } catch (err) {
+      logger.warn({ err, callSid: session.callSid }, "Failed to persist transferredTo on handoff");
+    }
+  }
+
   let transferred = false;
-  if (phone && session.callSid) {
+  const firstPhone = legs[0]?.phone ?? "";
+  if (legs.length === 1 && firstPhone && session.callSid) {
     await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-    transferred = await transferCallToAgent(session.callSid, phone);
+    transferred = await transferCallToAgent(session.callSid, firstPhone);
   }
 
   if (transferred) {
     session.transcript.push("Agent[tag]: transferred via Exotel Calls API");
-    logger.info({ callSid: session.callSid, tag, phoneQueued: queued }, "Human transfer via Exotel API");
+    logger.info({ callSid: session.callSid, tag, phoneQueued: queued, transferRecord }, "Human transfer via Exotel API");
     return;
   }
 
-  // End Voicebot so Exotel runs Next (Transfer / Connect applet) with the human number.
+  // End Voicebot so Exotel runs Next (Transfer → Connect applet) and rings the team.
   await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
   session.transcript.push("Agent[tag]: voicebot closed for Exotel Transfer applet");
-  logger.info({ callSid: session.callSid, tag, hadPhone: !!phone }, "Closing Voicebot WS for human Transfer applet");
+  logger.info({ callSid: session.callSid, tag, salesCount: legs.length, transferRecord }, "Closing Voicebot WS for human Transfer applet");
   session.isClosed = true;
   try { ws.close(); } catch { /* already closing */ }
 }

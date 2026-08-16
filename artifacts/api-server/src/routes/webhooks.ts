@@ -1,6 +1,6 @@
 import { Router, type IRouter, type Request } from "express";
 import { eq, desc, and, gte } from "drizzle-orm";
-import { db, callsTable, leadsTable, followupsTable, campaignRecipientsTable, campaignsTable } from "@workspace/db";
+import { db, callsTable, leadsTable, followupsTable, campaignRecipientsTable, campaignsTable, contactsTable } from "@workspace/db";
 import { generateAgentReply, analyzeCallIntent, learnFromTranscript, computeFollowupDate } from "../lib/openai";
 import { speechToText, detectLanguage } from "../lib/sarvam";
 import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "../lib/whatsapp";
@@ -8,7 +8,11 @@ import { resolveOutboundFollowupOutcome } from "../lib/scheduler";
 import { knowledgeTable } from "@workspace/db";
 import { logger } from "../lib/logger";
 import { findOrCreateLead } from "../lib/leadLookup";
-import { takeHumanTransfer } from "../lib/humanTransfer";
+import {
+  extractDialWhomNumber,
+  resolveConnectNumbers,
+  resolveTransferredToLabel,
+} from "../lib/humanTransfer";
 import axios from "axios";
 import { sql } from "drizzle-orm";
 
@@ -20,32 +24,45 @@ const router: IRouter = Router();
 // senior salesperson.
 router.all("/webhooks/exotel/dial-agent.xml", (req, res): void => {
   const params = { ...(req.query as Record<string, string>), ...(req.body ?? {}) };
-  const to = String(params.to ?? "").replace(/[^\d+]/g, "");
-  if (!to) {
+  const numbers = String(params.to ?? "")
+    .split(/[,;]+/)
+    .map((n) => n.replace(/[^\d+]/g, ""))
+    .filter(Boolean);
+  if (!numbers.length) {
     res.type("application/xml").send(exoml(sayTag("Transfer failed. Please call back. धन्यवाद।", "en")));
     return;
   }
-  res.type("application/xml").send(exoml(`<Dial>${escapeXml(to)}</Dial>`));
+  res.type("application/xml").send(exoml(dialNumbersXml(numbers)));
 });
 
 // Connect applet (after Voicebot): Exotel GETs this when the bot closes the WS.
 // JSON is what a dynamic Connect applet expects; XML Dial is the Stream-flow fallback.
-router.all("/webhooks/exotel/connect-agent", (req, res): void => {
+// Peek the queued team (do not consume) so Exotel retries still get every salesperson.
+router.all("/webhooks/exotel/connect-agent", async (req, res): Promise<void> => {
   const params = { ...(req.query as Record<string, string>), ...(req.body ?? {}) };
   const callSid = String(params.CallSid ?? params.call_sid ?? params.callSid ?? params.Sid ?? "");
-  const queued = takeHumanTransfer(callSid);
-  const fallback = String(process.env.SALES_TRANSFER_NUMBER ?? "").replace(/[^\d+]/g, "");
-  const to = queued?.phone || fallback;
-  if (!to) {
+  let contacts: Array<{ type: string; isActive: boolean; phone: string; name: string }> = [];
+  try {
+    contacts = await db.select().from(contactsTable);
+  } catch (err) {
+    req.log?.warn({ err, callSid }, "connect-agent: contacts lookup failed — using queue/fallback");
+  }
+  const numbers = resolveConnectNumbers({
+    callSid,
+    contacts,
+    fallback: process.env.SALES_TRANSFER_NUMBER ?? "",
+  });
+  if (!numbers.length) {
     res.type("application/xml").send(exoml(sayTag("माफ़ कीजिए, सेल्स एक्सपर्ट अभी उपलब्ध नहीं हैं। हम कॉल बैक करेंगे।")));
     return;
   }
-  const wantsJson = String(req.headers.accept ?? "").includes("json") || String(params.format ?? "") === "json";
-  if (wantsJson) {
-    res.json({ destination: { numbers: [to] } });
+  req.log?.info({ callSid, numbers }, "connect-agent destination numbers");
+  const wantsXml = String(req.headers.accept ?? "").includes("xml") || String(params.format ?? "") === "xml";
+  if (wantsXml) {
+    res.type("application/xml").send(exoml(dialNumbersXml(numbers)));
     return;
   }
-  res.type("application/xml").send(exoml(`<Dial>${escapeXml(to)}</Dial>`));
+  res.json({ fetch_after_attempt: false, destination: { numbers } });
 });
 
 // ── Helper: Exotel sends params as either query string (GET) or form body (POST)
@@ -65,6 +82,11 @@ function sayTag(text: string, language = "hi"): string {
 
 function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function dialNumbersXml(numbers: string[]): string {
+  if (numbers.length === 1) return `<Dial>${escapeXml(numbers[0]!)}</Dial>`;
+  return `<Dial>${numbers.map((n) => `<Number>${escapeXml(n)}</Number>`).join("")}</Dial>`;
 }
 
 // ── Helper: Record tag that calls back our recording endpoint
@@ -290,8 +312,9 @@ router.all("/webhooks/exotel/recording", async (req, res): Promise<void> => {
 router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
   const params = exoParams(req);
   const { CallSid, Status, Duration } = params;
+  const dialWhom = extractDialWhomNumber(params as Record<string, unknown>);
 
-  req.log.info({ CallSid, Status }, "Call status update");
+  req.log.info({ CallSid, Status, DialWhomNumber: dialWhom || params.DialWhomNumber, DialCallStatus: params.DialCallStatus }, "Call status update");
 
   if (!CallSid) {
     res.json({ received: true });
@@ -305,6 +328,21 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
     conversations.delete(CallSid);
     res.json({ received: true });
     return;
+  }
+
+  if (dialWhom) {
+    try {
+      const contacts = await db.select().from(contactsTable);
+      const label = resolveTransferredToLabel(params as Record<string, unknown>, contacts);
+      if (label) {
+        await db.update(callsTable)
+          .set({ transferredTo: label })
+          .where(eq(callsTable.exotelCallSid, CallSid));
+        req.log.info({ CallSid, transferredTo: label }, "Recorded who answered the transferred call");
+      }
+    } catch (err) {
+      req.log.warn({ err, CallSid, dialWhom }, "Failed to record DialWhomNumber on call");
+    }
   }
 
   const dbStatus = mapExotelStatus(Status ?? "");
