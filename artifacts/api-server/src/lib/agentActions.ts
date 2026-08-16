@@ -10,7 +10,7 @@ import {
   visitBookingsTable,
   visitSlotsTable,
 } from "@workspace/db";
-import { resolveModelOnRoad, formatEmiQuote } from "./emiQuote";
+import { resolveModelOnRoad, formatEmiQuote, DEFAULT_ANNUAL_RATE } from "./emiQuote";
 import {
   type AgentTag,
   exceedsFrequencyCap,
@@ -127,7 +127,9 @@ function quoteFromEmiTag(arg: string, customerText: string): string | null {
   if (!resolved) return null;
   const down = Number(parts[1]?.replace(/,/g, "")) || 25000;
   const months = Number(parts[2]) || 24;
-  return formatEmiQuote(resolved.model, resolved.onRoad, down, months);
+  const rateRaw = Number(parts[3]);
+  const rate = Number.isFinite(rateRaw) && rateRaw > 1 ? rateRaw / 100 : Number.isFinite(rateRaw) && rateRaw > 0 ? rateRaw : DEFAULT_ANNUAL_RATE;
+  return formatEmiQuote(resolved.model, resolved.onRoad, down, months, rate);
 }
 
 async function stockLine(query: string): Promise<string | null> {

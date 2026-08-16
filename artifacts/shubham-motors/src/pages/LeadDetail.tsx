@@ -152,29 +152,70 @@ export default function LeadDetail() {
           </div>
 
           {/* CRM Intelligence — populated by Sakshi from calls */}
-          {((lead as any).dailyKm || (lead as any).budget || (lead as any).familyInfo || (lead as any).currentVehicle || (lead as any).competitorMentioned || (lead as any).buyingTimeline || (lead as any).occupation) && (
-            <div className="bg-card border border-card-border rounded-lg p-4 space-y-2 text-sm">
-              <div className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">What Sakshi Learned</div>
-              {(lead as any).dailyKm && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Daily km</span><span>{(lead as any).dailyKm} km/day</span></div>}
-              {(lead as any).budget && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Budget</span><span>₹{((lead as any).budget as number).toLocaleString("en-IN")}</span></div>}
-              {(lead as any).currentVehicle && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Current vehicle</span><span>{(lead as any).currentVehicle}</span></div>}
-              {(lead as any).occupation && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Occupation</span><span>{(lead as any).occupation}</span></div>}
-              {(lead as any).buyingTimeline && <div className="flex justify-between"><span className="text-muted-foreground text-xs">Timeline</span><span className="capitalize">{(lead as any).buyingTimeline}</span></div>}
-              {(lead as any).competitorMentioned && (
-                <div className="pt-1 border-t border-border">
-                  <div className="text-muted-foreground text-xs mb-1">Comparing with</div>
-                  <div className="text-sm font-medium">{(lead as any).competitorMentioned}</div>
-                  {(lead as any).competitorReason && <div className="text-xs text-muted-foreground">Reason: {(lead as any).competitorReason}</div>}
-                </div>
-              )}
-              {(lead as any).familyInfo && (
-                <div className="pt-1 border-t border-border">
-                  <div className="text-muted-foreground text-xs mb-1">Family info</div>
-                  <div className="text-xs text-foreground">{(lead as any).familyInfo}</div>
-                </div>
-              )}
-            </div>
-          )}
+          <div className="bg-card border border-card-border rounded-lg p-4 space-y-2 text-sm">
+            <div className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Customer 360</div>
+            {([
+              ["Stage", (lead as any).purchaseStage],
+              ["Persona", (lead as any).customerPersona],
+              ["Relationship", (lead as any).relationshipScore != null ? `${(lead as any).relationshipScore}/100` : null],
+              ["Trust", (lead as any).trustScore != null ? `${(lead as any).trustScore}` : null],
+              ["Buy probability", (lead as any).purchaseProbability != null ? `${(lead as any).purchaseProbability}%` : null],
+              ["Expected ₹", (lead as any).expectedRevenue ? `₹${Number((lead as any).expectedRevenue).toLocaleString("en-IN")}` : null],
+              ["LTV", (lead as any).lifetimeValue ? `₹${Number((lead as any).lifetimeValue).toLocaleString("en-IN")}` : null],
+              ["Locality", (lead as any).locality],
+              ["Daily km", (lead as any).dailyKm ? `${(lead as any).dailyKm} km/day` : null],
+              ["Budget", (lead as any).budget ? `₹${((lead as any).budget as number).toLocaleString("en-IN")}` : null],
+              ["Current vehicle", (lead as any).currentVehicle],
+              ["Previous vehicle", (lead as any).previousVehicle],
+              ["Exchange", (lead as any).exchangeVehicle],
+              ["Occupation", (lead as any).occupation],
+              ["Timeline", (lead as any).buyingTimeline],
+              ["Decision maker", (lead as any).decisionMaker],
+              ["CSAT", (lead as any).csatScore],
+            ] as Array<[string, unknown]>).filter(([, v]) => v != null && v !== "").map(([label, val]) => (
+              <div key={label} className="flex justify-between gap-2">
+                <span className="text-muted-foreground text-xs">{label}</span>
+                <span className="text-right capitalize">{String(val)}</span>
+              </div>
+            ))}
+            {(lead as any).competitorMentioned && (
+              <div className="pt-1 border-t border-border">
+                <div className="text-muted-foreground text-xs mb-1">Comparing with</div>
+                <div className="text-sm font-medium">{(lead as any).competitorMentioned}</div>
+                {(lead as any).competitorReason && <div className="text-xs text-muted-foreground">Reason: {(lead as any).competitorReason}</div>}
+              </div>
+            )}
+            {(lead as any).familyInfo && (
+              <div className="pt-1 border-t border-border">
+                <div className="text-muted-foreground text-xs mb-1">Family</div>
+                <div className="text-xs text-foreground">{(lead as any).familyInfo}</div>
+              </div>
+            )}
+            {(() => {
+              try {
+                const o = JSON.parse((lead as any).objections || "[]");
+                if (!Array.isArray(o) || !o.length) return null;
+                return (
+                  <div className="pt-1 border-t border-border">
+                    <div className="text-muted-foreground text-xs mb-1">Objections</div>
+                    <div className="text-xs">{o.join(" · ")}</div>
+                  </div>
+                );
+              } catch { return null; }
+            })()}
+            {(() => {
+              try {
+                const o = JSON.parse((lead as any).promises || "[]");
+                if (!Array.isArray(o) || !o.length) return null;
+                return (
+                  <div className="pt-1 border-t border-border">
+                    <div className="text-muted-foreground text-xs mb-1">Promises</div>
+                    <div className="text-xs">{o.join(" · ")}</div>
+                  </div>
+                );
+              } catch { return null; }
+            })()}
+          </div>
         </div>
       </div>
 

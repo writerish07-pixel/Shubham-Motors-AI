@@ -4,14 +4,22 @@ import {
   computeEmi,
   parseDownPayment,
   parseTenureMonths,
+  parseAnnualRate,
   resolveModelOnRoad,
   formatEmiQuote,
   ON_ROAD_JAIPUR,
 } from "../src/lib/emiQuote";
 
-test("computeEmi: uses the 9% factor table", () => {
-  assert.equal(computeEmi(100000, 24), Math.round(100000 * 0.045685));
+test("computeEmi: live reducing-balance formula (not a lookup table)", () => {
+  const emi = computeEmi(100000, 24, 0.09);
+  const r = 0.09 / 12;
+  const pow = Math.pow(1 + r, 24);
+  const expected = Math.round(100000 * (r * pow) / (pow - 1));
+  assert.equal(emi, expected);
+  assert.ok(emi > 4500 && emi < 4700);
   assert.equal(computeEmi(0, 24), 0);
+  assert.notEqual(computeEmi(100000, 30, 0.09), computeEmi(100000, 24, 0.09));
+  assert.ok(computeEmi(100000, 24, 0.085) < computeEmi(100000, 24, 0.12));
 });
 
 test("parseDownPayment: lakh / hajar / plain forms", () => {
@@ -26,6 +34,12 @@ test("parseTenureMonths: spoken tenures", () => {
   assert.equal(parseTenureMonths("do saal ki EMI"), 24);
   assert.equal(parseTenureMonths("ek saal mein chukana hai"), 12);
   assert.equal(parseTenureMonths("emi batao"), null);
+});
+
+test("parseAnnualRate: percent phrases", () => {
+  assert.equal(parseAnnualRate("10 percent pe karo"), 0.1);
+  assert.equal(parseAnnualRate("11% interest"), 0.11);
+  assert.equal(parseAnnualRate("emi batao"), null);
 });
 
 test("resolveModelOnRoad: aliases including STT-garbled Glamour", () => {
@@ -43,7 +57,7 @@ test("resolveModelOnRoad: aliases including STT-garbled Glamour", () => {
 
 test("formatEmiQuote: includes tenure and reference-rate disclaimer", () => {
   const q = formatEmiQuote("Glamour X DRS", 104555, 25000, 24);
-  assert.match(q, /24 mahine/);
-  assert.match(q, /9%/);
+  assert.match(q, /live EMI/);
+  assert.match(q, /8\.5%/);
   assert.match(q, /CIBIL/);
 });

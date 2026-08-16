@@ -16,6 +16,10 @@ export const callsTable = pgTable("calls", {
   whatsappSent: boolean("whatsapp_sent").notNull().default(false),
   transferredTo: text("transferred_to"),
   exotelCallSid: text("exotel_call_sid"),
+  greetingPlayed: boolean("greeting_played"),
+  avgTurnMs: integer("avg_turn_ms"),
+  bargeInCount: integer("barge_in_count"),
+  costPerMinInr: integer("cost_per_min_inr"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [

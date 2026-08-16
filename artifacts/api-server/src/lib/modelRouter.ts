@@ -11,10 +11,12 @@ import type { ConversationTurn, DiscoverySignals } from "./openai";
 import {
   FINANCE_PARTNERS_LIST,
   formatEmiQuote,
+  parseAnnualRate,
   parseDownPayment,
   parseTenureMonths,
   resolveModelOnRoad,
 } from "./emiQuote";
+import { dealerConfig } from "./dealerConfig";
 import {
   normalizeProductStt,
   isCruiseControlQuestion,
@@ -116,11 +118,11 @@ const ADDRESS_QUERY_RE = new RegExp(
 const YESNO_RE = /^(?:haan|han|ji|yes|ok|okay|theek|sahi|nahi|no|nope)[\s.!?]*$/i;
 const GREETING_RE = /^(?:hello|hi|namaste|namaskaar|namaskar|नमस्ते|jai mata di|salaam|salam)[\s.!?]*$/i;
 
-/** strict (default) keeps live turns on gpt-4o-mini so cost stays under ₹2/min. */
+/** balanced (default) allows gpt-4o on negotiate/competitor turns within the ₹4/min cap. */
 export function costMode(): "strict" | "balanced" | "quality" {
-  const m = (process.env.COST_MODE ?? "strict").toLowerCase();
-  if (m === "quality" || m === "balanced") return m;
-  return "strict";
+  const m = (process.env.COST_MODE ?? "balanced").toLowerCase();
+  if (m === "quality" || m === "strict") return m;
+  return "balanced";
 }
 
 export function classifyTurn(customerText: string, history: ConversationTurn[]): ModelTier {
@@ -153,11 +155,12 @@ export function tryDirectAnswer(
   }
   if (YESNO_RE.test(text)) return null;
 
+  const dealer = dealerConfig();
   if (HOURS_QUERY_RE.test(text)) {
-    return `Shubham Motors सोमवार से शनिवार सुबह 9 से शाम 7 बजे तक, और रविवार सुबह 10 से शाम 5 तक खुला रहता है. आप कब आना चाहेंगे ${addressForm}?`;
+    return `${dealer.name} ${dealer.hours} खुला रहता है. आप कब आना चाहेंगे ${addressForm}?`;
   }
   if (ADDRESS_QUERY_RE.test(text) && !FIND_OUT_RE.test(text)) {
-    return `हमारा showroom जयपुर में है ${addressForm}, मैं exact location WhatsApp पर अभी भेज देती हूँ. क्या आज शाम का test ride book कर लूँ?`;
+    return `हमारा showroom ${dealer.address} है ${addressForm}, मैं exact location WhatsApp पर अभी भेज देती हूँ. क्या आज शाम का test ride book कर लूँ?`;
   }
 
   const historyText = (ctx?.history ?? []).map((h) => h.content).join(" ");
@@ -183,11 +186,12 @@ export function tryDirectAnswer(
   if (/\bfinance\b|\bfinancing\b|\bemi\b|\bloan\b|किस्त|फाइनेंस|लोन|down\s*payment|डाउन|finance\s*option/i.test(text)) {
     const down = parseDownPayment(text);
     const months = parseTenureMonths(text) ?? 24;
+    const rate = parseAnnualRate(text) ?? 0.09;
     const modelHint = signals?.interestedModel ?? "";
     const resolved = resolveModelOnRoad(text + " " + historyText, modelHint);
 
     if (down && resolved) {
-      return formatEmiQuote(resolved.model, resolved.onRoad, down, months);
+      return formatEmiQuote(resolved.model, resolved.onRoad, down, months, rate);
     }
 
     if (/kitne\s*(mahine|month|मही)|tenure|duration/i.test(text) && ctx?.history?.length) {
@@ -200,7 +204,7 @@ export function tryDirectAnswer(
     // Active finance — customer already asked; never skip to price-only monologue.
     if (signals?.financeInterest || /finance|financing|option/i.test(text)) {
       if (resolved) {
-        const emi24 = formatEmiQuote(resolved.model, resolved.onRoad, 25000, 24);
+        const emi24 = formatEmiQuote(resolved.model, resolved.onRoad, 25000, 24, rate);
         return `${FINANCE_PARTNERS_LIST} ${emi24} Aap kitna down payment de sakte hain?`;
       }
       const vehicle = signals?.segment?.startsWith("scooter") ? "scooter" : "bike";

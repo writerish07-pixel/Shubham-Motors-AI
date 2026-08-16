@@ -15,7 +15,8 @@ primary_region = "sin"
   NODE_ENV = "production"
   BASE_PATH = "/"
   STATIC_DIR = "/app/public"
-  COST_MODE = "strict"
+  COST_MODE = "balanced"
+  COST_ALERT_INR_PER_MIN = "4"
   APP_VERSION = "fly"
 
 [http_service]

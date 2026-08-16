@@ -7,11 +7,11 @@ import {
   type DiscoverySignals,
 } from "./openai";
 import { resolveFollowupSchedule, parseLlmFollowupDate } from "./followupSchedule";
-import { sendCallSummaryWhatsApp, sendBrochureWhatsApp } from "./whatsapp";
+import { scoreCallShadow, mergeJsonStringLists } from "./agentTools";
+import { sendCallSummaryWhatsApp, sendBrochureWhatsApp, sendWhatsAppMessage } from "./whatsapp";
 import { resolveModelOnRoad, computeEmi } from "./emiQuote";
 import { computeLeadIntelligence } from "./relationshipIntel";
 import { logger } from "./logger";
-import { scoreCallShadow } from "./agentTools";
 
 type CallAnalysis = Awaited<ReturnType<typeof analyzeCallIntent>>;
 
@@ -22,11 +22,18 @@ export interface FinalizeCallParams {
   sessionLanguage: string;
   discoverySignals: DiscoverySignals;
   exotelCallSid?: string;
+  greetingPlayed?: boolean;
+  bargeInCount?: number;
+  avgTurnMs?: number;
+  costPerMinInr?: number;
 }
 
 /** Single post-call persistence path for WebSocket voice calls. */
 export async function finalizeCompletedCall(params: FinalizeCallParams): Promise<void> {
-  const { callDbId, leadId, transcript, sessionLanguage, discoverySignals, exotelCallSid } = params;
+  const {
+    callDbId, leadId, transcript, sessionLanguage, discoverySignals, exotelCallSid,
+    greetingPlayed, bargeInCount, avgTurnMs, costPerMinInr,
+  } = params;
   if (!transcript.trim() || !callDbId || !leadId) return;
 
   const [existingLead] = await db.select().from(leadsTable).where(eq(leadsTable.id, leadId));
@@ -62,6 +69,10 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       lostOfferFactor: null,
       visitPlanned: false,
       visitDate: null,
+      promises: [],
+      locality: null,
+      previousVehicle: null,
+      exchangeVehicle: null,
     };
   }
   const festival = await getActiveFestivalOffer();
@@ -88,6 +99,10 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       intentDetected: analysis.intent,
       scoreAfterCall: analysis.score,
       languageDetected: analysis.language,
+      ...(greetingPlayed != null ? { greetingPlayed } : {}),
+      ...(typeof bargeInCount === "number" ? { bargeInCount } : {}),
+      ...(typeof avgTurnMs === "number" ? { avgTurnMs } : {}),
+      ...(typeof costPerMinInr === "number" ? { costPerMinInr } : {}),
     })
     .where(eq(callsTable.id, callDbId));
 
@@ -204,6 +219,19 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       ...(analysis.lostDeal && analysis.lostToDealer ? { lostToDealer: analysis.lostToDealer } : {}),
       ...(analysis.lostDeal && analysis.lostReason ? { lostReason: analysis.lostReason } : {}),
       ...(analysis.lostDeal && analysis.lostOfferFactor ? { lostOfferFactor: analysis.lostOfferFactor } : {}),
+      ...(analysis.objections?.length
+        ? { objections: mergeJsonStringLists(existingLead.objections, analysis.objections) }
+        : {}),
+      ...(analysis.promises?.length
+        ? { promises: mergeJsonStringLists(existingLead.promises, analysis.promises) }
+        : {}),
+      ...(analysis.locality ? { locality: analysis.locality } : {}),
+      ...(analysis.previousVehicle ? { previousVehicle: analysis.previousVehicle } : {}),
+      ...(analysis.exchangeVehicle
+        ? { exchangeVehicle: analysis.exchangeVehicle }
+        : discoverySignals.exchangeInterest && existingLead.currentVehicle
+          ? { exchangeVehicle: existingLead.currentVehicle }
+          : {}),
     } as Record<string, unknown>)
     .where(eq(leadsTable.id, leadId));
 
@@ -273,7 +301,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       const resolved = resolveModelOnRoad(modelOfInterest, modelOfInterest);
       if (resolved) {
         const down = 25000;
-        const emi24 = computeEmi(resolved.onRoad - down, 24);
+        const emi24 = computeEmi(resolved.onRoad - down, 24, 0.09);
         priceLine = sessionLanguage.startsWith("hi")
           ? `💰 *${resolved.model}* — On-road Jaipur ₹${resolved.onRoad.toLocaleString("en-IN")}\n📊 EMI लगभग ₹${emi24.toLocaleString("en-IN")}/माह (₹${down.toLocaleString("en-IN")} down, 24 माह, 9% reference)`
           : `💰 *${resolved.model}* — On-road Jaipur ₹${resolved.onRoad.toLocaleString("en-IN")}\n📊 EMI approx ₹${emi24.toLocaleString("en-IN")}/month (₹${down.toLocaleString("en-IN")} down, 24 months, 9% reference)`;
@@ -296,6 +324,16 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       await db.update(callsTable).set({ whatsappSent: true }).where(eq(callsTable.id, callDbId));
     } else {
       logger.warn({ leadId, callDbId, phone: lead.phone }, "Post-call WhatsApp summary NOT sent — check BOTSPACE_API_KEY / BOTSPACE_PHONE_NUMBER_ID");
+    }
+
+    if (visitDate && lead.phone && !lead.lastCsatAt) {
+      const csat = sessionLanguage.startsWith("hi")
+        ? `नमस्ते ${lead.name || "जी"}, शुभम मोटर्स। आज साक्षी से बात कैसी लगी? 1 से 5 में reply कीजिए (5 = बहुत अच्छी)।`
+        : `Namaste ${lead.name || ""}, Shubham Motors. How was your chat with Sakshi today? Reply 1 to 5 (5 = excellent).`;
+      const csatSent = await sendWhatsAppMessage(lead.phone, csat).catch(() => false);
+      if (csatSent) {
+        await db.update(leadsTable).set({ lastCsatAt: new Date() }).where(eq(leadsTable.id, leadId));
+      }
     }
 
     if (modelOfInterest) {

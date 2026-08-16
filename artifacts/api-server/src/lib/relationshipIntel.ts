@@ -162,6 +162,12 @@ export function inferCustomerPersona(input: IntelligenceInput): CustomerPersona 
     return "family_buyer";
   }
   if (input.stylePreference === "sporty" || input.segment === "160cc+") return "performance_buyer";
+  if (/\babs\b|\bibs\b|safety|safe ride/i.test(`${input.interestedModel ?? ""} ${(input.objections ?? []).join(" ")}`)) {
+    return "safety_buyer";
+  }
+  if (/cruise|bluetooth|navi|digital/i.test(`${input.interestedModel ?? ""} ${(input.objections ?? []).join(" ")}`)) {
+    return "technology_sensitive";
+  }
   if (input.negotiating || mentionsPrice(input.objections) || (input.budget != null && input.budget > 0 && input.budget < 70000)) {
     return "price_sensitive";
   }
