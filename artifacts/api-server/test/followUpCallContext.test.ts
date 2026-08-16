@@ -8,6 +8,7 @@ test("follow-up greeting is Devanagari Hindi so hi-IN TTS does not stay silent/E
   assert.match(g, /साक्षी/);
   assert.match(g, /Rahul/);
   assert.match(g, /Splendor XTEC/);
+  assert.match(g, /कुछ और देख रहे हैं/);
   assert.equal(/Namaste|Main Sakshi/.test(g), false);
 });
 

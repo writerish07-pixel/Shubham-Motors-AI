@@ -23,6 +23,7 @@ import {
   mentionsGlamour,
   isFeatureAvailabilityQuestion,
 } from "./sttProductFix";
+import { detectNamedModel, isGlamourFamily, isRejectingPreviousModel, liveModelForTurn } from "./liveModel";
 
 export type ModelTier = "mini" | "premium";
 
@@ -66,9 +67,14 @@ const STT_ALIASES: Array<[RegExp, string]> = [
   // Karizma
   [/\bcarisma\b/gi, "Karizma"],
   [/\bkarisma\b/gi, "Karizma"],
-  // HF Deluxe
+  // HF Deluxe (call 17 STT: एच एस डीलक्स प्रो, एचएफडी इलेक्शन)
   [/\bhf[- ]?delux\b/gi, "HF Deluxe"],
   [/\bach[- ]?ef\b/gi, "HF"],
+  [/एच\s*एफ\s*डीलक्स/g, "HF Deluxe"],
+  [/एच\s*[एसस]\s*डीलक्स/g, "HF Deluxe"],
+  [/एचएफ\s*डीलक्स/g, "HF Deluxe"],
+  [/एचएफडी/g, "HF Deluxe"],
+  [/डीलक्स\s*प्रो/g, "HF Deluxe Pro"],
 ];
 
 export function correctStt(text: string): string {
@@ -165,10 +171,17 @@ export function tryDirectAnswer(
     return `हमारा शोरूम ${dealer.address} है ${addressForm}। लोकेशन वॉट्सऐप पर भेज देती हूँ — आज शाम टेस्ट राइड कर लूँ?`;
   }
 
-  const historyText = (ctx?.history ?? []).map((h) => h.content).join(" ");
-  const glamourCtx = mentionsGlamour(text) || mentionsGlamour(historyText) || /glamour/i.test(signals?.interestedModel ?? "");
+  const liveModel = liveModelForTurn(text, signals?.interestedModel);
+  const glamourCtx = isGlamourFamily(liveModel) || (mentionsGlamour(text) && !isRejectingPreviousModel(text));
 
   if (isCruiseControlQuestion(text) || (glamourCtx && isFeatureAvailabilityQuestion(text) && /control|cruis|centro|संट्रो|क्रूज/i.test(text))) {
+    if (!glamourCtx) {
+      const named = detectNamedModel(text) || liveModel;
+      if (named) {
+        return `${named} में क्रूज़ कंट्रोल नहीं आता ${addressForm}। ऑन-रोड बताऊँ या टेस्ट राइड बुक करूँ?`;
+      }
+      return null;
+    }
     return `ग्लैमर एक्स डी एस एस में क्रूज़ कंट्रोल है, डी आर एस में नहीं। हाईवे पर आराम रहता है। डी एस एस देखना है या डी आर एस?`;
   }
 
@@ -189,8 +202,8 @@ export function tryDirectAnswer(
     const down = parseDownPayment(text);
     const months = parseTenureMonths(text) ?? 24;
     const rate = parseAnnualRate(text) ?? 0.09;
-    const modelHint = signals?.interestedModel ?? "";
-    const resolved = resolveModelOnRoad(text + " " + historyText, modelHint);
+    const modelHint = liveModel || signals?.interestedModel || "";
+    const resolved = resolveModelOnRoad(text, modelHint);
 
     if (down && resolved) {
       return formatEmiQuote(resolved.model, resolved.onRoad, down, months, rate);

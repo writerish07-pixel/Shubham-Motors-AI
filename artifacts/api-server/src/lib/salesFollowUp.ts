@@ -6,6 +6,7 @@
 import type { ConvStage, DiscoverySignals } from "./openai";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { isAgentPromisingTransfer } from "./humanTransfer";
+import { isGlamourFamily, isRejectingPreviousModel, liveModelForTurn, modelFamily } from "./liveModel";
 
 export interface FollowUpContext {
   signals?: DiscoverySignals;
@@ -37,11 +38,13 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
   const s = ctx.signals ?? {};
   const stage = ctx.convStage ?? "connect";
   const customer = (ctx.customerText ?? "").toLowerCase();
-  const model = s.interestedModel ?? "";
-  const combined = `${customer} ${model}`.toLowerCase();
+  const model = liveModelForTurn(ctx.customerText ?? "", s.interestedModel);
+  const family = modelFamily(model);
 
-  if (/cruise|glamour|dss|drs|centro|क्रूज|ग्लैमर/i.test(combined)) {
-    if (!/dss|drs/i.test(customer)) {
+  // Call 17: never ask Glamour DSS vs DRS unless THIS turn's model is Glamour.
+  // Skip if they already asked a buying question — variant can wait, the close cannot.
+  if (isGlamourFamily(model) && !isRejectingPreviousModel(ctx.customerText ?? "")) {
+    if (!/dss|drs/i.test(customer) && !/price|kitne|kimat|qeemat|कीमत|on.?road|emi|finance|टेस्ट राइड|test ride/i.test(customer)) {
       return "आप डी आर एस देख रहे हैं या क्रूज़ कंट्रोल वाला डी एस एस?";
     }
   }
@@ -57,19 +60,28 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
   }
 
   if (/price|kitne|kimat|qeemat|कीमत|on.?road|rate/i.test(customer)) {
-    if (model) return `${model} की टेस्ट राइड कब ठीक रहेगी?`;
+    if (model) return `${model} की टेस्ट राइड कब ठीक रहेगी — आज या कल?`;
     return "कौन सा वेरिएंट आपको सूट करेगा?";
   }
 
   if (/feature|mileage|spec|engine|warranty|माइलेज/i.test(customer)) {
-    if (model) return "शोरूम पर देखना चाहेंगे या पहले वॉट्सऐप पर डिटेल भेज दूँ?";
+    if (model) return `${model} की ऑन-रोड बताऊँ या टेस्ट राइड बुक करूँ?`;
     return "रोज़ कितने किलोमीटर चलते हैं — उसी हिसाब से मॉडल बताऊँगी?";
   }
 
-  if (stage === "booking" || stage === "ready") {
-    return "टेस्ट राइड बुक कर दूँ — शनिवार सुबह या शाम?";
+  if (family === "HF Deluxe") {
+    if (!/pro|drs/i.test(customer)) {
+      return "एच एफ डिलक्स डी आर एस या प्रो — कौन सा देख रहे हैं? ऑन-रोड बता दूँ?";
+    }
+    return "एच एफ डिलक्स की टेस्ट राइड कब आएँगे — आज शाम या कल सुबह?";
   }
-  if (stage === "planning" || (!s.buyingTimeline && (ctx.turn ?? 0) >= 3 && (s.segment || s.interestedModel))) {
+
+  if (stage === "booking" || stage === "ready") {
+    return model
+      ? `${model} की टेस्ट राइड बुक कर दूँ — शनिवार सुबह या शाम?`
+      : "टेस्ट राइड बुक कर दूँ — शनिवार सुबह या शाम?";
+  }
+  if (stage === "planning" || (!s.buyingTimeline && (ctx.turn ?? 0) >= 3 && (s.segment || model))) {
     return buyingTimelineQuestion(model || undefined);
   }
   if (stage === "negotiating") {
@@ -82,13 +94,18 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
     return "आपके लिए सबसे ज़रूरी क्या है — माइलेज, स्टाइल, या ई एम आई?";
   }
 
+  // Named model this call: sell it. Do not restart km / scooter-vs-bike discovery.
+  if (model) {
+    return `${model} की ऑन-रोड बताऊँ, ई एम आई निकालूँ, या टेस्ट राइड बुक करूँ?`;
+  }
+
   if (!s.segment) return "पहले बताइए — स्कूटर चाहिए या बाइक?";
   if (!s.km) return "रोज़ लगभग कितने किलोमीटर चलना पड़ता है?";
   if (s.segment?.startsWith("scooter") && s.familyUse === undefined) {
     return "सिर्फ़ आप चलाएँगे या परिवार के साथ भी?";
   }
   if (!s.budget) return "कैश में लेंगे या ई एम आई पर?";
-  if (!s.interestedModel) {
+  if (!model) {
     if (s.segment === "125cc") {
       return "एक सौ पच्चीस सीसी में स्टाइल ग्लैमर या स्पोर्टी एक्सट्रीम — क्या पसंद है?";
     }
@@ -99,8 +116,7 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
     return "कौन सा मॉडल नाम से देख रहे हैं?";
   }
 
-  if (model) return "टेस्ट राइड के लिए कब आना ठीक रहेगा?";
-  return "और क्या जानना है — कीमत, ई एम आई, या टेस्ट राइड?";
+  return `${model} की ऑन-रोड बताऊँ, ई एम आई निकालूँ, या टेस्ट राइड बुक करूँ?`;
 }
 
 /**

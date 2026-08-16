@@ -23,6 +23,13 @@ const PRODUCT_ALIASES: Array<[RegExp, string]> = [
   [/\bक्रूज़?\s*कंट्रोल\b/g, "cruise control"],
   [/\bfinance\s*ap+tion\b/gi, "finance option"],
   [/\bfinancing\s*ap+tion\b/gi, "finance option"],
+  [/एच\s*एफ\s*डीलक्स/g, "HF Deluxe"],
+  [/एच\s*[एसस]\s*डीलक्स/g, "HF Deluxe"],
+  [/एचएफ\s*डीलक्स/g, "HF Deluxe"],
+  [/एचएफडी/g, "HF Deluxe"],
+  [/डीलक्स\s*प्रो/g, "HF Deluxe Pro"],
+  [/डेस्टिनी/g, "Destini"],
+  [/ज़ूम|जूम/g, "Xoom"],
 ];
 
 export function normalizeProductStt(text: string): string {
