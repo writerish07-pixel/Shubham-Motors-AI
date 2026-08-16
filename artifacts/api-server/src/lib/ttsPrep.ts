@@ -93,7 +93,20 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\bHinduja\b/gi, "हिंदुजा"],
   [/\bFinCorp\b/gi, "फिनकॉर्प"],
 
-  // Common phrases
+  [/\bUSB\b/g, "यू एस बी"],
+  [/\bdigital\s*console\b/gi, "डिजिटल कंसोल"],
+  [/\benquiry\b/gi, "एनक्वायरी"],
+  [/\bfollow-?up\b/gi, "फॉलो अप"],
+  [/\bvariant\b/gi, "वेरिएंट"],
+  [/\bperformance\b/gi, "परफॉर्मेंस"],
+  [/\boptions?\b/gi, "ऑप्शन"],
+  [/\bfeatures?\b/gi, "फीचर्स"],
+  [/\bdown\s*payment\b/gi, "डाउन पेमेंट"],
+  [/\breducing\s*balance\b/gi, "रिड्यूसिंग बैलेंस"],
+  [/\blive\s*EMI\b/gi, "ई एम आई"],
+  [/\bmonths?\b/gi, "महीने"],
+  [/\bbank\s*rate\b/gi, "बैंक रेट"],
+
   [/\btest\s*ride\b/gi, "टेस्ट राइड"],
 ];
 
@@ -119,10 +132,24 @@ function stripMarkdown(text: string): string {
   t = t.replace(/__([^_]+)__/g, "$1");             // __bold__
   t = t.replace(/`([^`]+)`/g, "$1");               // `code`
   t = t.replace(/(^|\n)\s*#{1,6}\s*/g, "$1");      // # headings
-  t = t.replace(/(^|\n)\s*\d+[.)]\s+/g, "$1");     // "1." / "2)" list markers
+  // Numbered lists at line start AND inline ("ये मॉडल्स हैं: 1. HF Deluxe 2. Splendor")
+  t = t.replace(/(^|[\n:])\s*\d+[.)]\s+/g, "$1 ");
+  t = t.replace(/\s+\d+[.)]\s+/g, ", ");
   t = t.replace(/(^|\n)\s*[-•·*]\s+/g, "$1");      // "- " / "• " / "* " bullets
-  t = t.replace(/[*`#>]/g, " ");                    // any stray symbols left (keep _ to not corrupt tokens)
+  t = t.replace(/[*`#>]/g, " ");                    // any stray symbols left
+  t = t.replace(/\s+[—–-]\s+/g, ", ");             // catalog em-dashes → pause
   return t;
+}
+
+/** Never cut mid-word. A 500-char slice on a catalog dump sounded like a broken IVR; 260 ≈ one human phone turn. */
+export function clipSpokenTts(text: string, max = 260): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  const slice = t.slice(0, max);
+  const cut = Math.max(slice.lastIndexOf("।"), slice.lastIndexOf("?"), slice.lastIndexOf("!"), slice.lastIndexOf("."));
+  if (cut >= 80) return slice.slice(0, cut + 1).trim();
+  const space = slice.lastIndexOf(" ");
+  return (space >= 80 ? slice.slice(0, space) : slice).trim();
 }
 
 /** Strip leading filler tokens so TTS never says "ji/achha/ek second". */
@@ -141,7 +168,7 @@ export function prepareTtsText(text: string): string {
   let t = sanitizeAgentSpeech(stripMarkdown(text));
   for (const [re, rep] of PRONOUNCE) t = t.replace(re, rep);
   t = softenLists(t);
-  return t.trim();
+  return clipSpokenTts(t);
 }
 
 export function prepareNameForTts(name: string): string {

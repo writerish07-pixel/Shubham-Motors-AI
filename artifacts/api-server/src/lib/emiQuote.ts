@@ -86,19 +86,16 @@ export function formatEmiQuote(
 ): string {
   const loan = Math.max(0, onRoad - down);
   if (loan <= 0) {
-    return `${model} ki on-road लगभग ₹${onRoad.toLocaleString("en-IN")} है — ₹${down.toLocaleString("en-IN")} down payment par loan amount zero ya bahut kam hoga.`;
+    return `${model} की ऑन-रोड लगभग ₹${onRoad.toLocaleString("en-IN")} है — इतना डाउन देने पर लोन लगभग शून्य रहेगा।`;
   }
-  const ratePct = Math.round(annualRate * 1000) / 10;
   const emi = computeEmi(loan, months, annualRate);
   const low = computeEmi(loan, months, RATE_BAND_LOW);
   const high = computeEmi(loan, months, RATE_BAND_HIGH);
   return (
-    `${model} — on-road ₹${onRoad.toLocaleString("en-IN")}, ₹${down.toLocaleString("en-IN")} down par loan ₹${loan.toLocaleString("en-IN")}. ` +
-    `${months} mahine ki live EMI ₹${emi.toLocaleString("en-IN")}/month @ ${ratePct}% reducing balance. ` +
-    `CIBIL ke hisaab se 8.5% par लगभग ₹${low.toLocaleString("en-IN")}, 12% par लगभग ₹${high.toLocaleString("en-IN")}. ` +
-    `Exact bank rate showroom par lock hota hai.`
+    `${model} की ऑन-रोड लगभग ₹${onRoad.toLocaleString("en-IN")} है, ₹${down.toLocaleString("en-IN")} डाउन पर ${months} महीने की ई एम आई लगभग ₹${emi.toLocaleString("en-IN")}। ` +
+    `सिबिल के हिसाब से साढ़े आठ प्रतिशत पर लगभग ₹${low.toLocaleString("en-IN")} और बारह प्रतिशत पर लगभग ₹${high.toLocaleString("en-IN")} — सटीक बैंक रेट शोरूम पर लगेगा।`
   );
 }
 
 export const FINANCE_PARTNERS_LIST =
-  "Humare paas finance options hain: Hero FinCorp, HDFC Bank, IDBI Bank, Hinduja Leyland Finance, aur RBL Bank — aap showroom par inme se koi bhi choose kar sakte hain.";
+  "हमारे पास फाइनेंस ऑप्शन हैं: हीरो फिनकॉर्प, एच डी एफ सी, आई डी बी आई, हिंदुजा, और आर बी एल — शोरूम पर आप चुन सकते हैं।";

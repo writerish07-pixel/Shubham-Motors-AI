@@ -163,7 +163,7 @@ export async function textToSpeech(
     const response = await axios.post(
       `${SARVAM_BASE}/text-to-speech`,
       {
-        inputs: [speakable.slice(0, 500)],
+        inputs: [speakable],
         target_language_code: langCode,
         speaker: process.env.SARVAM_TTS_SPEAKER || "anushka",
         // v2 is required for the ₹2/min cap; v3 is ~2×. Override only after a cost review.

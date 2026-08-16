@@ -79,7 +79,7 @@ export async function executeAgentTools(tags: AgentTag[], ctx: ToolContext): Pro
             minute: "2-digit",
             hour12: true,
           });
-          result.spokenExtras.push(`Test ride ${when} par Lal Kothi showroom mein confirm hai.`);
+          result.spokenExtras.push(`टेस्ट राइड लाल कोठी शोरूम में ${when} पर कन्फर्म है।`);
         }
         continue;
       }
