@@ -5,16 +5,16 @@ description: Two non-obvious rules in artifacts/api-server/src/lib/openai.ts tha
 
 # KB merge invariant
 
-`buildSystemPrompt()` must ALWAYS include `DEFAULT_HERO_KNOWLEDGE` (catalog, real on-road Jaipur prices, precomputed EMI table) and only *append* admin KB rows under an "[ADMIN KB OVERRIDES]" heading.
+`buildSystemPrompt()` must ALWAYS include `DEFAULT_HERO_KNOWLEDGE` (catalog, real on-road Jaipur prices, live EMI instructions) and only *append* admin KB rows under an "[ADMIN KB OVERRIDES]" heading.
 
-**Why:** A previous version used `knowledge || DEFAULT_HERO_KNOWLEDGE`. The moment the production admin KB had any row, it *replaced* the entire default catalog — silently nuking prices/EMI/model fixes. This was the real cause of "the agent never improves no matter what I ship." Tier-0 direct-answer call sites had the same bug.
+**Why:** A previous version used `knowledge || DEFAULT_HERO_KNOWLEDGE`. The moment the production admin KB had any row, it *replaced* the entire default catalog — silently nuking prices/EMI/model fixes.
 
-**How to apply:** Never reintroduce `||` fallback between admin KB and the default. Default is the floor; admin is additive. Check every place that builds an LLM prompt or direct answer.
+**How to apply:** Never reintroduce `||` fallback between admin KB and the default. Default is the floor; admin is additive.
 
-# Zero-arithmetic / EMI table
+# Live EMI (server-side, not a table)
 
-EMI numbers are precomputed server-side (`buildEmiTable`/`_emi`, EMI factors at 9% p.a.) across all variants × downs (₹20k/30k/50k) × tenures (12/18/24/36mo) and injected as "[PRECOMPUTED EMI TABLE]". The prompt has a ZERO-ARITHMETIC rule forbidding the LLM from computing — it must read the table verbatim.
+EMI rupees are calculated live in `emiQuote.ts`. The LLM tags `[EMI:Model|down|months]`. Do not inject `[PRECOMPUTED EMI TABLE]`.
 
-**Why:** The LLM hallucinated EMIs badly (e.g. ₹50k down on a ₹1,04,555 bike → it said "₹2,750"; correct is ₹4,771). LLMs cannot be trusted with money math.
+The CRM Knowledge → Playbook tab is the `knowledge` table. `syncCanonicalKnowledge()` runs on API boot and rewrites leftover seed cards (including **"EMI without math"**). After deploy, open `/api/regress` in a browser — every check should be `ok: true`.
 
-**How to apply:** If prices change, regenerate the table from the price list; do not let the LLM derive loan/EMI. Real prices live in DEFAULT_HERO_KNOWLEDGE (source: price_list spreadsheet).
+**How to apply:** Prices live in `heroCatalog.ts`. Never re-seed a playbook that says "Kabhi calculate mat karo".

@@ -11,6 +11,7 @@ import {
   outboundDialingAllowed,
   parseAndStripTags,
   retrieveKnowledgeForUtterance,
+  sanitizeKnowledgeItem,
   scoreCallShadow,
   shouldAutoApplyLearning,
   ttsLanguageCode,
@@ -64,6 +65,24 @@ test("retrieveKnowledgeForUtterance keeps playbooks/offers and 1–2 families", 
   assert.ok(titles.includes("Splendor XTEC"));
   assert.equal(titles.includes("Xoom 125 ZX"), false);
   assert.ok(familiesMentioned("glamour cruise control").includes("Glamour X"));
+});
+
+test("sanitizeKnowledgeItem rewrites leftover EMI-without-math playbook", () => {
+  const stale = sanitizeKnowledgeItem({
+    category: "playbook",
+    title: "EMI without math",
+    content: "Kabhi calculate mat karo. [PRECOMPUTED EMI TABLE] se tenure ke saath padho.",
+  });
+  assert.equal(stale.title, "Live EMI");
+  assert.match(stale.content, /\[EMI:Model\|down\|months\]/);
+  const sliced = retrieveKnowledgeForUtterance("emi kitna hoga", [
+    {
+      category: "playbook",
+      title: "EMI without math",
+      content: "Kabhi calculate mat karo. [PRECOMPUTED EMI TABLE]",
+    },
+  ]);
+  assert.equal(sliced[0]?.title, "Live EMI");
 });
 
 test("dated KB rows expire", () => {

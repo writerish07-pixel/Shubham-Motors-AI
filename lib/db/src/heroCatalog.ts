@@ -205,6 +205,16 @@ export function formatDefaultHeroKnowledge(): string {
   return lines.join("\n").trim();
 }
 
+/** Default prompt catalog + live EMI rules. Keep in sync with openai.ts DEFAULT_HERO_KNOWLEDGE. */
+export function formatDefaultHeroKnowledgeWithLiveEmi(): string {
+  return `${formatDefaultHeroKnowledge()}
+
+[LIVE EMI]
+Reducing-balance formula on (on-road − down payment). Default 9% p.a. Always state tenure.
+When the customer asks EMI: confirm model + their down payment, then output [EMI:Model|down|months].
+Disclaimer: actual rate depends on CIBIL (typically 8.5%–12%). Exact lock → [TRANSFER:FINANCE].`.trim();
+}
+
 export type KnowledgeSeedRow = {
   title: string;
   category: string;

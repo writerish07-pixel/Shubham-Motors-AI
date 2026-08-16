@@ -5,6 +5,7 @@ import { db } from "@workspace/db";
 import { getSttCircuitStatus } from "../lib/sarvam";
 import { getSchedulerStatus } from "../lib/scheduler";
 import { getReplacementMode, whatsappTemplatesOnly } from "../lib/agentTools";
+import { buildRegressionReport } from "../lib/canonicalKb";
 
 const router: IRouter = Router();
 
@@ -53,6 +54,22 @@ router.get("/healthz", async (_req, res) => {
       fallback: circuit.isOpen ? "whisper" : "sarvam",
     },
   });
+});
+
+/** Open this in a browser after deploy: every check should say ok: true. */
+router.get("/regress", async (_req, res) => {
+  try {
+    const report = await buildRegressionReport();
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      checkedAt: new Date().toISOString(),
+      passed: 0,
+      failed: 1,
+      checks: [{ id: "app.regress_error", area: "app", ok: false, detail: err instanceof Error ? err.message : "regression failed" }],
+    });
+  }
 });
 
 export default router;

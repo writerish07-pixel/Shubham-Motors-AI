@@ -3,6 +3,7 @@
  * Side-effecting tool execution lives in agentActions.ts.
  */
 import { HERO_VARIANTS } from "@workspace/db/heroCatalog";
+import { isStaleEmiPlaybook, LIVE_EMI_PLAYBOOK } from "@workspace/db/playbooks";
 
 export type ReplacementMode = "shadow" | "inbound" | "full";
 
@@ -31,6 +32,14 @@ export type ShadowScorecard = {
 const ALWAYS_CATEGORIES = new Set(["playbook", "offer", "policy", "festival", "market"]);
 const MODELISH = new Set(["model", "price", "faq", "brochure"]);
 const FAMILIES: string[] = [...new Set(HERO_VARIANTS.map((v) => v.family))];
+
+/** Rewrite leftover “don’t calculate EMI” cards so they never reach the LLM or CRM. */
+export function sanitizeKnowledgeItem<T extends { category: string; title: string; content: string }>(item: T): T {
+  if (item.category === "playbook" && isStaleEmiPlaybook(item.title, item.content)) {
+    return { ...item, title: LIVE_EMI_PLAYBOOK.title, content: LIVE_EMI_PLAYBOOK.content };
+  }
+  return item;
+}
 
 const TAG_RE = /\[(EMI|STOCK|VISIT|WHATSAPP|TRANSFER)(?::([^\]]*))?\]/gi;
 
@@ -222,7 +231,7 @@ export function retrieveKnowledgeForUtterance(
   items: KnowledgeSliceItem[],
   now = new Date(),
 ): KnowledgeSliceItem[] {
-  const live = items.filter((i) => isKnowledgeInEffect(i, now));
+  const live = items.filter((i) => isKnowledgeInEffect(i, now)).map(sanitizeKnowledgeItem);
   const always = live.filter((i) => ALWAYS_CATEGORIES.has(i.category));
   const stock = live.filter((i) => i.category === "stock");
   const families = familiesMentioned(userText);

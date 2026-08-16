@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HERO_VARIANTS, ON_ROAD_JAIPUR, knowledgeSeedRows, formatDefaultHeroKnowledge } from "@workspace/db/heroCatalog";
+import { HERO_VARIANTS, ON_ROAD_JAIPUR, knowledgeSeedRows, formatDefaultHeroKnowledge, formatDefaultHeroKnowledgeWithLiveEmi } from "@workspace/db/heroCatalog";
 import { ON_ROAD_JAIPUR as EMI_PRICES } from "../src/lib/emiQuote";
 import { pickThinkingFiller } from "../src/lib/voiceFastPath";
 import { sanitizeAgentSpeech, prepareTtsText } from "../src/lib/ttsPrep";
@@ -14,6 +14,9 @@ test("catalog has priced commuters and premium models without fake rupees", () =
   assert.equal(xpulse!.onRoadJaipur, null);
   assert.match(formatDefaultHeroKnowledge(), /Karizma XMR/);
   assert.match(formatDefaultHeroKnowledge(), /Vida V1 Pro/);
+  const withEmi = formatDefaultHeroKnowledgeWithLiveEmi();
+  assert.match(withEmi, /\[LIVE EMI\]/);
+  assert.doesNotMatch(withEmi, /PRECOMPUTED EMI/);
 });
 
 test("knowledge seed covers every family plus showroom/offers", () => {

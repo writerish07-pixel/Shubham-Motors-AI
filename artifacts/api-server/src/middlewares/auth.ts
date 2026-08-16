@@ -50,5 +50,5 @@ export function requireAdmin(req: Request, res: Response): boolean {
 
 /** Paths under /api that stay public (Exotel + health probe). */
 export function isPublicApiPath(path: string): boolean {
-  return path === "/healthz" || path.startsWith("/webhooks/");
+  return path === "/healthz" || path === "/regress" || path.startsWith("/webhooks/");
 }
