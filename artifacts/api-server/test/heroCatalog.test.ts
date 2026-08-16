@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { HERO_VARIANTS, ON_ROAD_JAIPUR, knowledgeSeedRows, formatDefaultHeroKnowledge, formatDefaultHeroKnowledgeWithLiveEmi, kindForModelName, sanitizeIntentSummary } from "@workspace/db/heroCatalog";
+import { HERO_VARIANTS, ON_ROAD_JAIPUR, knowledgeSeedRows, formatDefaultHeroKnowledge, formatDefaultHeroKnowledgeWithLiveEmi, kindForModelName, sanitizeIntentSummary, variantsForEnquiry, formatWhatsAppModelCatalog } from "@workspace/db/heroCatalog";
 import { ON_ROAD_JAIPUR as EMI_PRICES } from "../src/lib/emiQuote";
 import { pickThinkingFiller } from "../src/lib/voiceFastPath";
 import { sanitizeAgentSpeech, prepareTtsText } from "../src/lib/ttsPrep";
@@ -69,4 +69,26 @@ test("sanitizeIntentSummary: call-9 must not call Glamour a scooter", () => {
   const fixed = sanitizeIntentSummary(raw, "Glamour X DSS");
   assert.match(fixed, /bike/i);
   assert.doesNotMatch(fixed, /purchasing a scooter/i);
+});
+
+test("WhatsApp catalog covers the enquired family, not the whole Hero list", () => {
+  const glamour = variantsForEnquiry("Glamour X DSS");
+  assert.ok(glamour.every((v) => v.family === "Glamour X"));
+  assert.ok(glamour.some((v) => v.name === "Glamour X DSS"));
+  const text = formatWhatsAppModelCatalog("Glamour X DSS", "hi");
+  assert.match(text, /1,11,587/);
+  assert.match(text, /CRUISE CONTROL/);
+  assert.doesNotMatch(text, /Destini/);
+
+  const both = variantsForEnquiry("HF Deluxe, Splendor XTEC");
+  const families = new Set(both.map((v) => v.family));
+  assert.deepEqual([...families].sort(), ["HF Deluxe", "Splendor"]);
+  const rishabh = formatWhatsAppModelCatalog("HF Deluxe, Splendor XTEC", "hi");
+  assert.match(rishabh, /HF Deluxe DRS/);
+  assert.match(rishabh, /Splendor XTEC/);
+  assert.doesNotMatch(rishabh, /Glamour/);
+
+  const superOnly = variantsForEnquiry("Super Splendor XTEC");
+  assert.ok(superOnly.every((v) => v.family === "Super Splendor"));
+  assert.ok(!superOnly.some((v) => v.family === "Splendor"));
 });

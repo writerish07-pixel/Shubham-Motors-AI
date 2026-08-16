@@ -122,6 +122,70 @@ function inr(n: number): string {
   return n.toLocaleString("en-IN");
 }
 
+/** Families the customer named (Glamour X DSS → Glamour X; "HF Deluxe, Splendor XTEC" → both). */
+export function variantsForEnquiry(raw: string): HeroVariant[] {
+  const hay = (raw || "").trim();
+  if (!hay) return [];
+  const families = new Set<string>();
+  let remaining = hay.toLowerCase();
+
+  const familyNames = [...new Set(HERO_VARIANTS.map((v) => v.family))].sort((a, b) => b.length - a.length);
+  for (const family of familyNames) {
+    const needle = family.toLowerCase();
+    if (remaining.includes(needle)) {
+      families.add(family);
+      remaining = remaining.split(needle).join(" ");
+    }
+  }
+  for (const v of HERO_VARIANTS) {
+    const needle = v.name.toLowerCase();
+    if (needle && remaining.includes(needle)) {
+      families.add(v.family);
+      remaining = remaining.split(needle).join(" ");
+    }
+  }
+  for (const [re, name] of MODEL_ALIASES) {
+    if (re.test(remaining)) {
+      const hit = HERO_VARIANTS.find((v) => v.name === name);
+      if (hit) families.add(hit.family);
+      remaining = remaining.replace(re, " ");
+    }
+  }
+  return HERO_VARIANTS.filter((v) => families.has(v.family));
+}
+
+/** WhatsApp catalog for the model(s) enquired — prices, mileage, key features. */
+export function formatWhatsAppModelCatalog(raw: string, language = "hi"): string {
+  const vars = variantsForEnquiry(raw);
+  if (!vars.length) return "";
+  const isHi = language.startsWith("hi");
+  const lines: string[] = [];
+  lines.push(
+    isHi
+      ? `🏍️ *आपकी enquiry — Hero catalog (Jaipur on-road, ${HERO_PRICE_AS_OF})*`
+      : `🏍️ *Your enquiry — Hero catalog (Jaipur on-road, ${HERO_PRICE_AS_OF})*`,
+  );
+
+  let lastFamily = "";
+  for (const v of vars) {
+    if (v.family !== lastFamily) {
+      lastFamily = v.family;
+      const kind =
+        v.kind === "bike" ? (isHi ? "बाइक" : "bike")
+        : v.kind === "scooter" ? (isHi ? "स्कूटर" : "scooter")
+        : "EV";
+      const cc = v.cc ? `${v.cc}cc ` : "";
+      lines.push("");
+      lines.push(`*${v.family}* (${cc}${kind})`);
+    }
+    const price = v.onRoadJaipur != null ? `₹${inr(v.onRoadJaipur)}` : (isHi ? "शोरूम पर confirm" : "confirm at showroom");
+    const mpg = v.mileageKmpl != null ? ` | ~${v.mileageKmpl} kmpl` : "";
+    lines.push(`• *${v.name}* — ${price}${mpg}`);
+    lines.push(`  ${v.features}`);
+  }
+  return lines.join("\n");
+}
+
 function groupByFamily(kind: HeroKind): Map<string, HeroVariant[]> {
   const map = new Map<string, HeroVariant[]>();
   for (const v of HERO_VARIANTS) {

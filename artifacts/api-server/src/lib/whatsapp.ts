@@ -1,4 +1,5 @@
 import axios from "axios";
+import { formatWhatsAppModelCatalog } from "@workspace/db/heroCatalog";
 import { logger } from "./logger";
 import { withRetry } from "./resilience";
 import { whatsappTemplatesOnly } from "./agentTools";
@@ -38,10 +39,16 @@ export function botspaceMediaUrl(channelId: string): string {
   return `${BOTSPACE_PUBLIC_API}/v1/${channelId}/message/send-session-media-message`;
 }
 
-function authHeaders(apiKey: string): Record<string, string> {
+/** BotSpace Public API authenticates with `?apiKey=` — Bearer-only returns 401. */
+export function botspaceRequestOptions(apiKey: string): {
+  params: { apiKey: string };
+  headers: Record<string, string>;
+  timeout: number;
+} {
   return {
-    Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/json",
+    params: { apiKey },
+    headers: { "Content-Type": "application/json" },
+    timeout: 25000,
   };
 }
 
@@ -67,7 +74,7 @@ export async function sendWhatsAppTemplate(
             templateLanguage: languageCode,
             variables: bodyParams.slice(0, 8).map((text) => String(text).slice(0, 500)),
           },
-          { headers: authHeaders(apiKey), timeout: 25000 },
+          { ...botspaceRequestOptions(apiKey) },
         ),
       { label: "whatsapp.sendTemplate" },
     );
@@ -104,7 +111,7 @@ export async function sendWhatsAppMessage(phone: string, message: string, leadNa
             name: leadName || undefined,
             text: message,
           },
-          { headers: authHeaders(apiKey), timeout: 25000 },
+          { ...botspaceRequestOptions(apiKey) },
         ),
       { label: "whatsapp.sendMessage" },
     );
@@ -133,6 +140,8 @@ export async function sendCallSummaryWhatsApp(
   const isHindi = language.startsWith("hi");
   const nameStr = leadName?.trim() || "";
   const priceBlock = priceLine ? `\n\n${priceLine}` : "";
+  const catalog = interestedModel ? formatWhatsAppModelCatalog(interestedModel, language) : "";
+  const catalogBlock = catalog ? `\n\n${catalog}` : "";
 
   let message: string;
 
@@ -142,8 +151,9 @@ export async function sendCallSummaryWhatsApp(
     message =
       `नमस्ते ${addrName}! 🙏\n\n` +
       `*शुभम मोटर्स* (Hero MotoCorp) से बात करने के लिए धन्यवाद।\n\n` +
-      `📋 *बातचीत का सारांश:*\n${summary}${modelLine}${priceBlock}\n\n` +
-      `📍 Test ride के लिए हमारे showroom पर पधारें!\n\n` +
+      `📋 *बातचीत का सारांश:*\n${summary}${modelLine}${priceBlock}${catalogBlock}\n\n` +
+      `📍 Test ride: शुभम मोटर्स, लाल कोठी, टोंक रोड, जयपुर\n` +
+      `📞 0141-4937655\n\n` +
       `कोई भी जानकारी चाहिए तो call करें। आपकी सेवा में हमेशा तत्पर हैं! 🏆`;
   } else {
     const modelLine = interestedModel ? `\n🏍️ Model of Interest: *${interestedModel}*` : "";
@@ -151,8 +161,9 @@ export async function sendCallSummaryWhatsApp(
     message =
       `Hello ${addrName}! 👋\n\n` +
       `Thank you for speaking with us at *Shubham Motors* (Hero MotoCorp).\n\n` +
-      `📋 *Call Summary:*\n${summary}${modelLine}${priceBlock}\n\n` +
-      `📍 Visit us at our showroom for a test ride!\n\n` +
+      `📋 *Call Summary:*\n${summary}${modelLine}${priceBlock}${catalogBlock}\n\n` +
+      `📍 Test ride: Shubham Motors, Lal Kothi, Tonk Road, Jaipur\n` +
+      `📞 0141-4937655\n\n` +
       `For any queries, feel free to call us back. We're here to help you find your perfect Hero bike! 🏆`;
   }
 
@@ -197,7 +208,7 @@ export async function sendBrochureWhatsApp(
             mediaType: "document",
             label: caption,
           },
-          { headers: authHeaders(apiKey), timeout: 25000 },
+          { ...botspaceRequestOptions(apiKey) },
         ),
       { label: "whatsapp.sendBrochure" },
     );
