@@ -197,7 +197,7 @@ export function tryDirectAnswer(
     if (/kitne\s*(mahine|month|मही)|tenure|duration/i.test(text) && ctx?.history?.length) {
       const lastAgent = [...ctx.history].reverse().find((h) => h.role === "assistant" && !/^\s*\[TRANSFER/i.test(h.content));
       if (lastAgent?.content.match(/₹[\d,]+/)) {
-        return `Jo EMI maine abhi batayi thi — woh ${months} mahine ki reference EMI hai @ 9%. Actual rate aapke CIBIL par 8.5%–12% ho sakta hai. ${FINANCE_PARTNERS_LIST}`;
+        return `जो ई एम आई मैंने अभी बताई थी — वो ${months} महीने की रेफरेंस ई एम आई है, नौ प्रतिशत पर। असल रेट आपके सिबिल पर साढ़े आठ से बारह प्रतिशत हो सकता है। ${FINANCE_PARTNERS_LIST}`;
       }
     }
 
@@ -205,10 +205,10 @@ export function tryDirectAnswer(
     if (signals?.financeInterest || /finance|financing|option/i.test(text)) {
       if (resolved) {
         const emi24 = formatEmiQuote(resolved.model, resolved.onRoad, 25000, 24, rate);
-        return `${FINANCE_PARTNERS_LIST} ${emi24} Aap kitna down payment de sakte hain?`;
+        return `${FINANCE_PARTNERS_LIST} ${emi24} आप कितना डाउन पेमेंट दे सकते हैं?`;
       }
-      const vehicle = signals?.segment?.startsWith("scooter") ? "scooter" : "bike";
-      return `${FINANCE_PARTNERS_LIST} Kaun sa ${vehicle}/model final hai aur kitna down payment plan hai — main 24 aur 36 mahine ki EMI bataungi.`;
+      const vehicle = signals?.segment?.startsWith("scooter") ? "स्कूटर" : "बाइक";
+      return `${FINANCE_PARTNERS_LIST} कौन सा ${vehicle} फाइनल है और कितना डाउन पेमेंट प्लान है — मैं चौबीस और छत्तीस महीने की ई एम आई बताऊँगी।`;
     }
   }
 

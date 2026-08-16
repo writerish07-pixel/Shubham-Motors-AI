@@ -81,8 +81,8 @@ const INTENTS: Record<string, Intent> = {
     ],
     words: ["finance", "loan"],
     response: (ctx) => {
-      const vehicle = ctx.signals?.segment?.startsWith("scooter") ? "scooter" : "bike/scooter";
-      return `${FINANCE_PARTNERS_LIST} Pehle batayein kaun sa ${vehicle} aur roughly kitna down payment de sakte hain — phir main 9% reference par EMI bataungi (actual CIBIL par rate change ho sakta hai).`;
+      const vehicle = ctx.signals?.segment?.startsWith("scooter") ? "स्कूटर" : "बाइक या स्कूटर";
+      return `${FINANCE_PARTNERS_LIST} पहले बताइए कौन सा ${vehicle} और लगभग कितना डाउन पेमेंट दे सकते हैं — फिर मैं नौ प्रतिशत रेफरेंस पर ई एम आई बताऊँगी, असल रेट सिबिल पर बदल सकता है।`;
     },
   },
   thanks: {

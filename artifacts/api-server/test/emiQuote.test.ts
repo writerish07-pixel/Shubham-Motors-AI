@@ -55,9 +55,12 @@ test("resolveModelOnRoad: aliases including STT-garbled Glamour", () => {
   assert.equal(resolveModelOnRoad("koi bhi nahi"), null);
 });
 
-test("formatEmiQuote: includes tenure and reference-rate disclaimer", () => {
+test("formatEmiQuote: spoken Hindi with tenure and CIBIL band — not Latin IVR", () => {
   const q = formatEmiQuote("Glamour X DRS", 104555, 25000, 24);
-  assert.match(q, /live EMI/);
-  assert.match(q, /8\.5%/);
-  assert.match(q, /CIBIL/);
+  assert.match(q, /ई एम आई/);
+  assert.match(q, /सिबिल/);
+  assert.match(q, /24 महीने/);
+  assert.doesNotMatch(q, /live EMI|reducing balance|\/month @/);
+  const devanagari = (q.match(/[\u0900-\u097F]/g) || []).length;
+  assert.ok(devanagari > 40, q);
 });
