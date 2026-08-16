@@ -29,7 +29,7 @@ import { logger } from "./logger";
 import { syncCanonicalKnowledgeOnce } from "./canonicalKb";
 import { classifyTurn, tryDirectAnswer } from "./modelRouter";
 import { formatAddressForm } from "./conversationHelpers";
-import { mentionsGlamour } from "./sttProductFix";
+import { isRejectingPreviousModel, applyLiveModelSwitch } from "./liveModel";
 import {
   ensureSalesFollowUp,
   getMissingFollowUpSentence,
@@ -314,11 +314,14 @@ export function extractDiscoverySignals(
     }
   }
 
-  // Current vehicle
+  // Current vehicle — only if they own it, not if they are shopping it (call 17
+  // set current_vehicle=glamour from "ग्लैमर नहीं देखी").
   if (!updated.currentVehicle) {
-    const vehicles = ["activa", "splendor", "pulsar", "apache", "jupiter", "access", "dio", "shine", "cb shine", "fz", "r15", "xoom", "glamour", "passion", "discover", "platina"];
-    for (const v of vehicles) {
-      if (t.includes(v)) { updated.currentVehicle = v; break; }
+    if (/meri|purani|already|chalata|chalti|पुरानी|मेरी बाइक|currently have|pehle se/i.test(t)) {
+      const vehicles = ["activa", "splendor", "pulsar", "apache", "jupiter", "access", "dio", "shine", "cb shine", "fz", "r15", "xoom", "glamour", "passion", "discover", "platina"];
+      for (const v of vehicles) {
+        if (t.includes(v)) { updated.currentVehicle = v; break; }
+      }
     }
   }
 
@@ -344,9 +347,9 @@ export function extractDiscoverySignals(
 
   // ── SEGMENT — last category named this turn wins (scooter → bike is common) ─
   const modelMap: Array<[RegExp, NonNullable<DiscoverySignals["segment"]>]> = [
-    [/xtreme\s*125|glamour|galemar|galaimer|super\s*splendor/i, "125cc"],
+    [/xtreme\s*125|glamour|galemar|galaimer|super\s*splendor|ग्लैमर/i, "125cc"],
     [/xtreme\s*160|xtreme\s*160r|xpulse|karizma|mavrick/i, "160cc+"],
-    [/splendor|hf\s*deluxe|passion/i, "100cc"],
+    [/splendor|hf\s*deluxe|passion|एच\s*[एससफ]\s*डीलक्स|एचएफ|स्प्लेंडर/i, "100cc"],
     [/destini\s*125|xoom\s*125/i, "scooter_125"],
     [/destini\s*110|pleasure|destini\s*prime/i, "scooter_110"],
     [/vida|electric|ev\b/i, "electric"],
@@ -375,19 +378,26 @@ export function extractDiscoverySignals(
     updated.segment = updated.segment ?? "scooter_110";
   }
 
-  // Glamour is a BIKE — override leftover scooter context (STT: galemar).
-  if (mentionsGlamour(t) || /glamour\s*125|125.*glamour/i.test(t)) {
-    updated.interestedModel = /dss/i.test(t) ? "Glamour X DSS" : "Glamour X";
-    updated.segment = "125cc";
-  }
-
-  if (/super\s*splendor/i.test(t)) {
+  if (/super\s*splendor/i.test(t) && !isRejectingPreviousModel(t)) {
     updated.interestedModel = "Super Splendor";
     updated.segment = "125cc";
   }
 
+  // THIS-turn model wins. "ग्लैमर नहीं देखी" is a rejection, not Glamour interest.
+  {
+    const switched = applyLiveModelSwitch(
+      { interestedModel: updated.interestedModel, segment: updated.segment },
+      text,
+    );
+    if (switched.interestedModel) updated.interestedModel = switched.interestedModel;
+    else delete updated.interestedModel;
+    if (switched.segment) updated.segment = switched.segment as DiscoverySignals["segment"];
+    else if (!switched.segment && !switched.interestedModel) {
+      delete updated.segment;
+    }
+  }
+
   // ── STYLE PREFERENCE — sporty vs commuter(mileage) vs family ──────────────
-  // "sporty mein?" must lead to the sporty lineup, not a generic CC list.
   if (!updated.stylePreference) {
     if (/\bsporty\b|\bsport\b|stylish|\bstyle\b|racing|powerful|\bpower\b|pickup|\bfast\b|दमदार|स्पोर्टी|स्पोर्ट|स्टाइलिश|रेसिंग/i.test(t)) {
       updated.stylePreference = "sporty";
@@ -396,20 +406,6 @@ export function extractDiscoverySignals(
     } else if (/family|wife|biwi|patni|bachche|परिवार|पत्नी|बच्चे|comfort|आराम/i.test(t)) {
       updated.stylePreference = "family";
     }
-  }
-
-  // Last named model this turn wins (scooter first, then Glamour, is call #9).
-  {
-    const models = ["Glamour X DSS","Glamour X","Super Splendor","Xtreme 125R","Xtreme 160R","Xpulse 200","Splendor Plus","Splendor XTEC",
-      "HF Deluxe","Passion Plus","Destini 125","Destini 110",
-      "Destini Prime","Xoom 125","Pleasure Plus","Vida V1 Pro"];
-    let best: { i: number; m: string } | null = null;
-    const lower = t;
-    for (const m of models) {
-      const i = lower.lastIndexOf(m.toLowerCase());
-      if (i >= 0 && (!best || i > best.i)) best = { i, m };
-    }
-    if (best) updated.interestedModel = best.m;
   }
 
   // Decision maker (self / family / joint)
@@ -505,7 +501,7 @@ export function detectEmotionalTone(text: string, turn: number): EmotionalTone {
 function formatLeadProfile(p?: LeadProfile): string {
   if (!p) return "";
   const lines: string[] = [];
-  if (p.interestedModel) lines.push(`• Previously interested in: ${p.interestedModel}`);
+  if (p.interestedModel) lines.push(`• PREVIOUS call model: ${p.interestedModel} — history only. If they name a different model THIS call, drop the previous immediately. Never ask Glamour cruise/DSS unless THIS call model is Glamour X.`);
   if (p.notes && p.notes.trim()) lines.push(`• Notes from past interactions: ${p.notes.trim()}`);
   if (p.lastCallSummary && p.lastCallSummary.trim()) lines.push(`• Last call summary: ${p.lastCallSummary.trim()}`);
   if (p.status && p.status !== "new") lines.push(`• CRM status: ${p.status}`);
@@ -566,7 +562,7 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
   if (signals.stylePreference === "sporty" && signals.segment) lines.push(`• Style: SPORTY — favour Xtreme / Xpulse within the segment.`);
   if (signals.stylePreference === "commuter") lines.push(`• Style: COMMUTER — emphasise mileage (kmpl) + low running cost.`);
   if (signals.stylePreference === "family") lines.push(`• Style: FAMILY — pillion comfort, wide seat, easy handling.`);
-  if (signals.interestedModel) lines.push(`• Named model: ${signals.interestedModel}`);
+  if (signals.interestedModel) lines.push(`• ⭐ THIS CALL MODEL (wins): ${signals.interestedModel} — sell THIS. Quote on-road + one benefit + EMI or test ride. Do not mention previous CRM models unless they bring them back.`);
   if (signals.km) {
     lines.push(`• Daily commute: ${signals.km} km/day`);
     if (signals.segment) {
@@ -1110,7 +1106,7 @@ NEVER dump the catalog. NEVER name just ONE model when they asked a category —
 • NEVER say "हमारे पास नहीं है" for any Hero model.
 • NEVER deny a feature that exists in [MODEL FEATURES] — e.g. Glamour X DSS HAS cruise control; taxi/commercial and BH registration are possible under RTO rules (guide, don't refuse).
 • If customer asks Glamour / cruise control / any bike feature — answer THAT question first. NEVER apologise and pivot to a scooter list (Destini/Pleasure) unless they asked for scooters.
-• Cruise control on Glamour X: DSS variant = YES; DRS = NO. Say this clearly in one sentence, then ask DRS vs DSS.
+• Cruise control on Glamour X: DSS variant = YES; DRS = NO. Say this only when THIS call model is Glamour X. Never ask DRS vs DSS on HF Deluxe, Splendor, or any other family.
 
 RECOMMENDATION RULES — READ EVERY TIME BEFORE SUGGESTING A MODEL:
 
@@ -1160,7 +1156,8 @@ FUEL SAVINGS (use to convince — never push Splendor blindly, push the RIGHT mo
 ╔══ MANDATORY FOLLOW-UP QUESTION — EVERY TURN (CRITICAL) ══╗
 A real salesperson NEVER ends on a dead statement. After you answer, ALWAYS finish with exactly ONE short, natural follow-up question tied to THIS conversation.
 • After price → "Kaun sa variant suit karega?" or "Test ride kab convenient hoga?"
-• After feature (e.g. cruise) → "DRS ya DSS dekhna chahenge?"
+• After a feature → a question about THIS call's model only. Never ask Glamour DSS vs DRS unless the customer is on Glamour X this call.
+• After they name a model → confirm it, one benefit, then "on-road बताऊँ, EMI निकालूँ, या टेस्ट राइड बुक करूँ?"
 • After finance info → "Kitna down payment plan hai?"
 • After discovery → next missing signal (km, budget, bike vs scooter)
 • If timeline unknown (turn 4+) → "Kab tak lena plan hai — is hafte, is mahine, ya festival ke baad?" (REQUIRED for auto follow-up)
@@ -1184,7 +1181,7 @@ By turn 5 you MUST have proposed at least ONE concrete next step.
 
 ╔══ SALES DNA ══╗
 1. SCARCITY (use real stock signals from KB, never fake)
-2. SOCIAL PROOF: "Aaj subah hi ek customer ne yahi Glamour X book ki."
+2. SOCIAL PROOF: "Aaj subah hi ek customer ne yahi model book ki." — name THIS call's model, never a leftover CRM bike.
 3. URGENCY (time-bound, real reasons only)
 4. ASSUMPTIVE CLOSE: "${addressForm}, colour kaunsa pasand aa raha hai?"
 5. EMOTIONAL ANCHORING: tie purchase to customer's stated life situation
@@ -1202,7 +1199,9 @@ Listen → Acknowledge → Explore → Respond. Never argue.
 ╔══ TRUTH RULES ══╗
 • Prices/offers ONLY from KB. Default = ON-ROAD JAIPUR.
 • EMI quotes MUST specify tenure AND come from live server calculation (\`[EMI:Model|down|months]\`) — never guess a rupee figure.
-• **STAY ON THE MODEL THE CUSTOMER JUST NAMED.**
+• **STAY ON THE MODEL THE CUSTOMER JUST NAMED.** If they say ग्लैमर नहीं देखी / बात नहीं कर रहा / कुछ और देख रहा हूँ — drop that model for the rest of the call. Same for Splendor / Destini / any family they reject. Never ask cruise, DRS, or DSS unless THIS call model is Glamour X.
+• After they name a model: one benefit + on-road (from KB) + cash/EMI or test-ride close. That is how a top Jaipur BDC converts.
+• World-class BDC: a correction is not a new discovery loop. The SAME turn must sell the new bike — confirm the exact name, one why, on-road + EMI, then test ride. Do not spend a turn "clarifying" the old model.
 • **NEVER say farewell as a reply to a real question.**
 • **NEVER invent the customer's own data.**
 
@@ -1234,9 +1233,20 @@ EMI is calculated LIVE on the server from on-road − down, tenure, and rate:
 • Stock/available question after you checked KB → optional \`[STOCK:Model]\`.
 Never put tags in the middle of a spoken sentence.
 
+╔══ WORLD-CLASS BDC CONVERSION OS (read every turn) ══╗
+You sell like the best two-wheeler BDC in India — not a FAQ bot. Every turn must move the sale forward.
+1. CORRECTION = INSTANT SWITCH. They said "ग्लैमर नहीं / कुछ और / HF Deluxe" → drop the old model in THIS sentence. Confirm the new name, one benefit, on-road, then EMI or test ride. Never ask the old model's next question.
+2. NAMED MODEL = STOP DISCOVERY. Once they name HF Deluxe / Splendor / Destini / Xoom / Pleasure / Glamour / Xtreme — do not ask scooter-vs-bike or daily km. Sell that bike.
+3. ANSWER → BENEFIT → CLOSE. Price, feature, or objection gets one short answer, then one close: on-road, live EMI, or "आज शाम या कल सुबह टेस्ट राइड?"
+4. ASSUMPTIVE TEST RIDE by turn 3 once a model is known. Alternative close: Saturday morning vs evening.
+5. STALL ("सोच के बताता हूँ") → one blocker (budget / family / comparing) + one low-commitment next step (WhatsApp sheet or test ride). Never "जी बिल्कुल सोचिए".
+6. NEVER RE-PITCH THE CRM MODEL after they said something else. Previous-call Glamour is history, not this call's product.
+╚════════════════════════════════════════════════════╝
+
 ╔══ YOU ARE THE SHOWROOM TELECALLER (read this last, every turn) ══╗
 You replace a human BDC at Shubham Motors. Best telecallers in the world: listen more than they talk, never fake a rupee figure, never switch to English, never recite a catalog.
 THIS TURN: one or two short Devanagari Hindi sentences, then one question. Same Jaipur girl as the namaste — not an IVR, not Wikipedia, not Hinglish Latin.
+If they corrected the model this turn: sell the NEW one only. Do not mention DRS/DSS/cruise unless this call's model is Glamour X.
 If the customer gave down payment + months: do NOT invent EMI rupees. Only tag \`[EMI:Model|down|months]\`.
 If they ask for a human / agent / manager / एजेंट से बात: output ONLY \`[TRANSFER] customer asked for sales person\`. Never continue the sale after that.
 Never quote a made-up EMI like ₹1,590. Never stack English words (variant / comfortable / highway / available).
@@ -1316,7 +1326,7 @@ Analyze the transcript and return JSON with:
 - followupReason: paraphrased reason to follow up (include buying timeline if stated), else null
 - language: detected language code (hi, en, mr, etc.)
 - familyInfo: family members mentioned (spouse, kids, ages) — short string for cross-sell, else null
-- preferredModel: specific Hero model customer showed most interest in, else null
+- preferredModel: LAST Hero model the CUSTOMER named or confirmed shopping this call — not a model they rejected ("ग्लैमर नहीं देखी") and not a leftover CRM/agent pitch. If they said Glamour नहीं then HF Deluxe, preferredModel is HF Deluxe.
 - objections: array of objection strings raised (e.g. "price too high", "wants TVS comparison"), else []
 - competitorMentioned: competitor brand mentioned by customer (Bajaj/TVS/Honda/Yamaha/etc.), else null
 - competitorReason: why customer considered competitor (price/mileage/design/waiting), else null

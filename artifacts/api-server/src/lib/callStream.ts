@@ -1117,6 +1117,11 @@ function getProactiveMessage(session: Session): string | null {
     return `${name}, ${buyingTimelineQuestion(s.interestedModel)}`;
   }
 
+  // Named this-call model: sell it — never pitch leftover Glamour on a Deluxe/Splendor call.
+  if (s.interestedModel) {
+    return `${name}${s.interestedModel} की टेस्ट राइड कब आएँगे — आज शाम या कल सुबह?`;
+  }
+
   // ── SEGMENT-SPECIFIC PITCH ─────────────────────────────────────────────────
   if (s.segment === "100cc" && s.km) {
     const rec = s.km >= 60 ? "एच एफ डिलक्स — सबसे ज़्यादा माइलेज" : "स्प्लेंडर प्लस एक्सटेक";
@@ -1163,7 +1168,7 @@ function detectTopicShift(lastAgentText: string, customerText: string): boolean 
   // question and would fire spurious topic-interrupts on nearly every turn.
   const topics: Record<string, RegExp> = {
     scooter: /scooter|scooty|destini|pleasure|xoom|vida/i,
-    bike: /\bbike\b|splendor|glamour|galemar|galaimer|xtreme|hf deluxe|passion|xpulse|bullet|cruise/i,
+    bike: /\bbike\b|splendor|glamour|galemar|galaimer|xtreme|hf deluxe|passion|xpulse|bullet|cruise|एच.?एफ|डीलक्स|स्प्लेंडर|ग्लैमर/i,
     price: /\bprice\b|on.?road|ex.?showroom|kitne ka|kitne ki|kimat|qeemat|कीमत/i,
     emi: /\bemi\b|finance|\bloan\b|kist|किस्त|down ?payment|installment/i,
     address: /\baddress\b|showroom kahan|\blocation\b|kahan hai|kahan ho|jagah/i,

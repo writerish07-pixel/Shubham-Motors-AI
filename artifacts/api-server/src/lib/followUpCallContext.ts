@@ -17,7 +17,7 @@ export function buildPurchaseVerificationGreeting(
 ): string {
   const name = leadName !== "Sir" ? `${leadName} जी` : "जी";
   if (interestedModel) {
-    return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। क्या आपने ${interestedModel} ले ली या अभी सोच रहे हैं?`;
+    return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। पिछली बार ${interestedModel} की बात हुई थी — वो ले ली, अभी उसी पर सोच रहे हैं, या कुछ और देख रहे हैं?`;
   }
   if (followupReason) {
     return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। ${followupReason} — पहले यह बताइए, बाइक ले ली या अभी देख रहे हैं?`;
@@ -47,9 +47,10 @@ export function buildFollowUpCallPromptBlock(
 ╔══ FOLLOW-UP CALL (call #${priorCallCount + 1}) — PRIORITY OVERRIDE ══╗
 This is a RETURN call. Follow these even if they conflict with normal discovery rules.
 
-🚫 DO NOT RE-ASK if already known: name, budget, segment, interested model.
+🚫 DO NOT RE-ASK if already known: name, budget, km.
+⚠️ CRM Model is PREVIOUS-CALL history only. If they name a different bike/scooter OR say वो नहीं / कुछ और देख रहे हैं — DROP the old model this call. Same turn: confirm the new name, one benefit, on-road + EMI, then test ride. Never ask Glamour cruise / DRS / DSS unless THIS call model is Glamour X.
 ✅ START by asking: "Kya aapne bike le li since last call?" — if YES, handle outcome warmly.
-✅ If NO: CONTINUE from last conversation — do NOT restart full discovery.
+✅ If NO: CONTINUE from last conversation — do NOT restart full discovery. If they switched models, sell the new one.
 ✅ If timeline unknown, ask naturally: "Kab tak lena plan hai — is hafte, mahine, ya festival ke baad?"
 ✅ Be warm — like continuing an old conversation, not a cold call.
 

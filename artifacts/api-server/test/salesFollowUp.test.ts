@@ -53,6 +53,15 @@ test("pickContextualFollowUp: no segment known asks scooter vs bike first", () =
   assert.match(q, /बाइक/);
 });
 
+test("pickContextualFollowUp: named model sells it instead of asking km", () => {
+  const q = pickContextualFollowUp({
+    signals: { interestedModel: "Splendor XTEC" },
+    customerText: "mileage kitni hai",
+  });
+  assert.doesNotMatch(q, /किलोमीटर|स्कूटर चाहिए/);
+  assert.match(q, /ऑन-रोड|टेस्ट राइड/);
+});
+
 test("shouldSpeakAnotherSentence: short acknowledgement is not the whole turn", () => {
   assert.equal(shouldSpeakAnotherSentence("कोई बात नहीं, शिवाय जी!", 1), true);
   assert.equal(shouldSpeakAnotherSentence("आप स्कूटर देख रहे हैं या बाइक?", 1), false);

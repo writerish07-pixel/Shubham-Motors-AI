@@ -372,10 +372,7 @@ router.all("/webhooks/exotel/status", async (req, res): Promise<void> => {
           language: analysis.language,
           intentSummary: analysis.summary,
           lastCallId: callRecord.id,
-          // Only fill interestedModel when the lead doesn't already have one —
-          // never clobber a manually-set / previously-confirmed model with a
-          // weaker LLM inference. COALESCE keeps any existing value.
-          ...(analysis.preferredModel ? { interestedModel: sql`COALESCE(${leadsTable.interestedModel}, ${analysis.preferredModel})` } : {}),
+          ...(analysis.preferredModel ? { interestedModel: analysis.preferredModel } : {}),
           ...(analysis.familyInfo ? { familyInfo: analysis.familyInfo } : {}),
           ...(analysis.competitorMentioned ? { competitorMentioned: analysis.competitorMentioned } : {}),
           ...(analysis.competitorReason ? { competitorReason: analysis.competitorReason } : {}),
