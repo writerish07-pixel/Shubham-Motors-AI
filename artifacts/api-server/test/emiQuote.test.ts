@@ -26,6 +26,7 @@ test("parseDownPayment: lakh / hajar / plain forms", () => {
   assert.equal(parseDownPayment("1 lakh down dunga"), 100000);
   assert.equal(parseDownPayment("25 hajar de sakta hoon"), 25000);
   assert.equal(parseDownPayment("down payment 30,000"), 30000);
+  assert.equal(parseDownPayment("अगर मैं ₹35000 का डाउन पेमेंट देता हूं"), 35000);
   assert.equal(parseDownPayment("bike chahiye"), null);
 });
 

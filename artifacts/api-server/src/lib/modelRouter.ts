@@ -35,6 +35,8 @@ const STT_ALIASES: Array<[RegExp, string]> = [
   [/jan\s+prakash/gi, "Gyan Prakash"],
   [/jian\s+prakash/gi, "Gyan Prakash"],
   [/जूम/g, "Xoom"],
+  [/\broom\s*125\b/gi, "Xoom 125"],
+  [/रूम\s*125/g, "Xoom 125"],
   // Splendor variants
   [/\bsplender\b/gi, "Splendor"],
   [/\bsplendar\b/gi, "Splendor"],
@@ -160,26 +162,26 @@ export function tryDirectAnswer(
     return `${dealer.name} ${dealer.hours} खुला रहता है. आप कब आना चाहेंगे ${addressForm}?`;
   }
   if (ADDRESS_QUERY_RE.test(text) && !FIND_OUT_RE.test(text)) {
-    return `हमारा showroom ${dealer.address} है ${addressForm}, मैं exact location WhatsApp पर अभी भेज देती हूँ. क्या आज शाम का test ride book कर लूँ?`;
+    return `हमारा शोरूम ${dealer.address} है ${addressForm}। लोकेशन वॉट्सऐप पर भेज देती हूँ — आज शाम टेस्ट राइड कर लूँ?`;
   }
 
   const historyText = (ctx?.history ?? []).map((h) => h.content).join(" ");
   const glamourCtx = mentionsGlamour(text) || mentionsGlamour(historyText) || /glamour/i.test(signals?.interestedModel ?? "");
 
   if (isCruiseControlQuestion(text) || (glamourCtx && isFeatureAvailabilityQuestion(text) && /control|cruis|centro|संट्रो|क्रूज/i.test(text))) {
-    return `Glamour X DSS variant mein cruise control hai — DRS variant mein nahi hota. Highway ride comfortable rehti hai. Aap DSS dekhna chahenge ya DRS?`;
+    return `ग्लैमर एक्स डी एस एस में क्रूज़ कंट्रोल है, डी आर एस में नहीं। हाईवे पर आराम रहता है। डी एस एस देखना है या डी आर एस?`;
   }
 
   if (glamourCtx && (isFeatureAvailabilityQuestion(text) || FEATURE_QUERY_RE.test(text))) {
-    return `Glamour X 125cc styled commuter hai — DSS variant mein cruise control milta hai, on-road Jaipur mein lagbhag ek lakh se upar. DRS ya DSS — kaun sa variant dekh rahe hain?`;
+    return `ग्लैमर एक्स एक सौ पच्चीस सीसी की स्टाइल वाली बाइक है — डी एस एस में क्रूज़ कंट्रोल मिलता है, जयपुर ऑन-रोड लगभग एक लाख से ऊपर। डी आर एस या डी एस एस, कौन सा वेरिएंट देख रहे हैं?`;
   }
 
   if (/(?:taxi|commercial|टैक्सी|कमर्शियल).*(?:number|regist|पंजी|रजिस्ट)|taxi.*(?:regist|number|plate)/i.test(text)) {
-    return `Haan ${addressForm}, Hero bikes par commercial ya taxi registration RTO rules ke hisaab se ho sakta hai — commercial insurance alag lagta hai. Kaun sa model aur kis city mein chalayenge? Humara RTO desk paperwork sambhal leta hai.`;
+    return `हाँ ${addressForm}, हीरो बाइक पर कमर्शियल या टैक्सी रजिस्ट्रेशन आर टी ओ नियमों से हो सकता है — इंश्योरेंस अलग लगता है। कौन सा मॉडल और किस शहर में चलाएँगे?`;
   }
 
   if (/\bBH\b.*(?:number|series|plate|रजिस्ट)|bharat\s*series|भारत\s*सीरीज/i.test(text)) {
-    return `BH series registration eligible customers ke liye available hai ${addressForm} — jo do alag states mein rehte ya kaam karte hain. Documents RTO pe depend karte hain; hum guide kar dete hain. Aap salaried hain ya business?`;
+    return `बी एच सीरीज़ उन ग्राहकों के लिए है ${addressForm} जो दो राज्यों में रहते या काम करते हैं। डॉक्यूमेंट आर टी ओ पर निर्भर करते हैं, हम गाइड कर देते हैं। आप सैलरीड हैं या बिज़नेस?`;
   }
 
   // Finance / EMI — list all banks; use customer's down payment @ 9% reference.
@@ -223,23 +225,23 @@ export function tryDirectAnswer(
   if (isPriceQ) {
     const range = extractOnRoadRange(modelEntry.body);
     if (range) {
-      return `${modelEntry.title} की on-road Jaipur price ${range} है ${addressForm}. कितने variant हैं उसमें से कौन सा देखना चाहेंगी — मैं detail भेज दूँ?`;
+      return `${modelEntry.title} की जयपुर ऑन-रोड कीमत ${range} है ${addressForm}। कौन सा वेरिएंट देखना है?`;
     }
   }
   if (isVariantQ) {
     const variants = extractVariantList(modelEntry.body);
     if (variants.length) {
       const list = variants.slice(0, 3).map(v => `${v.name} (₹${v.onRoad.toLocaleString("en-IN")})`).join(", ");
-      const extra = variants.length > 3 ? `और भी ${variants.length - 3} variant हैं` : "";
-      return `${modelEntry.title} में ${variants.length} variant available हैं — ${list}${extra ? ", " + extra : ""}. इनमें से कौन सा आपके लिए suit करेगा ${addressForm}?`;
+      const extra = variants.length > 3 ? `और भी ${variants.length - 3} वेरिएंट हैं` : "";
+      return `${modelEntry.title} में ${variants.length} वेरिएंट हैं — ${list}${extra ? ", " + extra : ""}। इनमें से कौन सा ठीक रहेगा ${addressForm}?`;
     }
   }
   if (isFeatureQ) {
     const engine = matchLine(modelEntry.body, /^Engine:\s*(.+)$/m);
     const warranty = matchLine(modelEntry.body, /^Warranty:\s*(.+)$/m);
     if (engine) {
-      const parts = [engine ? `Engine ${engine}` : null, warranty ? `warranty ${warranty}` : null].filter(Boolean);
-      return `${modelEntry.title} में ${parts.join(", ")}. आप test ride के लिए कब आ सकेंगी ${addressForm}?`;
+      const parts = [engine ? `इंजन ${engine}` : null, warranty ? `वारंटी ${warranty}` : null].filter(Boolean);
+      return `${modelEntry.title} में ${parts.join(", ")}। टेस्ट राइड कब आ सकते हैं ${addressForm}?`;
     }
   }
 

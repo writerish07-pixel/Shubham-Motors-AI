@@ -51,19 +51,20 @@ export function ttsLanguageCode(_sessionLanguage?: string, env: NodeJS.ProcessEn
   return env.TTS_LANGUAGE ?? "hi-IN";
 }
 
-export const BARGE_IN_GRACE_MS = 400;
+/** Echo-guard only — 400ms made the first half-second of every sentence uninterruptible. */
+export const BARGE_IN_GRACE_MS = 80;
 export const SILENCE_RMS = 0.008;
 
-/** Mid-call interrupt threshold. 12× silence (0.096) never fired on live calls. */
+/** Mid-call interrupt threshold. 12× silence never fired; 5× still missed live call #9. */
 export function bargeInRmsThreshold(env: NodeJS.ProcessEnv = process.env, silenceRms = SILENCE_RMS): number {
-  const n = Number(env.VOICE_BARGE_RMS ?? silenceRms * 5);
-  return Number.isFinite(n) && n > 0 ? n : silenceRms * 5;
+  const n = Number(env.VOICE_BARGE_RMS ?? silenceRms * 3);
+  return Number.isFinite(n) && n > 0 ? n : silenceRms * 3;
 }
 
-/** Consecutive 20 ms frames needed. Default 8 = 160 ms (was 18 = 360 ms). */
+/** Consecutive 20 ms frames needed. Default 5 = 100 ms. */
 export function bargeInFramesNeeded(env: NodeJS.ProcessEnv = process.env): number {
-  const n = Number(env.VOICE_BARGE_FRAMES ?? 8);
-  return Number.isFinite(n) ? Math.min(30, Math.max(4, Math.round(n))) : 8;
+  const n = Number(env.VOICE_BARGE_FRAMES ?? 5);
+  return Number.isFinite(n) ? Math.min(30, Math.max(3, Math.round(n))) : 5;
 }
 
 /**

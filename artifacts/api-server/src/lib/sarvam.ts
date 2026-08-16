@@ -168,7 +168,7 @@ export async function textToSpeech(
         speaker: process.env.SARVAM_TTS_SPEAKER || "anushka",
         // v2 is required for the ₹2/min cap; v3 is ~2×. Override only after a cost review.
         model: process.env.SARVAM_TTS_MODEL || "bulbul:v2",
-        enable_preprocessing: true,
+        enable_preprocessing: process.env.SARVAM_TTS_PREPROCESS === "1",
         // Conversational Jaipur pace — 0.85 sounded like a slow IVR.
         pace: clampSarvamTtsPace(process.env.SARVAM_TTS_PACE ?? 0.95),
         loudness: 1.15,
