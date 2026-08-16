@@ -6,7 +6,10 @@
   "exports": {
     ".": "./src/index.ts",
     "./schema": "./src/schema/index.ts",
-    "./heroCatalog": "./src/heroCatalog.ts"
+    "./heroCatalog": "./src/heroCatalog.ts",
+    "./playbooks": "./src/playbooks.ts",
+    "./kbRegression": "./src/kbRegression.ts",
+    "./syncKnowledge": "./src/syncKnowledge.ts"
   },
   "scripts": {
     "push": "drizzle-kit push --config ./drizzle.config.ts",

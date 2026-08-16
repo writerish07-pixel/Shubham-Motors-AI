@@ -10,6 +10,8 @@ import {
   DeleteKnowledgeItemParams,
 } from "@workspace/api-zod";
 import { analyzeCallIntent, learnFromTranscript, invalidateKnowledgeCache } from "../lib/openai";
+import { syncCanonicalKnowledgeOnce } from "../lib/canonicalKb";
+import { sanitizeKnowledgeItem } from "../lib/agentTools";
 import {
   classifyOfferUpload,
   OFFER_EXTRACT_INSTRUCTIONS,
@@ -244,12 +246,13 @@ router.post("/knowledge/upload/offer", upload.single("file"), ingestOfferUpload)
 router.post("/knowledge/upload/offer-image", upload.single("file"), ingestOfferUpload);
 
 router.get("/knowledge", async (req, res): Promise<void> => {
+  await syncCanonicalKnowledgeOnce();
   const params = ListKnowledgeItemsQueryParams.safeParse(req.query);
   let items = await db.select().from(knowledgeTable).orderBy(knowledgeTable.category);
 
   // Hide self-learning review-pending items from the main KB list by default.
   // The Pending Review UI uses GET /knowledge/pending explicitly.
-  items = items.filter((i) => !i.requiresReview);
+  items = items.filter((i) => !i.requiresReview).map(sanitizeKnowledgeItem);
 
   if (params.success && params.data.category) {
     items = items.filter((i) => i.category === params.data.category);
@@ -321,11 +324,13 @@ const MAX_IMPORT_ROWS = 5000;
 
 router.get("/knowledge/export", async (req, res): Promise<void> => {
   if (!requireAdmin(req, res)) return;
+  await syncCanonicalKnowledgeOnce();
   const rows = await db.select().from(knowledgeTable)
     .where(eq(knowledgeTable.requiresReview, false));
   const items = rows.map((r) => {
+    const cleaned = sanitizeKnowledgeItem(r);
     const out: Record<string, unknown> = {};
-    for (const k of KB_SAFE_FIELDS) out[k] = (r as Record<string, unknown>)[k];
+    for (const k of KB_SAFE_FIELDS) out[k] = (cleaned as Record<string, unknown>)[k];
     return out;
   });
   res.setHeader("Content-Disposition", `attachment; filename="knowledge-export-${new Date().toISOString().slice(0,10)}.json"`);

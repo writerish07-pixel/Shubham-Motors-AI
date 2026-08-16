@@ -3,6 +3,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { startScheduler } from "./lib/scheduler";
 import { setupVoicebotWS } from "./lib/callStream";
+import { syncCanonicalKnowledgeOnce } from "./lib/canonicalKb";
 
 const rawPort = process.env["PORT"];
 
@@ -34,4 +35,5 @@ server.listen(port, () => {
     logger.warn("DATABASE_URL is not set — database operations will fail");
   }
   startScheduler();
+  void syncCanonicalKnowledgeOnce();
 });

@@ -23,9 +23,10 @@
 import OpenAI from "openai";
 import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
-import { formatDefaultHeroKnowledge } from "@workspace/db/heroCatalog";
+import { formatDefaultHeroKnowledgeWithLiveEmi } from "@workspace/db/heroCatalog";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { syncCanonicalKnowledgeOnce } from "./canonicalKb";
 import { classifyTurn, tryDirectAnswer } from "./modelRouter";
 import { formatAddressForm } from "./conversationHelpers";
 import { mentionsGlamour } from "./sttProductFix";
@@ -44,6 +45,7 @@ import {
   formatKnowledgeSlice,
   isKnowledgeInEffect,
   retrieveKnowledgeForUtterance,
+  sanitizeKnowledgeItem,
   shouldAutoApplyLearning,
   type KnowledgeSliceItem,
 } from "./agentTools";
@@ -84,6 +86,7 @@ export function invalidateKnowledgeCache(): void {
 }
 
 export async function loadPublishedKnowledgeItems(): Promise<KnowledgeSliceItem[]> {
+  await syncCanonicalKnowledgeOnce();
   const now = Date.now();
   if (_kbItemsCache && _kbItemsCache.expiresAt > now) return _kbItemsCache.items;
   if (_kbItemsInflight) return _kbItemsInflight;
@@ -92,7 +95,7 @@ export async function loadPublishedKnowledgeItems(): Promise<KnowledgeSliceItem[
       .where(and(eq(knowledgeTable.isActive, true), eq(knowledgeTable.requiresReview, false)));
     const items: KnowledgeSliceItem[] = rows
       .filter((i) => isKnowledgeInEffect(i))
-      .map((i) => ({
+      .map((i) => sanitizeKnowledgeItem({
         category: i.category,
         title: i.title,
         content: i.content,
@@ -1221,12 +1224,7 @@ Customer's language: ${language}`;
 
 // Catalog is always-on. EMI rupees are calculated live in emiQuote.ts — do not
 // inject a precomputed table (wrong downs/tenures made Sakshi invent or stall).
-const DEFAULT_HERO_KNOWLEDGE = `${formatDefaultHeroKnowledge()}
-
-[LIVE EMI]
-Reducing-balance formula on (on-road − down payment). Default 9% p.a. Always state tenure.
-When the customer asks EMI: confirm model + their down payment, then output [EMI:Model|down|months].
-Disclaimer: actual rate depends on CIBIL (typically 8.5%–12%). Exact lock → [TRANSFER:FINANCE].`.trim();
+const DEFAULT_HERO_KNOWLEDGE = formatDefaultHeroKnowledgeWithLiveEmi();
 
 // ─── Call intent analysis ─────────────────────────────────────────────────────
 // IMPROVED: Added competitorMentioned, competitorReason, familyInfo, buyingTimeline.
