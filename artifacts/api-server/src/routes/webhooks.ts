@@ -8,6 +8,7 @@ import { resolveOutboundFollowupOutcome } from "../lib/scheduler";
 import { knowledgeTable } from "@workspace/db";
 import { logger } from "../lib/logger";
 import { findOrCreateLead } from "../lib/leadLookup";
+import { takeHumanTransfer } from "../lib/humanTransfer";
 import axios from "axios";
 import { sql } from "drizzle-orm";
 
@@ -22,6 +23,26 @@ router.all("/webhooks/exotel/dial-agent.xml", (req, res): void => {
   const to = String(params.to ?? "").replace(/[^\d+]/g, "");
   if (!to) {
     res.type("application/xml").send(exoml(sayTag("Transfer failed. Please call back. धन्यवाद।", "en")));
+    return;
+  }
+  res.type("application/xml").send(exoml(`<Dial>${escapeXml(to)}</Dial>`));
+});
+
+// Connect applet (after Voicebot): Exotel GETs this when the bot closes the WS.
+// JSON is what a dynamic Connect applet expects; XML Dial is the Stream-flow fallback.
+router.all("/webhooks/exotel/connect-agent", (req, res): void => {
+  const params = { ...(req.query as Record<string, string>), ...(req.body ?? {}) };
+  const callSid = String(params.CallSid ?? params.call_sid ?? params.callSid ?? params.Sid ?? "");
+  const queued = takeHumanTransfer(callSid);
+  const fallback = String(process.env.SALES_TRANSFER_NUMBER ?? "").replace(/[^\d+]/g, "");
+  const to = queued?.phone || fallback;
+  if (!to) {
+    res.type("application/xml").send(exoml(sayTag("माफ़ कीजिए, सेल्स एक्सपर्ट अभी उपलब्ध नहीं हैं। हम कॉल बैक करेंगे।")));
+    return;
+  }
+  const wantsJson = String(req.headers.accept ?? "").includes("json") || String(params.format ?? "") === "json";
+  if (wantsJson) {
+    res.json({ destination: { numbers: [to] } });
     return;
   }
   res.type("application/xml").send(exoml(`<Dial>${escapeXml(to)}</Dial>`));

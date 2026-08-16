@@ -49,6 +49,12 @@ import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
 import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed, bargeInFramesNeeded, bargeInRmsThreshold, nextBargeInCount, parseJsonStringList, SILENCE_RMS } from "./agentTools";
 import { executeAgentTools } from "./agentActions";
+import { prepareTtsText } from "./ttsPrep";
+import {
+  bargeEnergyHits,
+  isCustomerAskingForHuman,
+  queueHumanTransfer,
+} from "./humanTransfer";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
   const n = buf.length >> 1;
@@ -98,6 +104,7 @@ interface Session {
   ttsAbort?: boolean;
   bargeInCount?: number;
   speakingStartedAt?: number;
+  echoRms?: number;
   /** While set in the future, inbound energy must not abort TTS (greeting). */
   greetingProtectedUntil?: number;
   ttsGen: number;
@@ -492,7 +499,7 @@ void warmPhraseCache((text) => synthesizeTts(text, "hi-IN"));
 function sendExotelClear(ws: WebSocket, streamSid: string): void {
   if (ws.readyState !== WebSocket.OPEN) return;
   try {
-    ws.send(JSON.stringify({ event: "clear", stream_sid: streamSid }));
+    ws.send(JSON.stringify({ event: "clear", stream_sid: streamSid, streamSid }));
   } catch { /* ws closed */ }
 }
 
@@ -521,16 +528,13 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
   const pcm = pcm16LeToS16(chunk);
   const energy = rmsEnergy(pcm);
 
-  // ── Barge-in with echo guard ──────────────────────────────────────────────
+  // ── Barge-in: never drop inbound frames (call #9 barge_in_count=0).
   if (session.isSpeaking) {
     if (session.ttsAbort) {
       session.isSpeaking = false;
       // fall through — keep collecting the interrupt utterance
-    } else if (!bargeInArmed(session)) {
-      // Greeting / first 400 ms of playback — do not abort namaste on line noise.
-      return;
     } else {
-      session.bargeInCount = nextBargeInCount(session.bargeInCount ?? 0, energy, BARGE_IN_RMS);
+      session.echoRms = (session.echoRms ?? SILENCE_RMS) * 0.85 + energy * 0.15;
       if (energy > SILENCE_RMS) {
         session.audioBuf.push(chunk);
         if (session.speechCount === 0) cancelProactiveTimer(session);
@@ -540,13 +544,18 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
         session.silenceCount++;
         session.audioBuf.push(chunk);
       }
+      if (!bargeInArmed(session)) {
+        return;
+      }
+      const hits = bargeEnergyHits(energy, session.echoRms ?? SILENCE_RMS, BARGE_IN_RMS);
+      session.bargeInCount = nextBargeInCount(session.bargeInCount ?? 0, hits ? energy : 0, BARGE_IN_RMS);
       if ((session.bargeInCount ?? 0) >= BARGE_IN_FRAMES) {
         session.ttsAbort = true;
         session.ttsGen++;
         session.isSpeaking = false;
         session.bargeInEvents = (session.bargeInEvents ?? 0) + 1;
         session.bargeInCount = 0;
-        logger.info({ callSid: session.callSid, energy, buffered: session.audioBuf.length }, "Barge-in confirmed — stopping TTS");
+        logger.info({ callSid: session.callSid, energy, echoRms: session.echoRms, buffered: session.audioBuf.length }, "Barge-in confirmed — stopping TTS");
         sendExotelClear(ws, session.streamSid);
         // fall through to end-of-utterance handling with the buffered interrupt
       } else {
@@ -752,7 +761,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     session.isSpeaking = true;
     session.ttsAbort = false;
     session.bargeInCount = 0;
-    session.speakingStartedAt = Date.now();
+    session.speakingStartedAt = undefined;
     session.cost.addTtsText(fastWithFollowUp);
     const myGen = ++session.ttsGen;
     let actuallyPlayed = false;
@@ -793,7 +802,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   session.isSpeaking = true;
   session.ttsAbort = false;
   session.bargeInCount = 0;
-  session.speakingStartedAt = Date.now();
+  session.speakingStartedAt = undefined;
   const myGen = ++session.ttsGen;
 
   // Conditional thinking filler — only if first sentence takes >900ms (reduced, not every turn).
@@ -815,7 +824,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   let transferText: string | null = null;
   let attemptedCount = 0;
   let ttsFailures = 0;
-  const MAX_REPLY_SENTENCES = 2;
+  const MAX_REPLY_SENTENCES = 1;
   const collectedTags: AgentTag[] = [];
   let interrupted = false;
 
@@ -854,7 +863,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         if (!pcm) { ttsFailures++; return; }
         if (session.ttsAbort || session.isClosed || session.ttsGen !== myGen || ws.readyState !== WebSocket.OPEN) return;
         await playPcm8k(ws, session.streamSid, pcm, session);
-        if (!session.ttsAbort && session.ttsGen === myGen) played.push(parsed.spoken);
+        if (!session.ttsAbort && session.ttsGen === myGen) played.push(prepareTtsText(parsed.spoken));
       })();
       if (attemptedCount >= MAX_REPLY_SENTENCES) break;
     }
@@ -1095,25 +1104,7 @@ function isExplicitOptOut(text: string): boolean {
   return /(?:mat\s+(?:karo|karna|kijiye)\s*(?:call|phone)|call\s+mat\s+(?:karo|karna|kijiye)|band\s+karo\s+call|call\s+band\s+karo|hata\s*(?:lo|do)\s+number|number\s+hata\s*(?:lo|do)|do\s+not\s+call|don'?t\s+call|stop\s+calling|\bdnd\b|block\s+(?:karo|kar\s+do)|मत\s+करो\s+(?:कॉल|फोन)|कॉल\s+मत\s+करो|बंद\s+करो\s+कॉल|हटा\s+लो\s+नंबर)/i.test(text);
 }
 
-// ── isCustomerAskingForHuman (unchanged from original) ────────────────────────
-function isCustomerAskingForHuman(text: string): boolean {
-  const t = text.toLowerCase();
-  if (/(offer|discount|scheme|cashback|deal|price|kimat|qeemat|कीमत|emi|finance|कर्ज़|loan|kist|किस्त|mileage|माइलेज|stock|address|service|warranty|कब|when)/i.test(t)) {
-    return false;
-  }
-  const patterns: RegExp[] = [
-    /किसी\s+से\s+बात\s+(करा|करवा)/,
-    /(sales|manager|senior|sales\s*expert)\s*(वाले|वाली|बंदे|भाई|व्यक्ति|person|wala|waale|staff|team|executive|representative|agent)\s*(से|se)\s+(बात|baat|connect|कनेक्ट)/i,
-    /(connect|transfer|forward|put\s+me\s+through)\s+(me\s+|us\s+)?(to|with)\s+(a\s+|the\s+)?(sales|manager|human|senior|real\s+person|representative|agent)/i,
-    /(talk|speak)\s+(to|with)\s+(a\s+|the\s+)?(human|real\s+person|manager|senior|sales\s+(person|guy|executive|expert))/i,
-    /(असली|asli|real)\s+(व्यक्ति|person|aadmi|आदमी|insaan|इंसान)\s+(से|se)\s+(बात|baat)/i,
-    /kisi\s+se\s+baat\s+(kara|karwa)/i,
-    /(manager|senior)\s+(से|se)\s+baat\s+(karn[ai]|chahi|करनी|करना)/i,
-  ];
-  return patterns.some((re) => re.test(t));
-}
-
-// ── runTransfer (unchanged from original) ────────────────────────────────────
+// ── runTransfer ──────────────────────────────────────────────────────────────
 async function runTransfer(ws: WebSocket, session: Session, agentText: string): Promise<void> {
   const m = agentText.match(/^\s*\[TRANSFER(?::([A-Z]+))?(?::([^\]]+))?\]/i);
   const tag = (m?.[1] ?? "SALES").toUpperCase();
@@ -1130,31 +1121,45 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
   }
   const phone = target?.phone ?? process.env.SALES_TRANSFER_NUMBER ?? "";
   const targetLabel = target
-    ? (target.type === "finance" ? (target.bankName ?? "Finance team") : target.name)
-    : "sales expert";
+    ? (target.type === "finance" ? (target.bankName ?? "फाइनेंस टीम") : target.name)
+    : "सीनियर सेल्स";
 
   const addrName = session.leadName === "Sir" ? "सर" : session.leadName + " जी";
   const handoff = tag === "FINANCE"
-    ? `एक मिनट ${addrName}, मैं आपको ${targetLabel} के finance expert से connect कर रही हूँ। Line पर रहिए।`
-    : `एक मिनट ${addrName}, मैं आपको हमारे senior sales expert ${target ? target.name : ""} से connect कर रही हूँ। Line पर रहिए।`;
+    ? `एक मिनट ${addrName}, मैं आपको ${targetLabel} से जोड़ रही हूँ। लाइन पर रहिए।`
+    : `एक मिनट ${addrName}, मैं आपको हमारे सीनियर सेल्स ${target ? target.name : "एक्सपर्ट"} से जोड़ रही हूँ। लाइन पर रहिए।`;
   session.transcript.push(`Agent: ${handoff}`);
   await streamTtsToWs(ws, session.streamSid, handoff, session.language, session);
 
+  const queued = queueHumanTransfer(session.callSid, phone, targetLabel);
   let transferred = false;
   if (phone && session.callSid) {
     await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
     transferred = await transferCallToAgent(session.callSid, phone);
   }
 
-  // A transfer that silently fails strands the customer on a dead line after
-  // "connect kar rahi hoon" — always speak the fallback and keep the lead hot.
-  if (!transferred) {
-    await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-    const sorry = `माफ़ कीजिए ${addrName}, अभी हमारा sales expert available नहीं है। मैं आपका नंबर note कर लेती हूँ, हम 5 मिनट में call back करेंगे।`;
-    session.transcript.push(`Agent: ${sorry}`);
-    await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
-    logger.warn({ callSid: session.callSid, tag, bankHint, hadPhone: !!phone }, "Transfer not completed — spoke callback fallback");
+  if (transferred) {
+    session.transcript.push("Agent[tag]: transferred via Exotel Calls API");
+    logger.info({ callSid: session.callSid, tag, phoneQueued: queued }, "Human transfer via Exotel API");
+    return;
   }
+
+  // Voicebot next-applet path used by ElevenLabs/Exotel: close the stream so a
+  // Connect applet immediately after Voicebot can Dial the queued number.
+  if (queued && phone) {
+    await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
+    session.transcript.push("Agent[tag]: voicebot closed for Connect applet dial");
+    logger.info({ callSid: session.callSid, tag }, "Closing Voicebot WS for Connect applet human transfer");
+    session.isClosed = true;
+    try { ws.close(); } catch { /* already closing */ }
+    return;
+  }
+
+  await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
+  const sorry = `माफ़ कीजिए ${addrName}, अभी सेल्स एक्सपर्ट लाइन पर नहीं हैं। आपका नंबर नोट है, पाँच मिनट में कॉल बैक करेंगे।`;
+  session.transcript.push(`Agent: ${sorry}`);
+  await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
+  logger.warn({ callSid: session.callSid, tag, bankHint, hadPhone: !!phone }, "Transfer not completed — spoke callback fallback");
 }
 
 // ── TTS helpers (unchanged from original) ────────────────────────────────────
@@ -1191,6 +1196,7 @@ async function playPcm8k(ws: WebSocket, streamSid: string, pcm8k: Int16Array, se
   const t0 = Date.now();
   for (let n = 0; n < totalChunks; n++) {
     if (ws.readyState !== WebSocket.OPEN) break;
+    if (session && !session.speakingStartedAt) session.speakingStartedAt = Date.now();
     const greetingProtected = !!(session?.greetingProtectedUntil && Date.now() < session.greetingProtectedUntil);
     if (session?.ttsAbort && !greetingProtected) { logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)"); break; }
     const targetTime = t0 + n * 20;

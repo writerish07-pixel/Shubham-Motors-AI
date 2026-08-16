@@ -45,6 +45,8 @@ export function parseDownPayment(text: string): number | null {
   if (hajar) return parseInt(hajar[1]!, 10) * 1000;
   const raw = t.match(/(?:down\s*payment|डाउन)\s*(?:₹|rs\.?|rup)?\s*(\d[\d,]*)/);
   if (raw) return parseInt(raw[1]!.replace(/,/g, ""), 10);
+  const rupeeThenDown = t.match(/₹\s*(\d[\d,]*)\s*(?:ka|की|का|ke)?\s*(?:down|डाउन)/);
+  if (rupeeThenDown) return parseInt(rupeeThenDown[1]!.replace(/,/g, ""), 10);
   const num = t.match(/\b(\d{4,6})\b/);
   if (num) {
     const n = parseInt(num[1]!, 10);

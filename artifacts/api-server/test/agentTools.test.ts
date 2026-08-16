@@ -171,7 +171,7 @@ test("mid-call barge-in is armed during TTS wait so the customer can interrupt",
 
 test("barge-in grace window and greeting protection block abort", () => {
   const now = 1_000_000;
-  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 100 }, now), false);
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 40 }, now), false);
   assert.equal(
     bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000, greetingProtectedUntil: now + 5000 }, now),
     false,
@@ -180,9 +180,9 @@ test("barge-in grace window and greeting protection block abort", () => {
 });
 
 test("barge-in threshold is reachable for phone speech and count decays instead of resetting", () => {
-  assert.ok(bargeInRmsThreshold() < 0.06);
-  assert.ok(bargeInRmsThreshold() > 0.02);
-  assert.equal(bargeInFramesNeeded(), 8);
+  assert.ok(bargeInRmsThreshold() < 0.04);
+  assert.ok(bargeInRmsThreshold() > 0.015);
+  assert.equal(bargeInFramesNeeded(), 5);
   assert.equal(nextBargeInCount(0, 0.05, 0.04), 1);
   assert.equal(nextBargeInCount(7, 0.05, 0.04), 8);
   assert.equal(nextBargeInCount(7, 0.01, 0.04), 6);

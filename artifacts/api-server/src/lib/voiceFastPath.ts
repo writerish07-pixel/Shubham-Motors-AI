@@ -24,7 +24,7 @@ const INTENTS: Record<string, Intent> = {
       "बाद में", "अभी नहीं", "अभी मत", "फ्री नहीं", "टाइम नहीं",
     ],
     words: ["busy", "later", "व्यस्त"],
-    response: "कोई बात नहीं — aap kab free rahenge? Main tab call karungi.",
+    response: "कोई बात नहीं — आप कब फ्री रहेंगे? मैं तब कॉल करूँगी।",
   },
   not_interested: {
     phrases: [
@@ -34,7 +34,7 @@ const INTENTS: Record<string, Intent> = {
       "जरूरत नहीं", "हटा लो नंबर",
     ],
     words: [],
-    response: "Theek hai — zarurat ho toh call kijiyega. Dhanyavaad!",
+    response: "ठीक है — ज़रूरत हो तो कॉल कीजिएगा। धन्यवाद।",
   },
   callback: {
     phrases: [
@@ -42,7 +42,7 @@ const INTENTS: Record<string, Intent> = {
       "call back", "कॉल बैक", "बाद में बात", "बाद में कॉल",
     ],
     words: [],
-    response: "Main call kar lungi — subah suit karega ya shaam?",
+    response: "मैं कॉल कर लूँगी — सुबह ठीक रहेगा या शाम?",
   },
   address: {
     phrases: [
@@ -51,7 +51,7 @@ const INTENTS: Record<string, Intent> = {
       "शोरूम कहाँ", "शोरूम का पता", "शोरूम की लोकेशन",
     ],
     words: ["address", "location", "एड्रेस", "पता", "लोकेशन", "जगह"],
-    response: "Hum Lal Kothi, Tonk Road, Jaipur mein hain — subah 9 se shaam 7 baje tak khule hain.",
+    response: "हम लाल कोठी, टोंक रोड, जयपुर में हैं — सुबह नौ से शाम सात तक खुले हैं।",
   },
   timing: {
     phrases: [
@@ -61,7 +61,7 @@ const INTENTS: Record<string, Intent> = {
       "शोरूम की टाइमिंग", "शोरूम का टाइम",
     ],
     words: ["timing", "टाइमिंग", "समय"],
-    response: "Monday se Saturday subah 9 se shaam 7 baje. Aap kab aayenge?",
+    response: "सोमवार से शनिवार सुबह नौ से शाम सात। आप कब आएँगे?",
   },
   test_ride: {
     phrases: [
@@ -70,7 +70,7 @@ const INTENTS: Record<string, Intent> = {
       "चला के देखना", "चलाकर देखना",
     ],
     words: [],
-    response: "Test ride free hai — aaj, kal, ya weekend kab suit karega?",
+    response: "टेस्ट राइड फ्री है — आज, कल, या वीकेंड कब ठीक रहेगा?",
   },
   finance: {
     phrases: [
@@ -88,7 +88,7 @@ const INTENTS: Record<string, Intent> = {
   thanks: {
     phrases: ["thank you", "thanks", "धन्यवाद", "शुक्रिया"],
     words: ["dhanyavaad", "shukriya", "thanku", "thnx"],
-    response: "Aapka dhanyavaad! Aur kuch help chahiye toh batayein.",
+    response: "आपका धन्यवाद। और कुछ जानना हो तो बताइए।",
   },
   acknowledgement_short: {
     phrases: [
@@ -96,7 +96,7 @@ const INTENTS: Record<string, Intent> = {
       "ठीक है", "हाँ जी", "जी हाँ", "हाँ हाँ",
     ],
     words: ["haan", "ok", "okay", "हाँ", "हां", "achha", "accha", "अच्छा"],
-    response: "Bike sirf aap chalenge ya ghar mein koi aur bhi chalata hai? Family ke hisaab se recommend karungi.",
+    response: "बाइक सिर्फ़ आप चलाएँगे या घर में कोई और भी? परिवार के हिसाब से बताऊँगी।",
   },
 };
 
@@ -162,8 +162,8 @@ export function detectIntent(text: string, turn: number, ctx?: FastPathContext):
 /** Thinking audio only for slow EMI/price lookups — not every turn. */
 export const THINKING_FILLERS: string[] = [];
 
-const FILLER_PRICE = "Price dekh rahi hoon.";
-const FILLER_EMI = "EMI nikal rahi hoon.";
+const FILLER_PRICE = "कीमत देख रही हूँ।";
+const FILLER_EMI = "ई एम आई निकाल रही हूँ।";
 
 /**
  * Almost never speak a filler. Live calls stacked "ek second" every turn.
@@ -184,10 +184,10 @@ const CACHED_PHRASES: string[] = [
   ...THINKING_FILLERS,
   FILLER_PRICE,
   FILLER_EMI,
-  "Samajh rahi hoon — thoda detail dijiye?",
-  "Ek baar phir se bataiyega?",
-  "WhatsApp par details bhej deti hoon.",
-  "Aapka budget kitna hai?",
+  "समझ रही हूँ — थोड़ा और बताइए?",
+  "एक बार फिर से बताइएगा?",
+  "वॉट्सऐप पर डिटेल भेज देती हूँ।",
+  "आपका बजट कितना है?",
 ];
 
 const _phraseCache = new Map<string, Int16Array>();

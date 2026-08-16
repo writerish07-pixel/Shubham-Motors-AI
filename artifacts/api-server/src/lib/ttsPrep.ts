@@ -108,6 +108,19 @@ const PRONOUNCE: Array<[RegExp, string]> = [
   [/\bbank\s*rate\b/gi, "बैंक रेट"],
 
   [/\btest\s*ride\b/gi, "टेस्ट राइड"],
+  [/\bcomfortable\b/gi, "आरामदायक"],
+  [/\bconvenient\b/gi, "आसान"],
+  [/\bhighway\b/gi, "हाईवे"],
+  [/\bavailable\b/gi, "उपलब्ध"],
+  [/\bstorage\b/gi, "स्टोरेज"],
+  [/\bfamily\b/gi, "परिवार"],
+  [/\bscooter\b/gi, "स्कूटर"],
+  [/\bbike\b/gi, "बाइक"],
+  [/\bmodel\b/gi, "मॉडल"],
+  [/\bbudget\b/gi, "बजट"],
+  [/\bdetails?\b/gi, "डिटेल"],
+  [/\blocation\b/gi, "लोकेशन"],
+  [/\bweekend\b/gi, "वीकेंड"],
 ];
 
 // Insert a comma+space before "और" between bullet items / lists so the TTS
@@ -164,9 +177,26 @@ export function sanitizeAgentSpeech(text: string): string {
   return t;
 }
 
+function leftoverLatinToHindi(text: string): string {
+  return text.replace(/\b[A-Za-z]{3,}\b/g, (w) => {
+    const extra: Record<string, string> = {
+      mein: "में", nahi: "नहीं", hota: "होता", hai: "है", rehti: "रहती",
+      rahegi: "रहेगी", rahega: "रहेगा", chahenge: "चाहेंगे", dekhna: "देखना",
+      aap: "आप", kya: "क्या", aur: "और", ke: "के", ka: "का", ki: "की",
+      styled: "स्टाइल", commuter: "कम्यूटर", youth: "युवा", sporty: "स्पोर्टी",
+      confirm: "कन्फर्म", please: "प्लीज़", actually: "असल में",
+      exactly: "एकदम", currently: "अभी", really: "सच में",
+      plus: "प्लस", free: "फ्री", ride: "राइड",
+    };
+    return extra[w.toLowerCase()] ?? w;
+  });
+}
+
 export function prepareTtsText(text: string): string {
   let t = sanitizeAgentSpeech(stripMarkdown(text));
+  t = t.replace(/[""]/g, "");
   for (const [re, rep] of PRONOUNCE) t = t.replace(re, rep);
+  t = leftoverLatinToHindi(t);
   t = softenLists(t);
   return clipSpokenTts(t);
 }
