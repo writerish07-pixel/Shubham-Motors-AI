@@ -66,7 +66,7 @@ export default function CallDetail() {
         ].map(({ label, value }) => (
           <div key={label} className="bg-card border border-card-border rounded-lg p-3">
             <div className="text-xs text-muted-foreground mb-1">{label}</div>
-            <div className="text-sm font-medium capitalize truncate">{value}</div>
+            <div className={`text-sm font-medium truncate ${label === "Transferred To" || label === "Phone" ? "" : "capitalize"}`}>{value}</div>
           </div>
         ))}
       </div>

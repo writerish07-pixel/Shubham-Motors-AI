@@ -87,8 +87,8 @@ export default function Settings() {
       ] },
     { icon: <Bot size={16} />, title: "AI Brain (OpenAI)", desc: "GPT model for intent detection, scoring, and self-learning",
       fields: [{ label: "OpenAI API Key", placeholder: "sk-...", env: "OPENAI_API_KEY" }] },
-    { icon: <Phone size={16} />, title: "Sales Transfer", desc: "When a lead goes hot, AI transfers the call to your salesperson",
-      fields: [{ label: "Sales Person Number", placeholder: "10-digit mobile for hot lead transfers", env: "SALES_TRANSFER_NUMBER" }] },
+    { icon: <Phone size={16} />, title: "Sales Transfer", desc: "Fallback only if CRM Contacts is empty. Add the full sales team under Contacts — they all ring together.",
+      fields: [{ label: "Fallback sales number", placeholder: "10-digit mobile if Contacts is empty", env: "SALES_TRANSFER_NUMBER" }] },
   ];
 
   return (
