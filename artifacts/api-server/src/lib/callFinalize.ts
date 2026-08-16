@@ -310,7 +310,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       lead.phone,
       lead.name,
       analysis.summary,
-      lead.interestedModel,
+      modelOfInterest ?? lead.interestedModel,
       sessionLanguage,
       priceLine,
     ).catch((err) => {

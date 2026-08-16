@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   BOTSPACE_PUBLIC_API,
   botspaceMediaUrl,
+  botspaceRequestOptions,
   botspaceSessionUrl,
   botspaceTemplateUrl,
   normalizeWhatsAppPhone,
@@ -29,4 +30,10 @@ test("normalizeWhatsAppPhone matches BotSpace +91 example", () => {
   assert.equal(normalizeWhatsAppPhone("8890589911"), "+918890589911");
   assert.equal(normalizeWhatsAppPhone("+91 72405 16000"), "+917240516000");
   assert.equal(normalizeWhatsAppPhone("917240516000"), "+917240516000");
+});
+
+test("BotSpace auth is query apiKey, not Bearer-only", () => {
+  const opts = botspaceRequestOptions("test-key");
+  assert.equal(opts.params.apiKey, "test-key");
+  assert.equal(opts.headers.Authorization, undefined);
 });
