@@ -43,7 +43,7 @@ import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
 import { transferCallToAgent } from "./exotel";
 import { correctStt } from "./modelRouter";
 import { getOutboundContext } from "./scheduler";  // FIX #6: outbound context
-import { ensureSalesFollowUp } from "./salesFollowUp";
+import { ensureSalesFollowUp, getMissingFollowUpSentence, shouldSpeakAnotherSentence } from "./salesFollowUp";
 import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
@@ -103,11 +103,13 @@ interface Session {
   speechCount: number;
   isProcessing: boolean;
   isClosed: boolean;
+  finalized?: boolean;
   isSpeaking?: boolean;
   ttsAbort?: boolean;
   bargeInCount?: number;
   speakingStartedAt?: number;
   echoRms?: number;
+  lastBargeInAt?: number;
   /** While set in the future, inbound energy must not abort TTS (greeting). */
   greetingProtectedUntil?: number;
   ttsGen: number;
@@ -360,6 +362,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     speechCount: 0,
     isProcessing: false,
     isClosed: false,
+    finalized: false,
     ttsGen: 0,
     leadProfile,
     isOutbound,
@@ -442,6 +445,7 @@ function emergencySession(msg: Record<string, unknown>): Session {
     speechCount: 0,
     isProcessing: false,
     isClosed: false,
+    finalized: false,
     ttsGen: 0,
     isOutbound: false,
     discoverySignals: {},
@@ -560,6 +564,14 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
         session.bargeInCount = 0;
         logger.info({ callSid: session.callSid, energy, echoRms: session.echoRms, buffered: session.audioBuf.length }, "Barge-in confirmed — stopping TTS");
         sendExotelClear(ws, session.streamSid);
+        session.lastBargeInAt = Date.now();
+        setTimeout(() => {
+          if (session.isClosed || session.isProcessing) return;
+          if (session.speechCount >= MIN_SPEECH_CHUNKS) {
+            session.silenceCount = Math.max(session.silenceCount, SILENCE_CHUNKS);
+            kickPipeline(ws, session);
+          }
+        }, 450);
         // fall through to end-of-utterance handling with the buffered interrupt
       } else {
         return;
@@ -577,25 +589,32 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
     if (session.speechCount > 0) session.audioBuf.push(chunk);
   }
 
+  kickPipeline(ws, session);
+}
+
+function kickPipeline(ws: WebSocket, session: Session): void {
+  if (session.isClosed || session.isProcessing) return;
   const totalChunks = session.audioBuf.length;
-  const shouldProcess =
-    !session.isProcessing &&
+  const should =
     session.speechCount >= MIN_SPEECH_CHUNKS &&
     (session.silenceCount >= SILENCE_CHUNKS || totalChunks >= MAX_SPEECH_CHUNKS);
-
-  if (shouldProcess) {
-    const buffered = session.audioBuf.splice(0);
-    session.speechCount = 0;
-    session.silenceCount = 0;
-    session.isProcessing = true;
-    runPipeline(ws, session, buffered)
-      .catch((err) => logger.error({ err, callSid: session.callSid }, "Pipeline error"))
-      .finally(() => { session.isProcessing = false; });
-  }
+  if (!should) return;
+  const buffered = session.audioBuf.splice(0);
+  session.speechCount = 0;
+  session.silenceCount = 0;
+  session.isProcessing = true;
+  runPipeline(ws, session, buffered)
+    .catch((err) => logger.error({ err, callSid: session.callSid }, "Pipeline error"))
+    .finally(() => {
+      session.isProcessing = false;
+      kickPipeline(ws, session);
+    });
 }
 
 // ── handleStop ────────────────────────────────────────────────────────────────
 async function handleStop(session: Session): Promise<void> {
+  if (session.finalized) return;
+  session.finalized = true;
   cancelProactiveTimer(session);
   logger.info({ callSid: session.callSid }, "Call stream stopped — analysing");
   session.ttsAbort = true;
@@ -659,15 +678,29 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   const wavBuf = buildWav(pcm16k, STT_SAMPLE_RATE);
 
   let customerText = await timer.time("stt", () => speechToText(wavBuf, session.language), "sarvam");
-  if (!customerText?.trim()) return;
+  const recentBarge = Boolean(session.lastBargeInAt && Date.now() - session.lastBargeInAt < 5000);
+  if (!customerText?.trim()) {
+    if (recentBarge) {
+      const prompt = "जी बोलिए, मैं सुन रही हूँ।";
+      session.transcript.push("Agent: " + prompt);
+      await streamTtsToWs(ws, session.streamSid, prompt, session.language, session);
+    }
+    return;
+  }
   session.cost.addSttSamples(pcm16k.length, STT_SAMPLE_RATE);
 
   logger.info({ callSid: session.callSid, customerText }, "STT result");
 
   // Backchannel (haan / achha / ji) must not start an LLM turn or steal the floor.
+  // After barge-in, "haan" is often a clipped new question — ask them to repeat.
   if (isBackchannel(customerText)) {
     session.transcript.push(`Customer: ${customerText} [backchannel]`);
-    logger.info({ callSid: session.callSid, customerText }, "Backchannel — keeping floor");
+    logger.info({ callSid: session.callSid, customerText, recentBarge }, "Backchannel — keeping floor");
+    if (recentBarge) {
+      const prompt = "जी, क्या पूछना था?";
+      session.transcript.push("Agent: " + prompt);
+      await streamTtsToWs(ws, session.streamSid, prompt, session.language, session);
+    }
     return;
   }
 
@@ -827,7 +860,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   let transferText: string | null = null;
   let attemptedCount = 0;
   let ttsFailures = 0;
-  const MAX_REPLY_SENTENCES = 1;
+  let spokenDraft = "";
   const collectedTags: AgentTag[] = [];
   let interrupted = false;
 
@@ -854,6 +887,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       }
       if (!parsed.spoken) continue;
       attemptedCount++;
+      spokenDraft = spokenDraft ? `${spokenDraft} ${parsed.spoken}` : parsed.spoken;
       session.cost.addTtsText(parsed.spoken);
       if (attemptedCount === 1) session.cost.addLlmCall("mini");
       const isFirstSentence = attemptedCount === 1;
@@ -868,7 +902,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         await playPcm8k(ws, session.streamSid, pcm, session);
         if (!session.ttsAbort && session.ttsGen === myGen) played.push(prepareTtsText(parsed.spoken));
       })();
-      if (attemptedCount >= MAX_REPLY_SENTENCES) break;
+      if (!shouldSpeakAnotherSentence(spokenDraft, attemptedCount)) break;
     }
     if (!session.ttsAbort && !session.isClosed) await playChain;
   } finally {
@@ -881,6 +915,33 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   if (spoken) {
     session.history.push({ role: "assistant", content: spoken });
     session.transcript.push(`Agent: ${spoken}`);
+    if (!interrupted && !transferText) {
+      const extra = getMissingFollowUpSentence(spoken, {
+        signals: session.discoverySignals,
+        convStage: session.convStage,
+        turn: session.turn,
+        customerText: correctedText,
+        leadName: session.leadName,
+      });
+      if (extra) {
+        await streamTtsToWs(ws, session.streamSid, extra, session.language, session);
+        session.history.push({ role: "assistant", content: extra });
+        session.transcript.push(`Agent: ${extra}`);
+      }
+    }
+  } else if (!interrupted && spokenDraft && !transferText) {
+    const follow = ensureSalesFollowUp(spokenDraft, {
+      signals: session.discoverySignals,
+      convStage: session.convStage,
+      turn: session.turn,
+      customerText: correctedText,
+      leadName: session.leadName,
+    });
+    if (follow && follow !== spokenDraft) {
+      await streamTtsToWs(ws, session.streamSid, follow, session.language, session);
+      session.history.push({ role: "assistant", content: follow });
+      session.transcript.push(`Agent: ${follow}`);
+    }
   }
   if (transferText) {
     session.history.push({ role: "assistant", content: transferText });
@@ -999,70 +1060,68 @@ function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number
 // budget → current vehicle → segment-specific pitch → close.
 function getProactiveMessage(session: Session): string | null {
   const s = session.discoverySignals;
-  const name = session.leadName !== "Sir" && session.turn % 4 === 0 ? `${session.leadName} ji, ` : "";
+  const name = session.leadName !== "Sir" && session.turn % 4 === 0 ? `${session.leadName} जी, ` : "";
   const turn = session.turn;
   const count = session.proactiveCount;
 
-  // Customer hasn't said anything yet
-  if (turn <= 1) {
-    return `${name}aap sun pa rahe hain? Main Shubham Motors se Sakshi bol rahi hoon — koi bhi Hero bike ya scooter ke baare mein batayein.`;
+  // Customer hasn't said anything yet — never use this after turn 1 (call #12).
+  if (turn === 0) {
+    return "क्या आप सुन पा रहे हैं? बाइक या स्कूटर, जो देखना हो बताइए।";
   }
 
   // ── DISCOVERY — segment FIRST (cannot recommend without it) ────────────────
   if (!s.segment && count <= 2) {
-    return `${name}, ek quick sawaal — scooter dekh rahe hain ya bike? Aur roughly kitne CC ka — 100cc, 125cc, ya kuch aur? Isse main exact best model bata sakti hoon.`;
+    return `${name}एक छोटा सवाल — स्कूटर देख रहे हैं या बाइक? और कितने सीसी का — सौ, एक सौ पच्चीस, या कुछ और?`;
   }
   if (!s.km && count <= 3) {
-    return `${name}, daily roughly kitne km chalate hain? Isse pata chalta hai kaunsa model sabse zyada fuel-efficient rahega aapke liye.`;
+    return `${name}रोज़ लगभग कितने किलोमीटर चलते हैं? उसी से माइलेज वाला मॉडल बताऊँगी।`;
   }
   if (s.segment?.startsWith("scooter") && s.familyUse === undefined && count <= 3) {
-    return `${name}, scooter sirf aap chalenge ya family ke liye bhi? Wife ya bachche baithein toh seat size aur comfort matter karta hai.`;
+    return `${name}स्कूटर सिर्फ़ आप चलाएँगे या परिवार के लिए भी?`;
   }
   if (s.familyUse && !s.decisionMaker && count <= 3) {
-    return `${name}, purchase ka decision aap khud lenge ya family ke saath mil kar? Isse main sahi finance aur model suggest kar sakti hoon.`;
+    return `${name}खरीद का फ़ैसला आप खुद लेंगे या घर वालों के साथ?`;
   }
   if (!s.budget && count <= 4) {
-    return `${name}, roughly kitna budget soch rahe hain? EMI mein lena ho toh ₹3,000 mahine se shuru hota hai — Hero FinCorp 30 minute mein approve karta hai.`;
+    return `${name}बजट कैश में है या ई एम आई पर लेना है?`;
   }
   if (!s.currentVehicle && count <= 4) {
-    return `${name}, abhi kya chala rahe hain? Purani vehicle ho toh exchange mein ₹10,000-20,000 tak mil jaata hai.`;
+    return `${name}अभी क्या चला रहे हैं? पुरानी गाड़ी हो तो एक्सचेंज भी हो जाता है।`;
   }
   if (!s.buyingTimeline && count <= 4 && (s.segment || s.interestedModel)) {
     return `${name}, ${buyingTimelineQuestion(s.interestedModel)}`;
   }
 
   // ── SEGMENT-SPECIFIC PITCH ─────────────────────────────────────────────────
-  const fuel = (km: number, kmpl: number) => Math.round((km * 30 / kmpl) * 108).toLocaleString("en-IN");
-
   if (s.segment === "100cc" && s.km) {
-    const rec = s.km >= 60 ? "HF Deluxe — 83 kmpl, sabse zyada mileage" : "Splendor+ XTEC — 80 kmpl, India ka #1";
-    return `${name}, 100cc mein ${s.km} km daily ke liye ${rec} best hai. Sirf ₹${fuel(s.km, 80)} mahine petrol. Test ride ke liye kab aayenge?`;
+    const rec = s.km >= 60 ? "एच एफ डिलक्स — सबसे ज़्यादा माइलेज" : "स्प्लेंडर प्लस एक्सटेक";
+    return `${name}सौ सीसी में रोज़ ${s.km} किलोमीटर के लिए ${rec} सही है। टेस्ट राइड कब आएँगे?`;
   }
   if (s.segment === "125cc" && s.km) {
-    const rec = s.km >= 60 ? "Super Splendor XTEC — 65 kmpl, best 125cc mileage" : "Glamour X (style) ya Xtreme 125R (sporty)";
-    return `${name}, 125cc mein aur ${s.km} km daily ke hisaab se ${rec} perfect hai. Saturday subah test ride karwa doon ya Sunday?`;
+    const rec = s.km >= 60 ? "सुपर स्प्लेंडर एक्सटेक" : "ग्लैमर एक्स या एक्सट्रीम";
+    return `${name}एक सौ पच्चीस सीसी में ${rec} आपके लिए ठीक रहेगा। शनिवार सुबह टेस्ट राइड करवा दूँ या रविवार?`;
   }
   if (s.segment === "160cc+") {
-    return `${name}, 160cc mein Xtreme 160R 2V daily commute ke liye perfect — 45 kmpl, sporty look. 4V version aur powerful hai. Dono ka test ride karwa deti hoon — kab aana suit karega?`;
+    return `${name}एक सौ साठ सीसी में एक्सट्रीम रोज़ के लिए ठीक है। दोनों की टेस्ट राइड करवा दूँ — कब आना है?`;
   }
   if (s.segment === "scooter_110") {
-    const rec = s.km && s.km >= 50 ? "Pleasure+ XTEC — 55 kmpl, best mileage" : s.familyUse ? "Destini 110 — family-friendly, wide seat" : "Pleasure+ XTEC — lightweight, easy";
-    return `${name}, 110cc scooter mein ${rec} aapke liye best hai. Showroom aake ek baar dekh lein — test ride free hai. Kab convenient hai?`;
+    const rec = s.familyUse ? "डेस्टिनी" : "प्लेज़र प्लस एक्सटेक";
+    return `${name}एक सौ दस सीसी स्कूटर में ${rec} आपके लिए सही है। टेस्ट राइड फ्री है — कब आना ठीक रहेगा?`;
   }
   if (s.segment === "scooter_125") {
-    const rec = s.familyUse ? "Destini 125 ZX — wide seat, family ke liye perfect" : "Xoom 125 — sporty, 50 kmpl, youth-friendly";
-    return `${name}, 125cc scooter mein ${rec}. Test ride book kar deti hoon — Saturday ya Sunday, kab aayenge?`;
+    const rec = s.familyUse ? "डेस्टिनी" : "ज़ूम";
+    return `${name}एक सौ पच्चीस सीसी स्कूटर में ${rec}। शनिवार या रविवार — कब आएँगे?`;
   }
   if (s.segment === "electric") {
-    return `${name}, Vida V1 Pro 110 km range deta hai ek charge mein — petrol ka kharcha bilkul zero. Ghar pe charging point hai? Test ride karwa deti hoon, aap khud feel karenge.`;
+    return `${name}विडा एक चार्ज में अच्छा रेंज देती है। घर पर चार्जिंग है? टेस्ट राइड करवा दूँ?`;
   }
 
   // ── CLOSE — push showroom visit ────────────────────────────────────────────
   if (turn >= 3) {
     const closes = [
-      `${name}, ek kaam karein — Saturday subah 11 baje showroom aa jaayein, main personally test ride ready rakhwa deti hoon. Plan ban sakta hai?`,
-      `${name}, WhatsApp pe full price list aur EMI details bhej deti hoon abhi — number same hai na aapka?`,
-      `${name}, abhi month-end pe special offers chal rahe hain — showroom aake dekh lein, 15-20 minute mein clear ho jaayega. Kab aayenge?`,
+      `${name}एक काम करें — शनिवार ग्यारह बजे शोरूम आ जाएँ, टेस्ट राइड तैयार रखवा दूँगी। प्लान बन सकता है?`,
+      `${name}वॉट्सऐप पर कीमत और ई एम आई भेज दूँ — नंबर यही है ना?`,
+      `${name}महीने के अंत में ऑफर चल रहे हैं — शोरूम आकर पंद्रह मिनट में क्लियर हो जाएगा। कब आएँगे?`,
     ];
     return closes[count % closes.length] ?? closes[0]!;
   }
@@ -1164,6 +1223,9 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
   if (transferred) {
     session.transcript.push("Agent[tag]: transferred via Exotel Calls API");
     logger.info({ callSid: session.callSid, tag, phoneQueued: queued, transferRecord }, "Human transfer via Exotel API");
+    try { await handleStop(session); } catch (err) {
+      logger.error({ err, callSid: session.callSid }, "Finalize after REST transfer failed");
+    }
     return;
   }
 
@@ -1171,6 +1233,11 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
   await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
   session.transcript.push("Agent[tag]: voicebot closed for Exotel Transfer applet");
   logger.info({ callSid: session.callSid, tag, salesCount: legs.length, transferRecord }, "Closing Voicebot WS for human Transfer applet");
+  try {
+    await handleStop(session);
+  } catch (err) {
+    logger.error({ err, callSid: session.callSid }, "Finalize before transfer close failed");
+  }
   session.isClosed = true;
   try { ws.close(); } catch { /* already closing */ }
 }

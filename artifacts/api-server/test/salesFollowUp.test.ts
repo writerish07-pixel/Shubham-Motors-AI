@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { endsWithQuestion, ensureSalesFollowUp, pickContextualFollowUp } from "../src/lib/salesFollowUp";
+import { endsWithQuestion, ensureSalesFollowUp, pickContextualFollowUp, shouldSpeakAnotherSentence } from "../src/lib/salesFollowUp";
 
 test("endsWithQuestion: trailing question mark", () => {
   assert.equal(endsWithQuestion("Test ride kab convenient hoga?"), true);
@@ -37,10 +37,17 @@ test("ensureSalesFollowUp: never stacks a second question", () => {
 
 test("pickContextualFollowUp: finance context asks for down payment", () => {
   const q = pickContextualFollowUp({ signals: { financeInterest: true }, customerText: "finance karwana hai" });
-  assert.match(q.toLowerCase(), /down payment/);
+  assert.match(q, /डाउन पेमेंट/);
 });
 
 test("pickContextualFollowUp: no segment known asks scooter vs bike first", () => {
   const q = pickContextualFollowUp({ signals: {}, customerText: "" });
-  assert.match(q.toLowerCase(), /scooter|bike/);
+  assert.match(q, /स्कूटर/);
+  assert.match(q, /बाइक/);
+});
+
+test("shouldSpeakAnotherSentence: short acknowledgement is not the whole turn", () => {
+  assert.equal(shouldSpeakAnotherSentence("कोई बात नहीं, शिवाय जी!", 1), true);
+  assert.equal(shouldSpeakAnotherSentence("आप स्कूटर देख रहे हैं या बाइक?", 1), false);
+  assert.equal(shouldSpeakAnotherSentence("कोई बात नहीं। स्कूटर चाहिए या बाइक?", 2), false);
 });

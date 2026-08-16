@@ -18,5 +18,5 @@ test("extractBuyingTimeline: unrelated text returns null", () => {
 
 test("buyingTimelineQuestion: includes the model when known", () => {
   assert.match(buyingTimelineQuestion("Glamour X"), /Glamour X/);
-  assert.match(buyingTimelineQuestion(), /kab tak/i);
+  assert.match(buyingTimelineQuestion(), /कब तक/);
 });
