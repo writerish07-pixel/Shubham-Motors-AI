@@ -80,10 +80,10 @@ export default function Settings() {
     },
     { icon: <Mic size={16} />, title: "Sarvam AI (STT/TTS)", desc: "Speech-to-text and text-to-speech for multilingual voice",
       fields: [{ label: "API Key", placeholder: "Sarvam API subscription key", env: "SARVAM_API_KEY" }] },
-    { icon: <MessageSquare size={16} />, title: "BotSpace WhatsApp", desc: "WhatsApp messaging for call summaries and brochures",
+    { icon: <MessageSquare size={16} />, title: "BotSpace WhatsApp", desc: "Call summaries go out from Channel settings → ID (Shubham Motors +91 7240516000). Set BOTSPACE_API_KEY in Fly secrets.",
       fields: [
-        { label: "API Key", placeholder: "BotSpace API key", env: "BOTSPACE_API_KEY" },
-        { label: "Phone Number ID", placeholder: "WhatsApp Phone Number ID", env: "BOTSPACE_PHONE_NUMBER_ID" },
+        { label: "API Key", placeholder: "BotSpace API key — Fly secret BOTSPACE_API_KEY", env: "BOTSPACE_API_KEY" },
+        { label: "Channel ID", placeholder: "BotSpace Channel settings → ID", env: "BOTSPACE_PHONE_NUMBER_ID" },
       ] },
     { icon: <Bot size={16} />, title: "AI Brain (OpenAI)", desc: "GPT model for intent detection, scoring, and self-learning",
       fields: [{ label: "OpenAI API Key", placeholder: "sk-...", env: "OPENAI_API_KEY" }] },

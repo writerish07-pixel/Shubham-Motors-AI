@@ -18,6 +18,8 @@ primary_region = "sin"
   COST_MODE = "balanced"
   COST_ALERT_INR_PER_MIN = "4"
   APP_VERSION = "fly"
+  # BotSpace Channel settings → ID (Shubham Motors WhatsApp +91 7240516000)
+  BOTSPACE_PHONE_NUMBER_ID = "69ba3b443c58de2b169911a3"
 
 [http_service]
   internal_port = 8080

@@ -3,14 +3,45 @@ import { logger } from "./logger";
 import { withRetry } from "./resilience";
 import { whatsappTemplatesOnly } from "./agentTools";
 
-const BOTSPACE_BASE = "https://api.botspace.io/api";
+/** Official BotSpace Public API (Channel settings ID, not Meta Cloud phone_number_id). */
+export const BOTSPACE_PUBLIC_API = "https://public-api.bot.space";
 
-// Read secrets at call time so a secret rotation + restart is picked up without
-// a stale module-load snapshot (matches exotel.ts).
-function botspace() {
+export function botspaceCreds(): { apiKey: string; channelId: string } {
   return {
     apiKey: process.env.BOTSPACE_API_KEY ?? "",
-    phoneId: process.env.BOTSPACE_PHONE_NUMBER_ID ?? "",
+    channelId: process.env.BOTSPACE_PHONE_NUMBER_ID ?? process.env.BOTSPACE_CHANNEL_ID ?? "",
+  };
+}
+
+export function botspaceConfigured(): boolean {
+  const { apiKey, channelId } = botspaceCreds();
+  return Boolean(apiKey && channelId);
+}
+
+export function normalizeWhatsAppPhone(phone: string): string {
+  const digits = String(phone ?? "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("91") && digits.length === 12) return `+${digits}`;
+  if (digits.length === 10) return `+91${digits}`;
+  return `+${digits}`;
+}
+
+export function botspaceTemplateUrl(channelId: string): string {
+  return `${BOTSPACE_PUBLIC_API}/v1/${channelId}/message/send-message`;
+}
+
+export function botspaceSessionUrl(channelId: string): string {
+  return `${BOTSPACE_PUBLIC_API}/v1/${channelId}/message/send-session-message`;
+}
+
+export function botspaceMediaUrl(channelId: string): string {
+  return `${BOTSPACE_PUBLIC_API}/v1/${channelId}/message/send-session-media-message`;
+}
+
+function authHeaders(apiKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
   };
 }
 
@@ -19,36 +50,24 @@ export async function sendWhatsAppTemplate(
   templateName: string,
   bodyParams: string[],
   languageCode = "hi",
+  leadName = "",
 ): Promise<boolean> {
-  const normalizedPhone = normalizePhone(phone);
-  const { apiKey, phoneId } = botspace();
-  if (!apiKey || !phoneId || !templateName) return false;
+  const normalizedPhone = normalizeWhatsAppPhone(phone);
+  const { apiKey, channelId } = botspaceCreds();
+  if (!apiKey || !channelId || !templateName) return false;
   try {
     const response = await withRetry(
       () =>
         axios.post(
-          `${BOTSPACE_BASE}/v1/${phoneId}/messages`,
+          botspaceTemplateUrl(channelId),
           {
-            to: normalizedPhone,
-            type: "template",
-            template: {
-              name: templateName,
-              language: { code: languageCode },
-              components: bodyParams.length
-                ? [{
-                    type: "body",
-                    parameters: bodyParams.slice(0, 8).map((text) => ({ type: "text", text: String(text).slice(0, 500) })),
-                  }]
-                : [],
-            },
+            phone: normalizedPhone,
+            name: leadName || undefined,
+            templateId: templateName,
+            templateLanguage: languageCode,
+            variables: bodyParams.slice(0, 8).map((text) => String(text).slice(0, 500)),
           },
-          {
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-            },
-            timeout: 25000,
-          },
+          { headers: authHeaders(apiKey), timeout: 25000 },
         ),
       { label: "whatsapp.sendTemplate" },
     );
@@ -60,34 +79,32 @@ export async function sendWhatsAppTemplate(
   }
 }
 
-export async function sendWhatsAppMessage(phone: string, message: string): Promise<boolean> {
-  const normalizedPhone = normalizePhone(phone);
-  const { apiKey, phoneId } = botspace();
+export async function sendWhatsAppMessage(phone: string, message: string, leadName = ""): Promise<boolean> {
+  const normalizedPhone = normalizeWhatsAppPhone(phone);
+  const { apiKey, channelId } = botspaceCreds();
+  if (!apiKey || !channelId) {
+    logger.warn({ hasKey: Boolean(apiKey), hasChannel: Boolean(channelId) }, "WhatsApp skipped — BotSpace key or channel ID missing");
+    return false;
+  }
   if (whatsappTemplatesOnly()) {
     const name = process.env.WHATSAPP_TEMPLATE_FOLLOWUP ?? "";
     if (!name) {
       logger.warn({ phone: normalizedPhone }, "WHATSAPP_TEMPLATES_ONLY set but WHATSAPP_TEMPLATE_FOLLOWUP missing — skip freeform");
       return false;
     }
-    return sendWhatsAppTemplate(normalizedPhone, name, [message.slice(0, 500)]);
+    return sendWhatsAppTemplate(normalizedPhone, name, [message.slice(0, 500)], "hi", leadName);
   }
   try {
     const response = await withRetry(
       () =>
         axios.post(
-          `${BOTSPACE_BASE}/v1/${phoneId}/messages`,
+          botspaceSessionUrl(channelId),
           {
-            to: normalizedPhone,
-            type: "text",
-            text: { body: message },
+            phone: normalizedPhone,
+            name: leadName || undefined,
+            text: message,
           },
-          {
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-            },
-            timeout: 25000,
-          }
+          { headers: authHeaders(apiKey), timeout: 25000 },
         ),
       { label: "whatsapp.sendMessage" },
     );
@@ -95,7 +112,7 @@ export async function sendWhatsAppMessage(phone: string, message: string): Promi
     logger.info({ phone: normalizedPhone, status: response.status }, "WhatsApp message sent");
     return true;
   } catch (err) {
-    logger.error({ err, phone }, "Failed to send WhatsApp message");
+    logger.error({ err, phone }, "Failed to send WhatsApp session message");
     return false;
   }
 }
@@ -103,10 +120,7 @@ export async function sendWhatsAppMessage(phone: string, message: string): Promi
 /**
  * Send call summary to customer via WhatsApp.
  *
- * FIX: Previously always sent an English template regardless of the session language.
- * Now sends a Hindi message for Hindi-speaking customers (hi / hi-IN),
- * and falls back to English for English sessions.
- * Language should be the session.language value from callStream.ts.
+ * Hindi for hi / hi-IN sessions; English otherwise.
  */
 export async function sendCallSummaryWhatsApp(
   phone: string,
@@ -123,7 +137,6 @@ export async function sendCallSummaryWhatsApp(
   let message: string;
 
   if (isHindi) {
-    // Hindi message — matches the language the customer spoke in
     const modelLine = interestedModel ? `\n🏍️ *आपकी पसंद:* ${interestedModel}` : "";
     const addrName = nameStr ? `${nameStr} जी` : "आप";
     message =
@@ -133,7 +146,6 @@ export async function sendCallSummaryWhatsApp(
       `📍 Test ride के लिए हमारे showroom पर पधारें!\n\n` +
       `कोई भी जानकारी चाहिए तो call करें। आपकी सेवा में हमेशा तत्पर हैं! 🏆`;
   } else {
-    // English message
     const modelLine = interestedModel ? `\n🏍️ Model of Interest: *${interestedModel}*` : "";
     const addrName = nameStr || "there";
     message =
@@ -144,7 +156,7 @@ export async function sendCallSummaryWhatsApp(
       `For any queries, feel free to call us back. We're here to help you find your perfect Hero bike! 🏆`;
   }
 
-  return sendWhatsAppMessage(phone, message);
+  return sendWhatsAppMessage(phone, message, nameStr);
 }
 
 export async function sendBrochureWhatsApp(
@@ -155,10 +167,11 @@ export async function sendBrochureWhatsApp(
   language = "hi-IN",
 ): Promise<boolean> {
   try {
-    const normalizedPhone = normalizePhone(phone);
+    const normalizedPhone = normalizeWhatsAppPhone(phone);
     const isHindi = language.startsWith("hi");
     const nameStr = leadName?.trim() || "";
-    const { apiKey, phoneId } = botspace();
+    const { apiKey, channelId } = botspaceCreds();
+    if (!apiKey || !channelId) return false;
 
     const caption = isHindi
       ? `नमस्ते ${nameStr ? nameStr + " जी" : ""}! Hero *${modelName}* की पूरी जानकारी भेज रही हूँ। Test ride के लिए शुभम मोटर्स में पधारें! 🏍️`
@@ -170,29 +183,21 @@ export async function sendBrochureWhatsApp(
         logger.warn({ phone: normalizedPhone }, "templates-only: no brochure template — skip");
         return false;
       }
-      return sendWhatsAppTemplate(normalizedPhone, tpl, [nameStr || "ji", modelName]);
+      return sendWhatsAppTemplate(normalizedPhone, tpl, [nameStr || "ji", modelName], "hi", nameStr);
     }
 
     await withRetry(
       () =>
         axios.post(
-          `${BOTSPACE_BASE}/v1/${phoneId}/messages`,
+          botspaceMediaUrl(channelId),
           {
-            to: normalizedPhone,
-            type: "document",
-            document: {
-              link: brochureUrl,
-              caption,
-              filename: `Hero_${modelName}_Brochure.pdf`,
-            },
+            phone: normalizedPhone,
+            name: nameStr || undefined,
+            mediaUrl: brochureUrl,
+            mediaType: "document",
+            label: caption,
           },
-          {
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-            },
-            timeout: 25000,
-          }
+          { headers: authHeaders(apiKey), timeout: 25000 },
         ),
       { label: "whatsapp.sendBrochure" },
     );
@@ -202,11 +207,4 @@ export async function sendBrochureWhatsApp(
     logger.error({ err, phone }, "Failed to send brochure WhatsApp");
     return false;
   }
-}
-
-function normalizePhone(phone: string): string {
-  const digits = phone.replace(/\D/g, "");
-  if (digits.startsWith("91") && digits.length === 12) return digits;
-  if (digits.length === 10) return `91${digits}`;
-  return digits;
 }
