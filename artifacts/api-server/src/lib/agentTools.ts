@@ -68,9 +68,10 @@ export function bargeInFramesNeeded(env: NodeJS.ProcessEnv = process.env): numbe
 }
 
 /**
- * Barge-in must not fire during the greeting (TTS wait + namaste).
- * Mid-call it IS armed while the LLM/TTS is still synthesizing so the customer
- * can stop Sakshi instead of talking over a 20-second catalog dump.
+ * Greeting: protect ONLY the TTS wait before any PCM has left (line noise used
+ * to kill namaste → dead air). Once greeting audio is playing, barge-in is on —
+ * same as a world-class voice agent (Retell/Vapi): the customer can cut the
+ * intro. Mid-call, armed during LLM/TTS synth so a catalog dump can be stopped.
  */
 export function bargeInArmed(
   state: {
@@ -82,7 +83,8 @@ export function bargeInArmed(
   graceMs = BARGE_IN_GRACE_MS,
 ): boolean {
   if (!state.isSpeaking) return false;
-  if (state.greetingProtectedUntil && now < state.greetingProtectedUntil) return false;
+  const pcmPlaying = Boolean(state.speakingStartedAt && state.speakingStartedAt > 0);
+  if (!pcmPlaying && state.greetingProtectedUntil && now < state.greetingProtectedUntil) return false;
   const started = state.speakingStartedAt ?? 0;
   if (!started) return true;
   if (now - started < graceMs) return false;

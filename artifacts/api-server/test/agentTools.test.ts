@@ -164,18 +164,22 @@ test("barge-in stays disarmed during greeting TTS wait", () => {
   assert.equal(bargeInArmed({ isSpeaking: false, speakingStartedAt: now - 2000 }, now), false);
 });
 
+test("barge-in is armed once greeting PCM is playing", () => {
+  const now = 1_000_000;
+  assert.equal(
+    bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000, greetingProtectedUntil: now + 20_000 }, now),
+    true,
+  );
+});
+
 test("mid-call barge-in is armed during TTS wait so the customer can interrupt", () => {
   const now = 1_000_000;
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: undefined }, now), true);
 });
 
-test("barge-in grace window and greeting protection block abort", () => {
+test("barge-in grace window blocks abort; greeting PCM after grace does not", () => {
   const now = 1_000_000;
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 40 }, now), false);
-  assert.equal(
-    bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000, greetingProtectedUntil: now + 5000 }, now),
-    false,
-  );
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000 }, now), true);
 });
 

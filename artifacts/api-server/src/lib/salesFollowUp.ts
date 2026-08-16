@@ -5,6 +5,7 @@
 
 import type { ConvStage, DiscoverySignals } from "./openai";
 import { buyingTimelineQuestion } from "./buyingTimeline";
+import { isAgentPromisingTransfer } from "./humanTransfer";
 
 export interface FollowUpContext {
   signals?: DiscoverySignals;
@@ -107,6 +108,7 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
  * Keep going until we have a question, two sentences, or a long enough turn.
  */
 export function shouldSpeakAnotherSentence(spokenSoFar: string, attempted: number): boolean {
+  if (isAgentPromisingTransfer(spokenSoFar)) return false;
   if (attempted >= 2) return false;
   if (attempted >= 1 && endsWithQuestion(spokenSoFar)) return false;
   if (attempted >= 1 && spokenSoFar.replace(/\s+/g, " ").trim().length >= 140) return false;
@@ -116,7 +118,7 @@ export function shouldSpeakAnotherSentence(spokenSoFar: string, attempted: numbe
 /** Append a follow-up question when the reply ends without one. */
 export function ensureSalesFollowUp(reply: string, ctx: FollowUpContext): string {
   const trimmed = reply.trim();
-  if (!trimmed || /^\s*\[TRANSFER/i.test(trimmed)) return reply;
+  if (!trimmed || /^\s*\[TRANSFER/i.test(trimmed) || isAgentPromisingTransfer(trimmed)) return reply;
   if (endsWithQuestion(trimmed)) return reply;
 
   const followUp = pickContextualFollowUp(ctx);
@@ -126,7 +128,7 @@ export function ensureSalesFollowUp(reply: string, ctx: FollowUpContext): string
 
 /** For streaming TTS — return a separate short sentence if the full reply lacks a question. */
 export function getMissingFollowUpSentence(fullReply: string, ctx: FollowUpContext): string | null {
-  if (!fullReply.trim() || /^\s*\[TRANSFER/i.test(fullReply)) return null;
+  if (!fullReply.trim() || /^\s*\[TRANSFER/i.test(fullReply) || isAgentPromisingTransfer(fullReply)) return null;
   if (endsWithQuestion(fullReply)) return null;
   return pickContextualFollowUp(ctx);
 }

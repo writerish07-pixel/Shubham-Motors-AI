@@ -6,6 +6,7 @@ import {
   formatAnsweredTransfer,
   formatQueuedTransfer,
   isCustomerAskingForHuman,
+  isAgentPromisingTransfer,
   matchContactByPhone,
   normalizeAgentPhone,
   peekHumanTransfer,
@@ -26,6 +27,21 @@ test("isCustomerAskingForHuman: Hindi handoff, not EMI questions", () => {
   assert.equal(isCustomerAskingForHuman("transfer karo"), true);
   assert.equal(isCustomerAskingForHuman("emi kitni hogi 24 month"), false);
   assert.equal(isCustomerAskingForHuman("finance ke baare mein batao"), false);
+});
+
+test("isCustomerAskingForHuman: live Devanagari एजेंट requests (calls 15–16)", () => {
+  assert.equal(isCustomerAskingForHuman("आप अपने मुझे एजेंट से बात कराओ।"), true);
+  assert.equal(isCustomerAskingForHuman("मैं अभी सोच रहा हूँ लेने के लिए, बट आप अपने एक बार के लिए अपने एजेंट से बात करा सकते हो?"), true);
+  assert.equal(isCustomerAskingForHuman("अ आप एक बार अपने एजेंट से बात करा सकते हो"), true);
+});
+
+test("isAgentPromisingTransfer: verbal handoff without [TRANSFER] tag", () => {
+  assert.equal(
+    isAgentPromisingTransfer("एक पल दीजिए, मैं आपको अपने एजेंट से बात करवा देती हूँ। धन्यवाद!"),
+    true,
+  );
+  assert.equal(isAgentPromisingTransfer("शिवाय जी। मैं आपको एक पल में अपने एजेंट से बात करवा देती हूँ।"), true);
+  assert.equal(isAgentPromisingTransfer("ग्लैमर एक्स डी आर एस में क्रूज़ कंट्रोल नहीं है।"), false);
 });
 
 test("queueHumanTransfer normalises 10-digit mobile", () => {

@@ -223,28 +223,65 @@ export function resolveTransferredToLabel(
 }
 
 /**
- * Customer wants a human. Must NOT fire on product/EMI questions.
- * Live Hindi: "kisi se baat karao", "agent se baat", "insaan se baat".
+ * Customer wants a human. Strong handoff always wins — even if they also
+ * mentioned price ("agent se baat karao, discount kitna").
+ *
+ * Live calls 15–16 STT was Devanagari ("एजेंट से बात कराओ") which Latin-only
+ * patterns missed, so Sakshi promised a transfer and kept pitching.
  */
 export function isCustomerAskingForHuman(text: string): boolean {
-  const t = text.toLowerCase();
-  if (/(offer|discount|scheme|cashback|deal|price|kimat|qeemat|कीमत|emi|finance|कर्ज़|loan|kist|किस्त|mileage|माइलेज|stock|address|service|warranty|कब|when|cc\b|सीसी)/i.test(t)) {
-    return false;
-  }
-  const patterns: RegExp[] = [
-    /किसी\s+से\s+बात\s+(करा|करवा|करनी|करना)/,
-    /किसी\s+(को|ko)\s+(लगा|मिला|connect)/,
-    /(sales|manager|senior|sales\s*expert|agent|executive)\s*(वाले|वाली|बंदे|भाई|व्यक्ति|person|wala|waale|staff|team)?\s*(से|se)\s+(बात|baat|connect|कनेक्ट)/i,
-    /(connect|transfer|forward|put\s+me\s+through)\s+(me\s+|us\s+)?(to|with)\s+(a\s+|the\s+)?(sales|manager|human|senior|real\s+person|representative|agent)/i,
-    /(talk|speak)\s+(to|with)\s+(a\s+|the\s+)?(human|real\s+person|manager|senior|sales\s+(person|guy|executive|expert))/i,
-    /(असली|asli|real)\s+(व्यक्ति|person|aadmi|आदमी|insaan|इंसान)\s+(से|se)\s+(बात|baat)/i,
-    /kisi\s+se\s+baat\s+(kara|karwa|karni|karo)/i,
-    /(manager|senior|agent|executive|insaan|इंसान)\s+(से|se)\s+baat/i,
-    /transfer\s*kar(?:o|do|na)/i,
-    /(koi|कोई)\s+(human|insaan|इंसान|agent|person)\s+(se|से)/i,
+  const raw = String(text ?? "").trim();
+  if (!raw) return false;
+  const t = raw.toLowerCase();
+  const hay = `${raw} ${t}`;
+
+  const wantsHuman = [
+    /एजेंट/,
+    /एजेन्ट/,
+    /सेल्स\s*(पर्सन|व्यक्ति|वाला|एक्सपर्ट|टीम|मैनेजर)?/,
+    /मैनेजर/,
+    /किसी\s+से\s+बात\s*(करा|करवा|करो|करनी|करना)/,
+    /बात\s+करा\s*(ओ|दो|इए|सकते|सकती| सकते)/,
+    /बात\s+करवा/,
+    /इंसान\s+से\s+बात/,
+    /व्यक्ति\s+से\s+बात/,
+    /कनेक्ट\s+कर/,
+    /ट्रांसफर/,
+    /\bagent\b/i,
+    /\bexecutive\b/i,
+    /sales\s*(person|wala|team|expert|executive|manager)/i,
     /salesperson|sales\s*person|sales\s*wala/i,
-  ];
-  return patterns.some((re) => re.test(t));
+    /kisi\s+se\s+baat\s+(kara|karwa|karni|karo|do)/i,
+    /(manager|senior|insaan|agent|executive)\s+(se|से)\s+(baat|बात)/i,
+    /transfer\s*kar(?:o|do|na|wao)/i,
+    /(talk|speak)\s+(to|with)\s+(a\s+|the\s+)?(human|real\s+person|manager|senior|agent|sales)/i,
+    /(connect\s+me|put\s+me\s+through|forward\s+me)/i,
+    /(koi|कोई)\s+(human|insaan|इंसान|agent|person)\s+(se|से)/i,
+    /(असली|asli|real)\s+(व्यक्ति|person|aadmi|आदमी|insaan|इंसान)/i,
+  ].some((re) => re.test(hay));
+  if (!wantsHuman) return false;
+  return true;
+}
+
+/** LLM said she would connect a human but omitted the [TRANSFER] tag (calls 15–16). */
+export function isAgentPromisingTransfer(text: string): boolean {
+  const raw = String(text ?? "").trim();
+  if (!raw) return false;
+  if (/^\s*\[TRANSFER/i.test(raw)) return true;
+  const t = raw.toLowerCase();
+  return (
+    /बात\s+करवा\s+देती\s+हूँ/.test(raw)
+    || /बात\s+करवा\s+देती\s+हूं/.test(raw)
+    || /जोड़\s+रही\s+हूँ/.test(raw)
+    || /जोड़\s+रही\s+हूं/.test(raw)
+    || /एजेंट\s+से\s+बात\s+करवा/.test(raw)
+    || /सेल्स.{0,24}(जोड़|बात\s+करवा)/.test(raw)
+    || /लाइन\s+पर\s+रहिए/.test(raw)
+    || /एक\s+पल.{0,48}एजेंट/.test(raw)
+    || /agent\s+se\s+baat\s+karwa/i.test(t)
+    || /connect\s+kar(?:wa|va)\s*(deti|rahi)/i.test(t)
+    || /ek\s+pal.{0,40}agent/i.test(t)
+  );
 }
 
 /** Energy is a person talking over TTS, not just line echo. */
