@@ -47,7 +47,7 @@ import { ensureSalesFollowUp } from "./salesFollowUp";
 import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
-import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed, parseJsonStringList } from "./agentTools";
+import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed, bargeInFramesNeeded, bargeInRmsThreshold, nextBargeInCount, parseJsonStringList, SILENCE_RMS } from "./agentTools";
 import { executeAgentTools } from "./agentActions";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
@@ -65,7 +65,6 @@ import { StageTimer } from "./observability";
 import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
-const SILENCE_RMS = 0.008;
 const SILENCE_CHUNKS = Number(process.env.VOICE_SILENCE_CHUNKS ?? 20); // ~400 ms EOU @ 20 ms — listen complete
 const MIN_SPEECH_CHUNKS = 8;      // 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 12 s max before forced trigger
@@ -74,8 +73,8 @@ const EXOTEL_SAMPLE_RATE = 8000;
 const CHUNK_BYTES = 320;          // 20 ms @ 8 kHz × 2 bytes/sample
 
 // ── Barge-in / echo-guard ──────────────────────────────────────────────────────
-const BARGE_IN_RMS = SILENCE_RMS * 12;   // 0.096
-const BARGE_IN_FRAMES = Number(process.env.VOICE_BARGE_FRAMES ?? 18); // ~360 ms — haan/achha must not steal the floor
+const BARGE_IN_RMS = bargeInRmsThreshold();
+const BARGE_IN_FRAMES = bargeInFramesNeeded();
 /** Keep barge-in off for the whole greeting (TTS wait + namaste). */
 const GREETING_PROTECT_MS = Number(process.env.VOICE_GREETING_PROTECT_MS ?? 25_000);
 
@@ -473,11 +472,7 @@ async function playGreetingAudio(ws: WebSocket, session: Session, greeting: stri
     session.greetingPlayed = true;
     logger.info({ callSid: session.callSid, samples: pcm.length }, "Greeting audio sent");
   } finally {
-    session.isSpeaking = false;
-    session.ttsAbort = false;
-    session.bargeInCount = 0;
-    session.speakingStartedAt = undefined;
-    session.greetingProtectedUntil = 0;
+    endAgentSpeech(session);
   }
 }
 
@@ -494,6 +489,28 @@ async function warmGreetingCache(): Promise<void> {
 void warmGreetingCache();
 void warmPhraseCache((text) => synthesizeTts(text, "hi-IN"));
 
+function sendExotelClear(ws: WebSocket, streamSid: string): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ event: "clear", stream_sid: streamSid }));
+  } catch { /* ws closed */ }
+}
+
+/** Finish TTS. If the customer interrupted, keep inbound audio for STT. */
+function endAgentSpeech(session: Session): void {
+  const interrupted = session.ttsAbort === true;
+  session.isSpeaking = false;
+  session.speakingStartedAt = undefined;
+  session.bargeInCount = 0;
+  session.greetingProtectedUntil = 0;
+  if (!interrupted) {
+    session.audioBuf = [];
+    session.speechCount = 0;
+    session.silenceCount = 0;
+  }
+  session.ttsAbort = false;
+}
+
 // ── handleMedia ───────────────────────────────────────────────────────────────
 async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, unknown>): Promise<void> {
   const media = (msg.media ?? {}) as Record<string, unknown>;
@@ -508,25 +525,31 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
   if (session.isSpeaking) {
     if (session.ttsAbort) {
       session.isSpeaking = false;
-      // fall through
+      // fall through — keep collecting the interrupt utterance
     } else if (!bargeInArmed(session)) {
-      // TTS still synthesizing, grace window, or greeting — do not abort.
+      // Greeting / first 400 ms of playback — do not abort namaste on line noise.
       return;
     } else {
-      if (energy > BARGE_IN_RMS) {
-        session.bargeInCount = (session.bargeInCount ?? 0) + 1;
-        if (session.bargeInCount >= BARGE_IN_FRAMES) {
-          session.ttsAbort = true;
-          session.ttsGen++;
-          session.isSpeaking = false;
-          session.bargeInEvents = (session.bargeInEvents ?? 0) + 1;
-          logger.info({ callSid: session.callSid, energy }, "Barge-in confirmed — stopping TTS");
-          try { ws.send(JSON.stringify({ event: "clear", stream_sid: session.streamSid, streamSid: session.streamSid })); } catch { /* ws closed */ }
-          session.bargeInCount = 0;
-          // fall through — buffer this frame
-        } else { return; }
-      } else {
+      session.bargeInCount = nextBargeInCount(session.bargeInCount ?? 0, energy, BARGE_IN_RMS);
+      if (energy > SILENCE_RMS) {
+        session.audioBuf.push(chunk);
+        if (session.speechCount === 0) cancelProactiveTimer(session);
+        session.speechCount++;
+        session.silenceCount = 0;
+      } else if (session.speechCount > 0) {
+        session.silenceCount++;
+        session.audioBuf.push(chunk);
+      }
+      if ((session.bargeInCount ?? 0) >= BARGE_IN_FRAMES) {
+        session.ttsAbort = true;
+        session.ttsGen++;
+        session.isSpeaking = false;
+        session.bargeInEvents = (session.bargeInEvents ?? 0) + 1;
         session.bargeInCount = 0;
+        logger.info({ callSid: session.callSid, energy, buffered: session.audioBuf.length }, "Barge-in confirmed — stopping TTS");
+        sendExotelClear(ws, session.streamSid);
+        // fall through to end-of-utterance handling with the buffered interrupt
+      } else {
         return;
       }
     }
@@ -740,10 +763,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         if (!session.ttsAbort && session.ttsGen === myGen) actuallyPlayed = true;
       }
     } finally {
-      session.isSpeaking = false;
-      session.ttsAbort = false;
-      session.bargeInCount = 0;
-      session.speakingStartedAt = undefined;
+      endAgentSpeech(session);
     }
     if (actuallyPlayed) {
       session.history.push({ role: "assistant", content: fastWithFollowUp });
@@ -795,8 +815,9 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   let transferText: string | null = null;
   let attemptedCount = 0;
   let ttsFailures = 0;
-  const MAX_REPLY_SENTENCES = 3;
+  const MAX_REPLY_SENTENCES = 2;
   const collectedTags: AgentTag[] = [];
+  let interrupted = false;
 
   try {
     for await (const sentence of generateAgentReplyStream(
@@ -839,10 +860,8 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     }
     if (!session.ttsAbort && !session.isClosed) await playChain;
   } finally {
-    session.isSpeaking = false;
-    session.ttsAbort = false;
-    session.bargeInCount = 0;
-    session.speakingStartedAt = undefined;
+    interrupted = Boolean(session.ttsAbort);
+    endAgentSpeech(session);
   }
 
   const spoken = played.join(" ").trim();
@@ -871,7 +890,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         session.transcript.push(`Agent[tag]: [VISIT] ${tools.visitBookedAt.toISOString()}`);
       }
       for (const extra of tools.spokenExtras) {
-        if (!extra.trim()) continue;
+        if (!extra.trim() || interrupted) continue;
         session.history.push({ role: "assistant", content: extra });
         session.transcript.push(`Agent: ${extra}`);
         await streamTtsToWs(ws, session.streamSid, extra, session.language, session);
@@ -887,8 +906,10 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   }
 
   // PROACTIVE: re-arm — if customer is silent ~4.5s after agent finishes, Sakshi continues
-  session.lastAgentSpokeAt = Date.now();
-  scheduleProactiveNudge(ws, session, 8000);
+  if (!interrupted) {
+    session.lastAgentSpokeAt = Date.now();
+    scheduleProactiveNudge(ws, session, 8000);
+  }
 
   // Hot-lead detection
   const lower = customerText.toLowerCase();
@@ -957,9 +978,7 @@ function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number
     } catch (err) {
       logger.error({ err }, "Proactive nudge TTS failed");
     } finally {
-      session.isSpeaking = false;
-      session.ttsAbort = false;
-      session.speakingStartedAt = undefined;
+      endAgentSpeech(session);
     }
   }, delayMs);
 }
@@ -1209,11 +1228,6 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     if (session) session.speakingStartedAt = Date.now();
     await playPcm8k(ws, streamSid, pcm, session);
   } finally {
-    if (session) {
-      session.isSpeaking = false;
-      session.ttsAbort = false;
-      session.bargeInCount = 0;
-      session.speakingStartedAt = undefined;
-    }
+    if (session) endAgentSpeech(session);
   }
 }

@@ -52,11 +52,24 @@ export function ttsLanguageCode(_sessionLanguage?: string, env: NodeJS.ProcessEn
 }
 
 export const BARGE_IN_GRACE_MS = 400;
+export const SILENCE_RMS = 0.008;
+
+/** Mid-call interrupt threshold. 12× silence (0.096) never fired on live calls. */
+export function bargeInRmsThreshold(env: NodeJS.ProcessEnv = process.env, silenceRms = SILENCE_RMS): number {
+  const n = Number(env.VOICE_BARGE_RMS ?? silenceRms * 5);
+  return Number.isFinite(n) && n > 0 ? n : silenceRms * 5;
+}
+
+/** Consecutive 20 ms frames needed. Default 8 = 160 ms (was 18 = 360 ms). */
+export function bargeInFramesNeeded(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.VOICE_BARGE_FRAMES ?? 8);
+  return Number.isFinite(n) ? Math.min(30, Math.max(4, Math.round(n))) : 8;
+}
 
 /**
- * Barge-in must not fire while TTS is still synthesizing (no speakingStartedAt)
- * or during the greeting. Otherwise inbound line noise aborts the namaste and
- * the customer hears complete silence.
+ * Barge-in must not fire during the greeting (TTS wait + namaste).
+ * Mid-call it IS armed while the LLM/TTS is still synthesizing so the customer
+ * can stop Sakshi instead of talking over a 20-second catalog dump.
  */
 export function bargeInArmed(
   state: {
@@ -70,9 +83,15 @@ export function bargeInArmed(
   if (!state.isSpeaking) return false;
   if (state.greetingProtectedUntil && now < state.greetingProtectedUntil) return false;
   const started = state.speakingStartedAt ?? 0;
-  if (!started) return false;
+  if (!started) return true;
   if (now - started < graceMs) return false;
   return true;
+}
+
+/** Loud frames increment; a single quiet frame decays instead of wiping the count. */
+export function nextBargeInCount(prev: number, energy: number, threshold: number): number {
+  if (energy > threshold) return prev + 1;
+  return Math.max(0, prev - 1);
 }
 
 /** Sarvam bulbul:v2 rejects NaN/0/out-of-range pace with HTTP 400 → empty TTS → silence. */
