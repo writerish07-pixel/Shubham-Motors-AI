@@ -42,6 +42,37 @@ export function ttsLanguageCode(_sessionLanguage?: string, env: NodeJS.ProcessEn
   return env.TTS_LANGUAGE ?? "hi-IN";
 }
 
+export const BARGE_IN_GRACE_MS = 400;
+
+/**
+ * Barge-in must not fire while TTS is still synthesizing (no speakingStartedAt)
+ * or during the greeting. Otherwise inbound line noise aborts the namaste and
+ * the customer hears complete silence.
+ */
+export function bargeInArmed(
+  state: {
+    isSpeaking?: boolean;
+    speakingStartedAt?: number | null;
+    greetingProtectedUntil?: number | null;
+  },
+  now = Date.now(),
+  graceMs = BARGE_IN_GRACE_MS,
+): boolean {
+  if (!state.isSpeaking) return false;
+  if (state.greetingProtectedUntil && now < state.greetingProtectedUntil) return false;
+  const started = state.speakingStartedAt ?? 0;
+  if (!started) return false;
+  if (now - started < graceMs) return false;
+  return true;
+}
+
+/** Sarvam bulbul:v2 rejects NaN/0/out-of-range pace with HTTP 400 → empty TTS → silence. */
+export function clampSarvamTtsPace(raw: unknown, fallback = 0.95): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(1.5, Math.max(0.5, n));
+}
+
 /**
  * Do not flip the live call to English on a Hinglish first utterance.
  * Only accept English if the customer actually spoke mostly English words.

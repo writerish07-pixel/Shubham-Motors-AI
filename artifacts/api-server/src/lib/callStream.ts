@@ -46,7 +46,7 @@ import { ensureSalesFollowUp } from "./salesFollowUp";
 import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
-import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode } from "./agentTools";
+import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed } from "./agentTools";
 import { executeAgentTools } from "./agentActions";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
@@ -74,7 +74,8 @@ const CHUNK_BYTES = 320;          // 20 ms @ 8 kHz × 2 bytes/sample
 // ── Barge-in / echo-guard ──────────────────────────────────────────────────────
 const BARGE_IN_RMS = SILENCE_RMS * 12;   // 0.096
 const BARGE_IN_FRAMES = Number(process.env.VOICE_BARGE_FRAMES ?? 18); // ~360 ms — haan/achha must not steal the floor
-const BARGE_IN_GRACE_MS = 400;
+/** Keep barge-in off for the whole greeting (TTS wait + namaste). */
+const GREETING_PROTECT_MS = Number(process.env.VOICE_GREETING_PROTECT_MS ?? 25_000);
 
 // ── Per-call session ──────────────────────────────────────────────────────────
 interface Session {
@@ -96,6 +97,8 @@ interface Session {
   ttsAbort?: boolean;
   bargeInCount?: number;
   speakingStartedAt?: number;
+  /** While set in the future, inbound energy must not abort TTS (greeting). */
+  greetingProtectedUntil?: number;
   ttsGen: number;
   leadProfile?: LeadProfile;
 
@@ -144,7 +147,13 @@ export function setupVoicebotWS(httpServer: Server): void {
             break;
           case "start":
             logger.info({ raw: JSON.stringify(msg).slice(0, 1000) }, "Raw start event");
-            session = await handleStart(ws, msg);
+            try {
+              session = await handleStart(ws, msg);
+            } catch (err) {
+              logger.error({ err }, "handleStart threw — playing emergency greeting");
+              session = emergencySession(msg);
+              void playGreetingAudio(ws, session, FALLBACK_GREETING).catch(() => {});
+            }
             break;
           case "media":
             if (session && !session.isClosed) await handleMedia(ws, session, msg);
@@ -188,33 +197,42 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
 
   logger.info({ callSid, streamSid, isOutbound }, "Call stream started");
 
-  // Find or create lead
+  // Find or create lead — DB failure must not leave the PSTN line silent.
   let lead = null;
-  if (fromPhone) {
-    const digits = fromPhone.replace(/\D/g, "").slice(-10);
-    for (const phone of [digits, `+91${digits}`, `91${digits}`]) {
-      const [found] = await db.select().from(leadsTable).where(eq(leadsTable.phone, phone));
-      if (found) { lead = found; break; }
+  try {
+    if (fromPhone) {
+      const digits = fromPhone.replace(/\D/g, "").slice(-10);
+      for (const phone of [digits, `+91${digits}`, `91${digits}`]) {
+        const [found] = await db.select().from(leadsTable).where(eq(leadsTable.phone, phone));
+        if (found) { lead = found; break; }
+      }
+      if (!lead && digits) {
+        [lead] = await db.insert(leadsTable).values({
+          name: "", phone: digits, status: "new", score: 0, source: isOutbound ? "outbound_call" : "inbound_call",
+        }).returning();
+      }
     }
-    if (!lead && digits) {
-      [lead] = await db.insert(leadsTable).values({
-        name: "", phone: digits, status: "new", score: 0, source: isOutbound ? "outbound_call" : "inbound_call",
-      }).returning();
-    }
+  } catch (err) {
+    logger.error({ err, callSid }, "Lead lookup/create failed — greeting anyway");
+    lead = null;
   }
 
   // Upsert call record
   let callDbId: number | null = null;
-  const [existing] = await db.select().from(callsTable).where(eq(callsTable.exotelCallSid, callSid));
-  if (existing) {
-    callDbId = existing.id;
-    await db.update(callsTable).set({ status: "in_progress" }).where(eq(callsTable.id, existing.id));
-  } else if (lead) {
-    const [newCall] = await db.insert(callsTable).values({
-      leadId: lead.id, direction: isOutbound ? "outbound" : "inbound",
-      status: "in_progress", exotelCallSid: callSid,
-    }).returning();
-    callDbId = newCall.id;
+  try {
+    const [existing] = await db.select().from(callsTable).where(eq(callsTable.exotelCallSid, callSid));
+    if (existing) {
+      callDbId = existing.id;
+      await db.update(callsTable).set({ status: "in_progress" }).where(eq(callsTable.id, existing.id));
+    } else if (lead) {
+      const [newCall] = await db.insert(callsTable).values({
+        leadId: lead.id, direction: isOutbound ? "outbound" : "inbound",
+        status: "in_progress", exotelCallSid: callSid,
+      }).returning();
+      callDbId = newCall.id;
+    }
+  } catch (err) {
+    logger.error({ err, callSid }, "Call row upsert failed — greeting anyway");
   }
 
   // FIX #6: Read outbound context if this is an auto-dialer call.
@@ -225,16 +243,20 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
 
   let priorCompletedCalls = 0;
   let lastTranscriptSnippet: string | null = null;
-  if (lead) {
-    const priorCalls = await db
-      .select({ id: callsTable.id, status: callsTable.status, transcript: callsTable.transcript })
-      .from(callsTable)
-      .where(eq(callsTable.leadId, lead.id))
-      .orderBy(desc(callsTable.createdAt))
-      .limit(5);
-    priorCompletedCalls = priorCalls.filter((c) => c.status === "completed").length;
-    const lastWithTx = priorCalls.find((c) => c.transcript && c.transcript.length > 20);
-    if (lastWithTx?.transcript) lastTranscriptSnippet = lastWithTx.transcript.slice(-400);
+  try {
+    if (lead) {
+      const priorCalls = await db
+        .select({ id: callsTable.id, status: callsTable.status, transcript: callsTable.transcript })
+        .from(callsTable)
+        .where(eq(callsTable.leadId, lead.id))
+        .orderBy(desc(callsTable.createdAt))
+        .limit(5);
+      priorCompletedCalls = priorCalls.filter((c) => c.status === "completed").length;
+      const lastWithTx = priorCalls.find((c) => c.transcript && c.transcript.length > 20);
+      if (lastWithTx?.transcript) lastTranscriptSnippet = lastWithTx.transcript.slice(-400);
+    }
+  } catch (err) {
+    logger.error({ err, callSid }, "Prior-call lookup failed");
   }
 
   const followUpCall = isFollowUpCall(priorCompletedCalls, isOutbound);
@@ -349,24 +371,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
   // Wait ~10s after greeting before a proactive follow-up (was 6s — felt pushy).
   scheduleProactiveNudge(ws, session, 10000);
 
-  const cachedPcm = GREETING_CACHE.get(greeting);
-  if (cachedPcm) {
-    session.cost.addTtsText(greeting);
-    session.isSpeaking = true;
-    session.ttsAbort = false;
-    session.bargeInCount = 0;
-    session.speakingStartedAt = Date.now();
-    void playPcm8k(ws, session.streamSid, cachedPcm, session)
-      .catch(() => {})
-      .finally(() => {
-        session.isSpeaking = false;
-        session.ttsAbort = false;
-        session.bargeInCount = 0;
-        session.speakingStartedAt = undefined;
-      });
-  } else {
-    void streamTtsToWs(ws, session.streamSid, greeting, session.language, session).catch(() => {});
-  }
+  void playGreetingAudio(ws, session, greeting).catch((err) => {
+    logger.error({ err, callSid: session.callSid }, "Greeting playback failed");
+  });
 
   void Promise.all([buildKnowledgeContext(), getJaipurFuelPrice()]).catch(() => {});
   return session;
@@ -374,17 +381,87 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
 
 // ── Greeting cache ────────────────────────────────────────────────────────────
 const GREETING_CACHE = new Map<string, Int16Array>();
-const RECORDING_NOTICE = "Yeh call quality ke liye record hoti hai.";
+const RECORDING_NOTICE = "यह कॉल क्वालिटी के लिए रिकॉर्ड होती है।";
 const RECORDING_NOTICE_ENABLED = process.env.RECORDING_NOTICE !== "0";
 const UNKNOWN_GREETING_BASE = `नमस्ते! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से — Hero MotoCorp के अधिकृत डीलर। पहले आपका शुभ नाम जान सकती हूँ?`;
 const UNKNOWN_GREETING = RECORDING_NOTICE_ENABLED
   ? `${UNKNOWN_GREETING_BASE} ${RECORDING_NOTICE}`
   : UNKNOWN_GREETING_BASE;
+const FALLBACK_GREETING = "नमस्ते, मैं साक्षी बोल रही हूँ शुभम मोटर्स से। सुन रही हूँ।";
+
+function emergencySession(msg: Record<string, unknown>): Session {
+  const start = (msg.start ?? {}) as Record<string, unknown>;
+  const callSid = String(start.callSid ?? start.call_sid ?? msg.callSid ?? msg.call_sid ?? "");
+  const streamSid = String(start.streamSid ?? start.stream_sid ?? msg.streamSid ?? msg.stream_sid ?? "");
+  return {
+    callSid, streamSid,
+    leadId: 0,
+    leadName: "Sir",
+    callDbId: null,
+    language: "hi-IN",
+    history: [{ role: "assistant", content: FALLBACK_GREETING }],
+    transcript: [`Agent: ${FALLBACK_GREETING}`],
+    turn: 0,
+    audioBuf: [],
+    silenceCount: 0,
+    speechCount: 0,
+    isProcessing: false,
+    isClosed: false,
+    ttsGen: 0,
+    isOutbound: false,
+    discoverySignals: {},
+    convStage: "connect",
+    emotionalTone: "neutral",
+    pendingQuestion: null,
+    nameNeedsConfirmation: false,
+    nameConfirmed: false,
+    proactiveTimer: null,
+    proactiveCount: 0,
+    lastAgentSpokeAt: Date.now(),
+    cost: new CallCostCounters(),
+  };
+}
+
+async function playGreetingAudio(ws: WebSocket, session: Session, greeting: string): Promise<void> {
+  session.greetingProtectedUntil = Date.now() + GREETING_PROTECT_MS;
+  session.isSpeaking = true;
+  session.ttsAbort = false;
+  session.bargeInCount = 0;
+  // Do not start the barge-in clock until PCM is actually leaving toward Exotel.
+  session.speakingStartedAt = undefined;
+  session.cost.addTtsText(greeting);
+  try {
+    let pcm = GREETING_CACHE.get(greeting) ?? null;
+    if (!pcm) pcm = await synthesizeTts(greeting, session.language);
+    if (!pcm) {
+      logger.warn({ callSid: session.callSid, textLen: greeting.length }, "Greeting TTS empty — using fallback namaste");
+      pcm = GREETING_CACHE.get(FALLBACK_GREETING) ?? await synthesizeTts(FALLBACK_GREETING, "hi-IN");
+    }
+    if (!pcm) {
+      logger.error({ callSid: session.callSid }, "Greeting and fallback TTS both empty — line will be silent");
+      return;
+    }
+    if (ws.readyState !== WebSocket.OPEN || session.isClosed) return;
+    session.speakingStartedAt = Date.now();
+    await playPcm8k(ws, session.streamSid, pcm, session);
+    logger.info({ callSid: session.callSid, samples: pcm.length }, "Greeting audio sent");
+  } finally {
+    session.isSpeaking = false;
+    session.ttsAbort = false;
+    session.bargeInCount = 0;
+    session.speakingStartedAt = undefined;
+    session.greetingProtectedUntil = 0;
+  }
+}
 
 async function warmGreetingCache(): Promise<void> {
   try {
-    const pcm = await synthesizeTts(UNKNOWN_GREETING, "hi-IN");
-    if (pcm) { GREETING_CACHE.set(UNKNOWN_GREETING, pcm); logger.info({ samples: pcm.length }, "Greeting TTS pre-cached"); }
+    const [unknown, fallback] = await Promise.all([
+      synthesizeTts(UNKNOWN_GREETING, "hi-IN"),
+      synthesizeTts(FALLBACK_GREETING, "hi-IN"),
+    ]);
+    if (unknown) { GREETING_CACHE.set(UNKNOWN_GREETING, unknown); logger.info({ samples: unknown.length }, "Greeting TTS pre-cached"); }
+    if (fallback) { GREETING_CACHE.set(FALLBACK_GREETING, fallback); }
   } catch (err) { logger.warn({ err }, "Greeting pre-cache failed (non-fatal)"); }
 }
 void warmGreetingCache();
@@ -405,10 +482,10 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
     if (session.ttsAbort) {
       session.isSpeaking = false;
       // fall through
+    } else if (!bargeInArmed(session)) {
+      // TTS still synthesizing, grace window, or greeting — do not abort.
+      return;
     } else {
-      const startedAt = session.speakingStartedAt ?? 0;
-      if (startedAt && Date.now() - startedAt < BARGE_IN_GRACE_MS) return;
-
       if (energy > BARGE_IN_RMS) {
         session.bargeInCount = (session.bargeInCount ?? 0) + 1;
         if (session.bargeInCount >= BARGE_IN_FRAMES) {
@@ -1052,7 +1129,8 @@ async function playPcm8k(ws: WebSocket, streamSid: string, pcm8k: Int16Array, se
   const t0 = Date.now();
   for (let n = 0; n < totalChunks; n++) {
     if (ws.readyState !== WebSocket.OPEN) break;
-    if (session?.ttsAbort) { logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)"); break; }
+    const greetingProtected = !!(session?.greetingProtectedUntil && Date.now() < session.greetingProtectedUntil);
+    if (session?.ttsAbort && !greetingProtected) { logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)"); break; }
     const targetTime = t0 + n * 20;
     const wait = targetTime - Date.now();
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
@@ -1072,15 +1150,20 @@ async function streamTtsToWs(ws: WebSocket, streamSid: string, text: string, lan
     session.isSpeaking = true;
     session.ttsAbort = false;
     session.bargeInCount = 0;
-    session.speakingStartedAt = Date.now();
+    // Barge-in clock starts only when the first PCM chunk is ready to send.
+    session.speakingStartedAt = undefined;
     session.cost.addTtsText(text);
     myGen = ++session.ttsGen;
   }
   try {
     const pcm = await synthesizeTts(text, language);
-    if (!pcm) return;
+    if (!pcm) {
+      logger.warn({ textLen: text.length }, "TTS returned empty — skipping playback");
+      return;
+    }
     if (session && (session.ttsAbort || session.isClosed || session.ttsGen !== myGen)) return;
     if (ws.readyState !== WebSocket.OPEN) return;
+    if (session) session.speakingStartedAt = Date.now();
     await playPcm8k(ws, streamSid, pcm, session);
   } finally {
     if (session) {
