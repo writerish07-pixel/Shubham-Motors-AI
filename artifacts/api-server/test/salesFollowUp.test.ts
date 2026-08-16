@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { endsWithQuestion, ensureSalesFollowUp, pickContextualFollowUp, shouldSpeakAnotherSentence } from "../src/lib/salesFollowUp";
+import { endsWithQuestion, ensureSalesFollowUp, getMissingFollowUpSentence, pickContextualFollowUp, shouldSpeakAnotherSentence } from "../src/lib/salesFollowUp";
 
 test("endsWithQuestion: trailing question mark", () => {
   assert.equal(endsWithQuestion("Test ride kab convenient hoga?"), true);
@@ -22,6 +22,13 @@ test("endsWithQuestion: plain statement is not a question", () => {
 test("ensureSalesFollowUp: passes [TRANSFER] tags through untouched", () => {
   const tag = "[TRANSFER] customer asked for sales person";
   assert.equal(ensureSalesFollowUp(tag, {}), tag);
+});
+
+test("ensureSalesFollowUp: does not pitch DRS/DSS after a verbal transfer promise", () => {
+  const promise = "एक पल दीजिए, मैं आपको अपने एजेंट से बात करवा देती हूँ। धन्यवाद!";
+  assert.equal(ensureSalesFollowUp(promise, { signals: { interestedModel: "Glamour X DSS" } }), promise);
+  assert.equal(getMissingFollowUpSentence(promise, { signals: { interestedModel: "Glamour X DSS" } }), null);
+  assert.equal(shouldSpeakAnotherSentence(promise, 1), false);
 });
 
 test("ensureSalesFollowUp: appends exactly one question to a dead-end reply", () => {

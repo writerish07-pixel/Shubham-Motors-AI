@@ -40,7 +40,6 @@ import {
   type EmotionalTone,
 } from "./openai";
 import { resample, buildWav, parseWav, rmsEnergy } from "./audioCodec";
-import { transferCallToAgent } from "./exotel";
 import { correctStt } from "./modelRouter";
 import { getOutboundContext } from "./scheduler";  // FIX #6: outbound context
 import { ensureSalesFollowUp, getMissingFollowUpSentence, shouldSpeakAnotherSentence } from "./salesFollowUp";
@@ -55,6 +54,7 @@ import {
   formatAnsweredTransfer,
   formatQueuedTransfer,
   isCustomerAskingForHuman,
+  isAgentPromisingTransfer,
   queueHumanTransferTeam,
   type TransferLeg,
 } from "./humanTransfer";
@@ -84,7 +84,7 @@ const CHUNK_BYTES = 320;          // 20 ms @ 8 kHz × 2 bytes/sample
 // ── Barge-in / echo-guard ──────────────────────────────────────────────────────
 const BARGE_IN_RMS = bargeInRmsThreshold();
 const BARGE_IN_FRAMES = bargeInFramesNeeded();
-/** Keep barge-in off for the whole greeting (TTS wait + namaste). */
+/** Protect greeting only until first PCM (TTS wait). Playback is interruptible. */
 const GREETING_PROTECT_MS = Number(process.env.VOICE_GREETING_PROTECT_MS ?? 25_000);
 
 // ── Per-call session ──────────────────────────────────────────────────────────
@@ -110,8 +110,10 @@ interface Session {
   speakingStartedAt?: number;
   echoRms?: number;
   lastBargeInAt?: number;
-  /** While set in the future, inbound energy must not abort TTS (greeting). */
+  /** TTS-wait only. Cleared as soon as greeting PCM starts so barge-in works. */
   greetingProtectedUntil?: number;
+  /** Human handoff started — do not keep talking or re-enter the pipeline. */
+  transferStarted?: boolean;
   ttsGen: number;
   leadProfile?: LeadProfile;
 
@@ -380,6 +382,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     greetingPlayed: false,
     bargeInEvents: 0,
     turnTimingsMs: [],
+    transferStarted: false,
   };
 
   // Greeting — follow-up calls ask purchase outcome first (reference agent.py)
@@ -409,9 +412,17 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
   // Wait ~10s after greeting before a proactive follow-up (was 6s — felt pushy).
   scheduleProactiveNudge(ws, session, 10000);
 
-  void playGreetingAudio(ws, session, greeting).catch((err) => {
-    logger.error({ err, callSid: session.callSid }, "Greeting playback failed");
-  });
+  void playGreetingAudio(ws, session, greeting)
+    .then(() => {
+      if (session.isClosed || session.transferStarted) return;
+      if (session.speechCount >= MIN_SPEECH_CHUNKS) {
+        session.silenceCount = Math.max(session.silenceCount, SILENCE_CHUNKS);
+        kickPipeline(ws, session);
+      }
+    })
+    .catch((err) => {
+      logger.error({ err, callSid: session.callSid }, "Greeting playback failed");
+    });
 
   void Promise.all([buildKnowledgeContext(), getJaipurFuelPrice()]).catch(() => {});
   return session;
@@ -481,10 +492,16 @@ async function playGreetingAudio(ws: WebSocket, session: Session, greeting: stri
       return;
     }
     if (ws.readyState !== WebSocket.OPEN || session.isClosed) return;
+    if (session.speechCount >= MIN_SPEECH_CHUNKS || session.ttsAbort) {
+      logger.info({ callSid: session.callSid, speechCount: session.speechCount }, "Customer spoke during greeting TTS wait — skipping namaste playback");
+      session.ttsAbort = true;
+      return;
+    }
     session.speakingStartedAt = Date.now();
+    session.greetingProtectedUntil = 0;
     await playPcm8k(ws, session.streamSid, pcm, session);
-    session.greetingPlayed = true;
-    logger.info({ callSid: session.callSid, samples: pcm.length }, "Greeting audio sent");
+    if (!session.ttsAbort) session.greetingPlayed = true;
+    logger.info({ callSid: session.callSid, samples: pcm.length, interrupted: Boolean(session.ttsAbort) }, "Greeting audio sent");
   } finally {
     endAgentSpeech(session);
   }
@@ -513,11 +530,12 @@ function sendExotelClear(ws: WebSocket, streamSid: string): void {
 /** Finish TTS. If the customer interrupted, keep inbound audio for STT. */
 function endAgentSpeech(session: Session): void {
   const interrupted = session.ttsAbort === true;
+  const customerWasTalking = (session.speechCount ?? 0) >= MIN_SPEECH_CHUNKS;
   session.isSpeaking = false;
   session.speakingStartedAt = undefined;
   session.bargeInCount = 0;
   session.greetingProtectedUntil = 0;
-  if (!interrupted) {
+  if (!interrupted && !customerWasTalking) {
     session.audioBuf = [];
     session.speechCount = 0;
     session.silenceCount = 0;
@@ -593,7 +611,7 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
 }
 
 function kickPipeline(ws: WebSocket, session: Session): void {
-  if (session.isClosed || session.isProcessing) return;
+  if (session.isClosed || session.isProcessing || session.transferStarted) return;
   const totalChunks = session.audioBuf.length;
   const should =
     session.speechCount >= MIN_SPEECH_CHUNKS &&
@@ -669,7 +687,7 @@ async function handleStop(session: Session): Promise<void> {
 async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): Promise<void> {
   cancelProactiveTimer(session); // customer is speaking — cancel any pending nudge
   if (ws.readyState !== WebSocket.OPEN) return;
-  if (session.isClosed) return;
+  if (session.isClosed || session.transferStarted) return;
   const timer = new StageTimer(undefined, session.turn);
 
   const raw = Buffer.concat(chunks);
@@ -885,6 +903,9 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         transferText = sentence;
         if (!parsed.spoken) break;
       }
+      if (parsed.spoken && isAgentPromisingTransfer(parsed.spoken)) {
+        transferText = transferText ?? "[TRANSFER] agent promised human handoff";
+      }
       if (!parsed.spoken) continue;
       attemptedCount++;
       spokenDraft = spokenDraft ? `${spokenDraft} ${parsed.spoken}` : parsed.spoken;
@@ -902,6 +923,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
         await playPcm8k(ws, session.streamSid, pcm, session);
         if (!session.ttsAbort && session.ttsGen === myGen) played.push(prepareTtsText(parsed.spoken));
       })();
+      if (transferText || isAgentPromisingTransfer(spokenDraft)) break;
       if (!shouldSpeakAnotherSentence(spokenDraft, attemptedCount)) break;
     }
     if (!session.ttsAbort && !session.isClosed) await playChain;
@@ -911,6 +933,9 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   }
 
   const spoken = played.join(" ").trim();
+  if (!transferText && isAgentPromisingTransfer(spoken || spokenDraft)) {
+    transferText = "[TRANSFER] agent promised human handoff";
+  }
   const agentText = transferText ?? spoken;
   if (spoken) {
     session.history.push({ role: "assistant", content: spoken });
@@ -1168,6 +1193,9 @@ function isExplicitOptOut(text: string): boolean {
 
 // ── runTransfer ──────────────────────────────────────────────────────────────
 async function runTransfer(ws: WebSocket, session: Session, agentText: string): Promise<void> {
+  if (session.transferStarted || session.isClosed) return;
+  session.transferStarted = true;
+  cancelProactiveTimer(session);
   const m = agentText.match(/^\s*\[TRANSFER(?::([A-Z]+))?(?::([^\]]+))?\]/i);
   const tag = (m?.[1] ?? "SALES").toUpperCase();
   const bankHint = m?.[2]?.trim().toUpperCase() ?? "";
@@ -1213,26 +1241,9 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
     }
   }
 
-  let transferred = false;
-  const firstPhone = legs[0]?.phone ?? "";
-  if (legs.length === 1 && firstPhone && session.callSid) {
-    await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-    transferred = await transferCallToAgent(session.callSid, firstPhone);
-  }
-
-  if (transferred) {
-    session.transcript.push("Agent[tag]: transferred via Exotel Calls API");
-    logger.info({ callSid: session.callSid, tag, phoneQueued: queued, transferRecord }, "Human transfer via Exotel API");
-    try { await handleStop(session); } catch (err) {
-      logger.error({ err, callSid: session.callSid }, "Finalize after REST transfer failed");
-    }
-    return;
-  }
-
-  // End Voicebot so Exotel runs Next (Transfer → Connect applet) and rings the team.
   await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
   session.transcript.push("Agent[tag]: voicebot closed for Exotel Transfer applet");
-  logger.info({ callSid: session.callSid, tag, salesCount: legs.length, transferRecord }, "Closing Voicebot WS for human Transfer applet");
+  logger.info({ callSid: session.callSid, tag, salesCount: legs.length, transferRecord, queued }, "Closing Voicebot WS for human Transfer applet");
   try {
     await handleStop(session);
   } catch (err) {
@@ -1277,8 +1288,7 @@ async function playPcm8k(ws: WebSocket, streamSid: string, pcm8k: Int16Array, se
   for (let n = 0; n < totalChunks; n++) {
     if (ws.readyState !== WebSocket.OPEN) break;
     if (session && !session.speakingStartedAt) session.speakingStartedAt = Date.now();
-    const greetingProtected = !!(session?.greetingProtectedUntil && Date.now() < session.greetingProtectedUntil);
-    if (session?.ttsAbort && !greetingProtected) { logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)"); break; }
+    if (session?.ttsAbort) { logger.info({ streamSid, sentChunks: n, totalChunks }, "TTS aborted mid-stream (barge-in)"); break; }
     const targetTime = t0 + n * 20;
     const wait = targetTime - Date.now();
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
