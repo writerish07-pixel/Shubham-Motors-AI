@@ -16,6 +16,8 @@ import {
   ttsLanguageCode,
   applySessionLanguage,
   whatsappTemplatesOnly,
+  bargeInArmed,
+  clampSarvamTtsPace,
 } from "../src/lib/agentTools";
 
 test("haan/achha/ji are backchannels; real questions are not", () => {
@@ -127,4 +129,31 @@ test("self-learning auto-applies objections but not price corrections", () => {
   assert.equal(shouldAutoApplyLearning("price_correction", "On-road is actually 95377"), false);
   assert.equal(shouldAutoApplyLearning("new_objection", "They said EMI of ₹4000 is high"), false);
   assert.equal(shouldAutoApplyLearning("missing_info", "ok", { KB_AUTO_LEARN: "0" }), false);
+});
+
+test("barge-in stays disarmed while TTS is synthesizing (no speakingStartedAt)", () => {
+  const now = 1_000_000;
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: undefined }, now), false);
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: 0 }, now), false);
+  assert.equal(bargeInArmed({ isSpeaking: false, speakingStartedAt: now - 2000 }, now), false);
+});
+
+test("barge-in grace window and greeting protection block abort", () => {
+  const now = 1_000_000;
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 100 }, now), false);
+  assert.equal(
+    bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000, greetingProtectedUntil: now + 5000 }, now),
+    false,
+  );
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000 }, now), true);
+});
+
+test("Sarvam TTS pace rejects NaN/0 so the API never gets a 400", () => {
+  assert.equal(clampSarvamTtsPace(0.95), 0.95);
+  assert.equal(clampSarvamTtsPace(""), 0.95);
+  assert.equal(clampSarvamTtsPace("fast"), 0.95);
+  assert.equal(clampSarvamTtsPace(0), 0.95);
+  assert.equal(clampSarvamTtsPace(NaN), 0.95);
+  assert.equal(clampSarvamTtsPace(2.5), 1.5);
+  assert.equal(clampSarvamTtsPace(0.3), 0.5);
 });

@@ -15,14 +15,14 @@ export function buildPurchaseVerificationGreeting(
   interestedModel?: string | null,
   followupReason?: string | null,
 ): string {
-  const name = leadName !== "Sir" ? `${leadName} ji` : "ji";
+  const name = leadName !== "Sir" ? `${leadName} जी` : "जी";
   if (interestedModel) {
-    return `Namaste ${name}! Main Sakshi, Shubham Motors se. Kya aapne ${interestedModel} le li ya abhi bhi soch rahe hain?`;
+    return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। क्या आपने ${interestedModel} ले ली या अभी सोच रहे हैं?`;
   }
   if (followupReason) {
-    return `Namaste ${name}! Main Sakshi, Shubham Motors se. ${followupReason} — pehle ye bataiye, bike le li ya abhi consider kar rahe hain?`;
+    return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। ${followupReason} — पहले यह बताइए, बाइक ले ली या अभी देख रहे हैं?`;
   }
-  return `Namaste ${name}! Main Sakshi bol rahi hoon Shubham Motors se. Aapki enquiry ka follow-up tha — bike le li ya abhi dekh rahe hain?`;
+  return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। आपकी enquiry का follow-up था — बाइक ले ली या अभी देख रहे हैं?`;
 }
 
 /** System-prompt block injected on follow-up calls. */

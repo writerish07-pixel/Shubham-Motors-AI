@@ -3,7 +3,7 @@ import http from "http";
 import https from "https";
 import { logger } from "./logger";
 import { prepareTtsText } from "./ttsPrep";
-import { ttsLanguageCode } from "./agentTools";
+import { ttsLanguageCode, clampSarvamTtsPace } from "./agentTools";
 
 const SARVAM_BASE = "https://api.sarvam.ai";
 
@@ -170,7 +170,7 @@ export async function textToSpeech(
         model: process.env.SARVAM_TTS_MODEL || "bulbul:v2",
         enable_preprocessing: true,
         // Conversational Jaipur pace — 0.85 sounded like a slow IVR.
-        pace: Number(process.env.SARVAM_TTS_PACE ?? 0.95),
+        pace: clampSarvamTtsPace(process.env.SARVAM_TTS_PACE ?? 0.95),
         loudness: 1.15,
         speech_sample_rate: 22050,
       },
