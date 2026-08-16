@@ -23,7 +23,7 @@
 import OpenAI from "openai";
 import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
-import { formatDefaultHeroKnowledgeWithLiveEmi } from "@workspace/db/heroCatalog";
+import { formatDefaultHeroKnowledgeWithLiveEmi, sanitizeIntentSummary } from "@workspace/db/heroCatalog";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { syncCanonicalKnowledgeOnce } from "./canonicalKb";
@@ -342,38 +342,47 @@ export function extractDiscoverySignals(
     else if (/family|ghar|घर/i.test(t)) updated.purpose = "family";
   }
 
-  // ── SEGMENT INTEREST — MOST IMPORTANT signal for recommendations ───────────
-  if (!updated.segment) {
-    const modelMap: Array<[RegExp, NonNullable<DiscoverySignals["segment"]>]> = [
-      [/xtreme\s*125|glamour|galemar|galaimer|super\s*splendor/i, "125cc"],
-      [/xtreme\s*160|xtreme\s*160r|xpulse/i, "160cc+"],
-      [/splendor|hf\s*deluxe|passion/i, "100cc"],
-      [/destini\s*125|xoom\s*125/i, "scooter_125"],
-      [/destini\s*110|pleasure|destini\s*prime/i, "scooter_110"],
-      [/vida|electric|ev\b/i, "electric"],
-    ];
-    for (const [rx, seg] of modelMap) { if (rx.test(t)) { updated.segment = seg; break; } }
+  // ── SEGMENT — last category named this turn wins (scooter → bike is common) ─
+  const modelMap: Array<[RegExp, NonNullable<DiscoverySignals["segment"]>]> = [
+    [/xtreme\s*125|glamour|galemar|galaimer|super\s*splendor/i, "125cc"],
+    [/xtreme\s*160|xtreme\s*160r|xpulse|karizma|mavrick/i, "160cc+"],
+    [/splendor|hf\s*deluxe|passion/i, "100cc"],
+    [/destini\s*125|xoom\s*125/i, "scooter_125"],
+    [/destini\s*110|pleasure|destini\s*prime/i, "scooter_110"],
+    [/vida|electric|ev\b/i, "electric"],
+  ];
+  for (const [rx, seg] of modelMap) {
+    if (rx.test(t)) { updated.segment = seg; break; }
+  }
 
-    if (!updated.segment) {
-      if (/\b100\s*cc\b|\b100cc\b/i.test(t)) updated.segment = "100cc";
-      else if (/\b125\s*cc\b|\b125cc\b/i.test(t)) updated.segment = "125cc";
-      else if (/\b160\s*cc\b|\b160cc\b|\b150\s*cc\b|\b150cc\b/i.test(t)) updated.segment = "160cc+";
+  if (/\bbike\b|बाइक|motorcycle/i.test(t) && !/scooter|scooty|स्कूटर/i.test(t)) {
+    if (!updated.segment || updated.segment.startsWith("scooter")) {
+      updated.segment = /160|150/.test(t) ? "160cc+" : /\b100\s*cc\b|\b100cc\b/i.test(t) ? "100cc" : "125cc";
     }
-    if (!updated.segment && /scooter|scooty|scooti/i.test(t)) {
+  } else if (!updated.segment) {
+    if (/\b100\s*cc\b|\b100cc\b/i.test(t)) updated.segment = "100cc";
+    else if (/\b125\s*cc\b|\b125cc\b/i.test(t)) updated.segment = "125cc";
+    else if (/\b160\s*cc\b|\b160cc\b|\b150\s*cc\b|\b150cc\b/i.test(t)) updated.segment = "160cc+";
+    else if (/scooter|scooty|scooti|स्कूटर/i.test(t)) {
       updated.segment = /125/i.test(t) ? "scooter_125" : "scooter_110";
     }
-  } else if (updated.segment === "scooter_110" && /125/i.test(t)) {
+  } else if (updated.segment === "scooter_110" && /125/i.test(t) && /scooter|scooty|destini|xoom|pleasure|स्कूटर/i.test(t)) {
     updated.segment = "scooter_125";
   }
 
   if (/destini\s*110|destini 110|डेस्टिनी.*110/i.test(t)) {
-    updated.interestedModel = updated.interestedModel ?? "Destini 110";
+    updated.interestedModel = "Destini 110";
     updated.segment = updated.segment ?? "scooter_110";
   }
 
-  // Glamour is a BIKE — override scooter context when customer names it (common STT: galemar).
+  // Glamour is a BIKE — override leftover scooter context (STT: galemar).
   if (mentionsGlamour(t) || /glamour\s*125|125.*glamour/i.test(t)) {
-    updated.interestedModel = updated.interestedModel ?? "Glamour X";
+    updated.interestedModel = /dss/i.test(t) ? "Glamour X DSS" : "Glamour X";
+    updated.segment = "125cc";
+  }
+
+  if (/super\s*splendor/i.test(t)) {
+    updated.interestedModel = "Super Splendor";
     updated.segment = "125cc";
   }
 
@@ -389,12 +398,18 @@ export function extractDiscoverySignals(
     }
   }
 
-  // Specific model
-  if (!updated.interestedModel) {
-    const models = ["Xtreme 125R","Xtreme 160R","Xpulse 200","Splendor Plus","Splendor XTEC",
-      "HF Deluxe","Glamour X","Super Splendor","Passion Plus","Destini 125","Destini 110",
+  // Last named model this turn wins (scooter first, then Glamour, is call #9).
+  {
+    const models = ["Glamour X DSS","Glamour X","Super Splendor","Xtreme 125R","Xtreme 160R","Xpulse 200","Splendor Plus","Splendor XTEC",
+      "HF Deluxe","Passion Plus","Destini 125","Destini 110",
       "Destini Prime","Xoom 125","Pleasure Plus","Vida V1 Pro"];
-    for (const m of models) { if (t.includes(m.toLowerCase())) { updated.interestedModel = m; break; } }
+    let best: { i: number; m: string } | null = null;
+    const lower = t;
+    for (const m of models) {
+      const i = lower.lastIndexOf(m.toLowerCase());
+      if (i >= 0 && (!best || i > best.i)) best = { i, m };
+    }
+    if (best) updated.interestedModel = best.m;
   }
 
   // Decision maker (self / family / joint)
@@ -1319,6 +1334,14 @@ Analyze the transcript and return JSON with:
 - previousVehicle: older bike they used to own (not current), else null
 - exchangeVehicle: vehicle they want to exchange, else null
 
+HERO VEHICLE CLASS — never mix these in summary or preferredModel:
+- BIKES (not scooters): HF Deluxe, Splendor, Super Splendor, Passion, Glamour X, Xtreme, Xpulse, Karizma, Mavrick
+- SCOOTERS (not bikes): Pleasure, Destini, Xoom
+- ELECTRIC: Vida
+A customer often STARTS on scooters then SWITCHES to bikes. preferredModel and summary must follow the LAST serious interest.
+FORBIDDEN: "interested in a scooter, specifically Glamour X / Super Splendor" — those two are bikes.
+If they discussed both, write: started with family 125 scooter (Destini/Xoom), then shifted to 125cc bikes (Glamour X DSS / Super Splendor).
+
 Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20
 If lostDeal=true, intent should be "not_interested" or "future_date" with score ≤30 unless they left door open.`,
       },
@@ -1330,15 +1353,16 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
 
   try {
     const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
+    const preferredModel = parsed.preferredModel ?? null;
     return {
       intent: parsed.intent ?? "needs_info",
       score: parsed.score ?? 30,
-      summary: parsed.summary ?? "Call completed",
+      summary: sanitizeIntentSummary(parsed.summary ?? "Call completed", preferredModel),
       followupDate: parsed.followupDate ?? null,
       followupReason: parsed.followupReason ?? null,
       language: parsed.language ?? "hi",
       familyInfo: parsed.familyInfo ?? null,
-      preferredModel: parsed.preferredModel ?? null,
+      preferredModel,
       objections: Array.isArray(parsed.objections) ? parsed.objections : [],
       competitorMentioned: parsed.competitorMentioned ?? null,
       competitorReason: parsed.competitorReason ?? null,

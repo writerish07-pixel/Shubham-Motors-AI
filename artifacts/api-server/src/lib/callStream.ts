@@ -1144,22 +1144,12 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
     return;
   }
 
-  // Voicebot next-applet path used by ElevenLabs/Exotel: close the stream so a
-  // Connect applet immediately after Voicebot can Dial the queued number.
-  if (queued && phone) {
-    await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-    session.transcript.push("Agent[tag]: voicebot closed for Connect applet dial");
-    logger.info({ callSid: session.callSid, tag }, "Closing Voicebot WS for Connect applet human transfer");
-    session.isClosed = true;
-    try { ws.close(); } catch { /* already closing */ }
-    return;
-  }
-
+  // End Voicebot so Exotel runs Next (Transfer / Connect applet) with the human number.
   await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
-  const sorry = `माफ़ कीजिए ${addrName}, अभी सेल्स एक्सपर्ट लाइन पर नहीं हैं। आपका नंबर नोट है, पाँच मिनट में कॉल बैक करेंगे।`;
-  session.transcript.push(`Agent: ${sorry}`);
-  await streamTtsToWs(ws, session.streamSid, sorry, session.language, session);
-  logger.warn({ callSid: session.callSid, tag, bankHint, hadPhone: !!phone }, "Transfer not completed — spoke callback fallback");
+  session.transcript.push("Agent[tag]: voicebot closed for Exotel Transfer applet");
+  logger.info({ callSid: session.callSid, tag, hadPhone: !!phone }, "Closing Voicebot WS for human Transfer applet");
+  session.isClosed = true;
+  try { ws.close(); } catch { /* already closing */ }
 }
 
 // ── TTS helpers (unchanged from original) ────────────────────────────────────

@@ -1,4 +1,4 @@
-import { eq, and, sql, count } from "drizzle-orm";
+import { eq, and, count } from "drizzle-orm";
 import { db, callsTable, leadsTable, followupsTable, knowledgeTable, shadowScoresTable } from "@workspace/db";
 import {
   analyzeCallIntent,
@@ -197,9 +197,7 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
       ...intelPatch,
       intentSummary: analysis.summary,
       lastCallId: callDbId,
-      ...(analysis.preferredModel
-        ? { interestedModel: sql`COALESCE(${leadsTable.interestedModel}, ${analysis.preferredModel})` }
-        : {}),
+      ...(analysis.preferredModel ? { interestedModel: analysis.preferredModel } : {}),
       ...(analysis.familyInfo ? { familyInfo: analysis.familyInfo } : {}),
       ...(analysis.competitorMentioned ? { competitorMentioned: analysis.competitorMentioned } : {}),
       ...(analysis.competitorReason ? { competitorReason: analysis.competitorReason } : {}),

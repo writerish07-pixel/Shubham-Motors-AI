@@ -285,3 +285,38 @@ export function knowledgeSeedRows(): KnowledgeSeedRow[] {
 
   return rows;
 }
+
+/** Glamour X / Super Splendor are bikes. Destini / Xoom are scooters. Never mix. */
+export function kindForModelName(raw: string): HeroKind | null {
+  const n = (raw || "").toLowerCase();
+  if (!n.trim()) return null;
+  let best: { len: number; kind: HeroKind } | null = null;
+  for (const v of HERO_VARIANTS) {
+    for (const key of [v.name, v.family]) {
+      const k = key.toLowerCase();
+      if (n.includes(k) && k.length >= (best?.len ?? 0)) best = { len: k.length, kind: v.kind };
+    }
+  }
+  return best?.kind ?? null;
+}
+
+/**
+ * Call-9 CRM bug: "interested in a scooter, specifically Glamour X DSS / Super Splendor".
+ * Those are 125cc bikes. Correct the label; keep Destini/Xoom as scooters.
+ */
+export function sanitizeIntentSummary(summary: string, preferredModel: string | null): string {
+  let s = (summary || "").trim();
+  if (!s) return s;
+  const kind = preferredModel ? kindForModelName(preferredModel) : null;
+  const namesBike = /glamour|super\s*splendor|\bsplendor\b|xtreme|hf deluxe|passion|xpulse|karizma|mavrick/i;
+  const namesScooter = /destini|xoom|pleasure|scooty|स्कूटर/i;
+  if (kind === "bike" || (namesBike.test(s) && !namesScooter.test(preferredModel ?? ""))) {
+    if (/\bscooter/i.test(s) && namesBike.test(s)) {
+      s = s.replace(/purchasing a scooter/gi, "purchasing a bike");
+      s = s.replace(/interested in (?:purchasing )?a scooter/gi, "interested in a bike");
+      s = s.replace(/a scooter, specifically/gi, "a bike, specifically");
+    }
+    s = s.replace(/स्कूटर,?\s*(specifically|खासकर)/gi, "बाइक");
+  }
+  return s;
+}
