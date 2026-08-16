@@ -18,6 +18,7 @@ import {
   whatsappTemplatesOnly,
   bargeInArmed,
   clampSarvamTtsPace,
+  mergeJsonStringLists,
 } from "../src/lib/agentTools";
 
 test("haan/achha/ji are backchannels; real questions are not", () => {
@@ -156,4 +157,9 @@ test("Sarvam TTS pace rejects NaN/0 so the API never gets a 400", () => {
   assert.equal(clampSarvamTtsPace(NaN), 0.95);
   assert.equal(clampSarvamTtsPace(2.5), 1.5);
   assert.equal(clampSarvamTtsPace(0.3), 0.5);
+});
+
+test("mergeJsonStringLists dedupes objections/promises", () => {
+  const merged = mergeJsonStringLists('["price too high"]', ["Price too high", "family approval"]);
+  assert.equal(merged, JSON.stringify(["price too high", "family approval"]));
 });

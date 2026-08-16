@@ -134,6 +134,30 @@ export function frequencyWindowMs(env: NodeJS.ProcessEnv = process.env): number 
   return (Number.isFinite(hours) && hours > 0 ? hours : 24) * 3600_000;
 }
 
+export function parseJsonStringList(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  try {
+    const v = JSON.parse(raw);
+    if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  } catch { /* fall through */ }
+  return raw.split(/\n|;/).map((s) => s.trim()).filter(Boolean);
+}
+
+export function mergeJsonStringLists(...chunks: Array<string[] | string | null | undefined>): string {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const chunk of chunks) {
+    const items = Array.isArray(chunk) ? chunk : parseJsonStringList(chunk);
+    for (const item of items) {
+      const key = item.toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return JSON.stringify(out.slice(0, 12));
+}
+
 /**
  * Short acknowledgements must not steal the floor or start an LLM turn.
  * "haan splendor dekhna hai" is NOT a backchannel.

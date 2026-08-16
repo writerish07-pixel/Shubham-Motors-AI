@@ -12,6 +12,7 @@ import Followups from "@/pages/Followups";
 import Campaigns from "@/pages/Campaigns";
 import Visits from "@/pages/Visits";
 import Shadow from "@/pages/Shadow";
+import Competitor from "@/pages/Competitor";
 import Knowledge from "@/pages/Knowledge";
 import Settings from "@/pages/Settings";
 import NotFound from "@/pages/not-found";
@@ -33,6 +34,7 @@ function Router() {
         <Route path="/campaigns" component={Campaigns} />
         <Route path="/visits" component={Visits} />
         <Route path="/shadow" component={Shadow} />
+        <Route path="/competitor" component={Competitor} />
         <Route path="/knowledge" component={Knowledge} />
         <Route path="/settings" component={Settings} />
         <Route component={NotFound} />

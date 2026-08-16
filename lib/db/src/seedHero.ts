@@ -62,9 +62,9 @@ const PLAYBOOKS: Array<{ title: string; content: string }> = [
       "Stall hai, interest nahi. Ek blocker poochho (budget / family / compare). Phir ek low-commitment next step: test ride ya WhatsApp price. 'Ji bilkul sochiye' mat bolo.",
   },
   {
-    title: "EMI without math",
+    title: "Live EMI",
     content:
-      "Kabhi calculate mat karo. [PRECOMPUTED EMI TABLE] se tenure ke saath padho. Down payment customer ka ho toh wahi repeat karo. Exact CIBIL rate → [TRANSFER:FINANCE].",
+      "EMI live reducing-balance se nikalti hai. [EMI:Model|down|months] tag lagao — server hisaab karta hai. Customer ka down payment repeat karo. CIBIL 8.5–12% band batao. Exact lock → [TRANSFER:FINANCE]. Table se mat padho.",
   },
 ];
 

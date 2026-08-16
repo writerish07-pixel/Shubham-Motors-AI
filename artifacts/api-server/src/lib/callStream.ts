@@ -33,6 +33,7 @@ import {
   extractDiscoverySignals,
   computeConvStage,
   detectEmotionalTone,
+  convStageFromPurchaseStage,
   type LeadProfile,
   type DiscoverySignals,
   type ConvStage,
@@ -46,7 +47,7 @@ import { ensureSalesFollowUp } from "./salesFollowUp";
 import { buildPurchaseVerificationGreeting, isFollowUpCall } from "./followUpCallContext";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
-import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed } from "./agentTools";
+import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed, parseJsonStringList } from "./agentTools";
 import { executeAgentTools } from "./agentActions";
 
 function pcm16LeToS16(buf: Buffer): Int16Array {
@@ -60,11 +61,12 @@ function s16ToPcm16Le(samples: Int16Array): Buffer {
   for (let i = 0; i < samples.length; i++) out.writeInt16LE(samples[i]!, i * 2);
   return out;
 }
+import { StageTimer } from "./observability";
 import { logger } from "./logger";
 
 // ── Tuning constants ──────────────────────────────────────────────────────────
 const SILENCE_RMS = 0.008;
-const SILENCE_CHUNKS = Number(process.env.VOICE_SILENCE_CHUNKS ?? 8); // ~160 ms EOU @ 20 ms
+const SILENCE_CHUNKS = Number(process.env.VOICE_SILENCE_CHUNKS ?? 20); // ~400 ms EOU @ 20 ms — listen complete
 const MIN_SPEECH_CHUNKS = 8;      // 160 ms min speech
 const MAX_SPEECH_CHUNKS = 600;    // 12 s max before forced trigger
 const STT_SAMPLE_RATE = 16000;
@@ -125,8 +127,11 @@ interface Session {
   proactiveCount: number;
   /** Timestamp of last agent speech — prevents nudge firing during TTS */
   lastAgentSpokeAt: number;
-  /** Per-call ₹ estimate (₹2/min budget). */
+  /** Per-call ₹ estimate (₹4/min budget). */
   cost: CallCostCounters;
+  greetingPlayed?: boolean;
+  bargeInEvents?: number;
+  turnTimingsMs?: number[];
 }
 
 // ── WebSocket server ─────────────────────────────────────────────────────────
@@ -277,6 +282,14 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     decisionMaker: (lead.decisionMaker === "self" || lead.decisionMaker === "family" || lead.decisionMaker === "joint")
       ? lead.decisionMaker
       : null,
+    purchaseStage: lead.purchaseStage ?? null,
+    customerPersona: lead.customerPersona ?? null,
+    objections: parseJsonStringList(lead.objections),
+    promises: parseJsonStringList(lead.promises),
+    locality: lead.locality ?? null,
+    previousVehicle: lead.previousVehicle ?? null,
+    exchangeVehicle: lead.exchangeVehicle ?? null,
+    relationshipScore: lead.relationshipScore ?? null,
   } : undefined;
 
   const leadProfile: LeadProfile | undefined = outboundCtx ? {
@@ -292,6 +305,14 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     isOutbound,
     followupReason: outboundCtx.followupReason ?? null,
     decisionMaker: baseProfile?.decisionMaker,
+    purchaseStage: baseProfile?.purchaseStage,
+    customerPersona: baseProfile?.customerPersona,
+    objections: baseProfile?.objections,
+    promises: baseProfile?.promises,
+    locality: baseProfile?.locality,
+    previousVehicle: baseProfile?.previousVehicle,
+    exchangeVehicle: baseProfile?.exchangeVehicle,
+    relationshipScore: baseProfile?.relationshipScore,
   } : baseProfile;
 
   const leadName = (leadProfile?.name && leadProfile.name.trim() && !leadProfile.name.startsWith("Lead "))
@@ -312,6 +333,8 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     if (lead.buyingTimeline && /^(immediate|15days|month|festival|loan_closure|next_year)$/.test(lead.buyingTimeline)) {
       priorSignals.buyingTimeline = lead.buyingTimeline as DiscoverySignals["buyingTimeline"];
     }
+    if (lead.exchangeVehicle) priorSignals.exchangeInterest = true;
+    if (lead.interestedModel) priorSignals.interestedModel = lead.interestedModel;
   }
 
   const session: Session = {
@@ -333,7 +356,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     isOutbound,
     // NEW: initialise sales intelligence (seeded from prior-call CRM data)
     discoverySignals: priorSignals,
-    convStage: "connect",
+    convStage: convStageFromPurchaseStage(lead?.purchaseStage) ?? "connect",
     emotionalTone: "neutral",
     pendingQuestion: null,
     nameNeedsConfirmation: false,
@@ -342,6 +365,9 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
     proactiveCount: 0,
     lastAgentSpokeAt: Date.now(),
     cost: new CallCostCounters(),
+    greetingPlayed: false,
+    bargeInEvents: 0,
+    turnTimingsMs: [],
   };
 
   // Greeting — follow-up calls ask purchase outcome first (reference agent.py)
@@ -444,6 +470,7 @@ async function playGreetingAudio(ws: WebSocket, session: Session, greeting: stri
     if (ws.readyState !== WebSocket.OPEN || session.isClosed) return;
     session.speakingStartedAt = Date.now();
     await playPcm8k(ws, session.streamSid, pcm, session);
+    session.greetingPlayed = true;
     logger.info({ callSid: session.callSid, samples: pcm.length }, "Greeting audio sent");
   } finally {
     session.isSpeaking = false;
@@ -492,6 +519,7 @@ async function handleMedia(ws: WebSocket, session: Session, msg: Record<string, 
           session.ttsAbort = true;
           session.ttsGen++;
           session.isSpeaking = false;
+          session.bargeInEvents = (session.bargeInEvents ?? 0) + 1;
           logger.info({ callSid: session.callSid, energy }, "Barge-in confirmed — stopping TTS");
           try { ws.send(JSON.stringify({ event: "clear", stream_sid: session.streamSid, streamSid: session.streamSid })); } catch { /* ws closed */ }
           session.bargeInCount = 0;
@@ -571,6 +599,12 @@ async function handleStop(session: Session): Promise<void> {
       sessionLanguage: session.language,
       discoverySignals: session.discoverySignals,
       exotelCallSid: session.callSid,
+      greetingPlayed: Boolean(session.greetingPlayed),
+      bargeInCount: session.bargeInEvents ?? 0,
+      avgTurnMs: session.turnTimingsMs?.length
+        ? Math.round(session.turnTimingsMs.reduce((a, b) => a + b, 0) / session.turnTimingsMs.length)
+        : undefined,
+      costPerMinInr: Math.round(cost.perMinInr),
     });
   } catch (err) {
     logger.error({ err, callSid: session.callSid }, "Error finalising call");
@@ -582,13 +616,14 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   cancelProactiveTimer(session); // customer is speaking — cancel any pending nudge
   if (ws.readyState !== WebSocket.OPEN) return;
   if (session.isClosed) return;
+  const timer = new StageTimer(undefined, session.turn);
 
   const raw = Buffer.concat(chunks);
   const pcm8k = pcm16LeToS16(raw);
   const pcm16k = resample(pcm8k, EXOTEL_SAMPLE_RATE, STT_SAMPLE_RATE);
   const wavBuf = buildWav(pcm16k, STT_SAMPLE_RATE);
 
-  let customerText = await speechToText(wavBuf, session.language);
+  let customerText = await timer.time("stt", () => speechToText(wavBuf, session.language), "sarvam");
   if (!customerText?.trim()) return;
   session.cost.addSttSamples(pcm16k.length, STT_SAMPLE_RATE);
 
@@ -835,6 +870,12 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       if (tools.visitBookedAt) {
         session.transcript.push(`Agent[tag]: [VISIT] ${tools.visitBookedAt.toISOString()}`);
       }
+      for (const extra of tools.spokenExtras) {
+        if (!extra.trim()) continue;
+        session.history.push({ role: "assistant", content: extra });
+        session.transcript.push(`Agent: ${extra}`);
+        await streamTtsToWs(ws, session.streamSid, extra, session.language, session);
+      }
     } catch (err) {
       logger.warn({ err, callSid: session.callSid }, "Agent tools failed");
     }
@@ -854,6 +895,8 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
   if (["buy", "book", "lena hai", "chahiye", "confirm", "ready", "le lunga"].some(s => lower.includes(s))) {
     await db.update(leadsTable).set({ status: "hot", score: 90 }).where(eq(leadsTable.id, session.leadId));
   }
+  const report = timer.report({ conversationId: session.callSid, customerId: session.leadId });
+  session.turnTimingsMs = [...(session.turnTimingsMs ?? []), report.totalMs];
 }
 
 // ── PROACTIVE SALES ENGINE ───────────────────────────────────────────────────

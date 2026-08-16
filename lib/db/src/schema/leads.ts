@@ -76,6 +76,20 @@ export const leadsTable = pgTable("leads", {
   /** When the day-of WhatsApp visit reminder was sent — booked-but-no-show killer */
   visitReminderSentAt: timestamp("visit_reminder_sent_at", { withTimezone: true }),
 
+  /** Area / locality the customer mentioned (Jaipur sector, village, etc.) */
+  locality: text("locality"),
+  /** Vehicle they owned before the current one — upgrade / conquest signal */
+  previousVehicle: text("previous_vehicle"),
+  /** Bike they want to exchange */
+  exchangeVehicle: text("exchange_vehicle"),
+  /** JSON array of objection strings from call analysis */
+  objections: text("objections"),
+  /** JSON array of promises Sakshi made ("Sunday call", "EMI sheet WhatsApp") */
+  promises: text("promises"),
+  /** Last CSAT 1–5 from post-visit WhatsApp */
+  csatScore: integer("csat_score"),
+  lastCsatAt: timestamp("last_csat_at", { withTimezone: true }),
+
   // ── Relationship & Revenue Intelligence (Growth OS v2, June 2026) ──────────
   // Derived deterministically by lib/relationshipIntel.ts after every call from
   // the existing call analysis + discovery signals + call history. No extra LLM

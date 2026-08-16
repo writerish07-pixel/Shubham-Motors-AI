@@ -14,36 +14,50 @@ const rates: CostRates = {
   premiumOutputUsdPer1M: 10,
 };
 
-test("₹2 cap: typical 3-min outbound with mini + Sarvam stays under budget", () => {
-  const c = estimateCallCost(
-    {
-      durationSec: 180,
-      direction: "outbound",
-      sttAudioSec: 40,
-      ttsChars: 900,
-      llmMiniCalls: 6,
-      llmPremiumCalls: 0,
-    },
-    rates,
-  );
-  assert.equal(c.overBudget, false);
-  assert.ok(c.perMinInr <= 2, `perMin ${c.perMinInr} should be <= 2`);
+test("₹4 cap: typical 3-min outbound with mini + Sarvam stays under budget", () => {
+  const prev = process.env.COST_ALERT_INR_PER_MIN;
+  process.env.COST_ALERT_INR_PER_MIN = "4";
+  try {
+    const c = estimateCallCost(
+      {
+        durationSec: 180,
+        direction: "outbound",
+        sttAudioSec: 40,
+        ttsChars: 900,
+        llmMiniCalls: 6,
+        llmPremiumCalls: 1,
+      },
+      rates,
+    );
+    assert.equal(c.overBudget, false);
+    assert.ok(c.perMinInr <= 4, `perMin ${c.perMinInr} should be <= 4`);
+  } finally {
+    if (prev === undefined) delete process.env.COST_ALERT_INR_PER_MIN;
+    else process.env.COST_ALERT_INR_PER_MIN = prev;
+  }
 });
 
-test("₹2 cap: same call on gpt-4o premium exceeds budget", () => {
-  const c = estimateCallCost(
-    {
-      durationSec: 180,
-      direction: "outbound",
-      sttAudioSec: 40,
-      ttsChars: 900,
-      llmMiniCalls: 0,
-      llmPremiumCalls: 6,
-    },
-    rates,
-  );
-  assert.equal(c.overBudget, true);
-  assert.ok(c.llmInr > 2, "premium LLM alone should blow the per-call cap");
+test("₹4 cap: 6 gpt-4o premium turns on a short call exceeds budget", () => {
+  const prev = process.env.COST_ALERT_INR_PER_MIN;
+  process.env.COST_ALERT_INR_PER_MIN = "4";
+  try {
+    const c = estimateCallCost(
+      {
+        durationSec: 180,
+        direction: "outbound",
+        sttAudioSec: 40,
+        ttsChars: 900,
+        llmMiniCalls: 0,
+        llmPremiumCalls: 6,
+      },
+      rates,
+    );
+    assert.equal(c.overBudget, true);
+    assert.ok(c.llmInr > 2, "premium LLM alone should be material");
+  } finally {
+    if (prev === undefined) delete process.env.COST_ALERT_INR_PER_MIN;
+    else process.env.COST_ALERT_INR_PER_MIN = prev;
+  }
 });
 
 test("inbound is cheaper than outbound at the same duration", () => {

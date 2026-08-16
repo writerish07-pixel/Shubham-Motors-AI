@@ -23,7 +23,7 @@
 import OpenAI from "openai";
 import { db } from "@workspace/db";
 import { knowledgeTable } from "@workspace/db";
-import { formatDefaultHeroKnowledge, pricedVariants } from "@workspace/db/heroCatalog";
+import { formatDefaultHeroKnowledge } from "@workspace/db/heroCatalog";
 import { and, desc, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import { classifyTurn, tryDirectAnswer } from "./modelRouter";
@@ -200,6 +200,14 @@ export interface LeadProfile {
   isFollowUpCall?: boolean;
   isOutbound?: boolean;
   followupReason?: string | null;
+  purchaseStage?: string | null;
+  customerPersona?: string | null;
+  objections?: string[];
+  promises?: string[];
+  locality?: string | null;
+  previousVehicle?: string | null;
+  exchangeVehicle?: string | null;
+  relationshipScore?: number | null;
 }
 
 // NEW: Discovery signals extracted from the live conversation.
@@ -248,6 +256,20 @@ export type BuyingStage =
   | "booking";
 
 export type ConvStage = BuyingStage;
+
+export function convStageFromPurchaseStage(stage?: string | null): ConvStage | null {
+  switch ((stage ?? "").toLowerCase()) {
+    case "exploration": return "exploring";
+    case "comparison": return "comparing";
+    case "evaluation": return "shortlisting";
+    case "ready": return "ready";
+    case "negotiation": return "negotiating";
+    case "booked":
+    case "delivered": return "booking";
+    case "repeat": return "exploring";
+    default: return null;
+  }
+}
 
 // NEW: Emotional tone — detected from last 2 turns, adjusts LLM params.
 export type EmotionalTone = "excited" | "neutral" | "confused" | "impatient";
@@ -469,10 +491,37 @@ function formatLeadProfile(p?: LeadProfile): string {
   if (p.notes && p.notes.trim()) lines.push(`• Notes from past interactions: ${p.notes.trim()}`);
   if (p.lastCallSummary && p.lastCallSummary.trim()) lines.push(`• Last call summary: ${p.lastCallSummary.trim()}`);
   if (p.status && p.status !== "new") lines.push(`• CRM status: ${p.status}`);
+  if (p.purchaseStage) lines.push(`• Saved buying stage: ${p.purchaseStage} — match talk track; do NOT restart discovery.`);
+  if (p.customerPersona) lines.push(`• Persona: ${p.customerPersona}`);
   if (p.decisionMaker) lines.push(`• Decision maker (known): ${p.decisionMaker} — tailor next steps accordingly.`);
   if (p.buyingTimeline) lines.push(`• Buying timeline (known): ${p.buyingTimeline} — do NOT re-ask when; schedule follow-up mentally.`);
+  if (p.locality) lines.push(`• Locality: ${p.locality}`);
+  if (p.previousVehicle) lines.push(`• Previous vehicle: ${p.previousVehicle}`);
+  if (p.exchangeVehicle) lines.push(`• Exchange vehicle: ${p.exchangeVehicle}`);
+  if (p.objections && p.objections.length) lines.push(`• Open objections: ${p.objections.slice(0, 5).join("; ")} — address these, do not re-discover from zero.`);
+  if (p.promises && p.promises.length) lines.push(`• Promises you already made: ${p.promises.slice(0, 5).join("; ")} — honour them in the first 2 turns.`);
+  if (p.relationshipScore != null) lines.push(`• Relationship score: ${p.relationshipScore}/100`);
   if (lines.length === 0) return "";
-  return `\n╔══ WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER ══╗\n${lines.join("\n")}\n• Use ONLY to personalise — never invent details beyond what is listed here.\n• Reference it naturally in the FIRST 1–2 turns, not in every reply.\n╚════════════════════════════════════════════════╝`;
+  return `\n╔══ WHAT YOU ALREADY KNOW ABOUT THIS CUSTOMER ══╗\n${lines.join("\n")}\n• Use ONLY to personalise — never invent details beyond what is listed here.\n• Reference it naturally in the FIRST 1–2 turns, not in every reply.\n╚════════════════════════════════════════════════╝${formatPersonaTrack(p.customerPersona)}`;
+}
+
+function formatPersonaTrack(persona?: string | null): string {
+  if (!persona) return "";
+  const tracks: Record<string, string> = {
+    mileage_sensitive: "Product = high kmpl commuter. Price = petrol saved vs their daily km. Promotion = mileage offer if in KB. Place = nearby test ride. People = you. Process = visit then finance. Physical evidence = WhatsApp brochure + address.",
+    price_sensitive: "Lead with on-road + live EMI + exchange. Never dump premium models first. Pivot discount asks to [TRANSFER].",
+    performance_buyer: "Xtreme / Xpulse why (pickup, looks) — not Splendor mileage. Offer test ride early.",
+    family_buyer: "Pillion comfort, wide seat, easy handling. Invite decision-maker to showroom.",
+    status_sensitive: "Premium Hero (Karizma / Xtreme 160) + showroom experience. Don't lead with cheapest EMI.",
+    business_buyer: "Running cost, commercial/BH registration, downtime. Hero service network.",
+    comfort_buyer: "Scooter comfort, boot space, ladies-friendly if relevant.",
+    value_buyer: "On-road + live EMI + resale. One model, one why.",
+    technology_sensitive: "Cruise / ABS / Bluetooth only if that variant actually has it in KB.",
+    safety_buyer: "IBS/ABS, stable ride, family safety — only real catalog facts.",
+  };
+  const track = tracks[persona];
+  if (!track) return "";
+  return `\n╔══ 7Ps TALK TRACK (${persona}) ══╗\n${track}\n╚════════════════════════════════╝`;
 }
 
 // NEW: Format discovery signals for prompt injection.
@@ -512,7 +561,7 @@ function formatDiscoverySignals(signals: DiscoverySignals): string {
   if (signals.currentVehicle) lines.push(`• Current vehicle: ${signals.currentVehicle} (offer exchange bonus)`);
   if (signals.purpose) lines.push(`• Purpose: ${signals.purpose}`);
   if (signals.financeInterest) {
-    lines.push(`• Finance interest: YES — DO NOT stop at "finance achha option hai". Ask: (1) which model/budget (2) down payment amount (3) 24 or 36 month tenure. Quote reference EMI from table + disclaimer.`);
+    lines.push(`• Finance interest: YES — DO NOT stop at "finance achha option hai". Ask: (1) which model/budget (2) down payment amount (3) 24 or 36 month tenure. Quote LIVE reducing-balance EMI via [EMI:Model|down|months] — the server calculates. Always add CIBIL 8.5%–12% band.`);
   }
   if (signals.exchangeInterest) lines.push(`• Exchange interest: YES — mention ₹10,000-20,000 bonus`);
   if (signals.buyingTimeline) {
@@ -639,8 +688,8 @@ NEVER recommend one bank — LIST options: Hero FinCorp, HDFC, IDBI, Hinduja Ley
 NEVER stop at "finance achha option hai" — continue discovery.
 Required flow:
 1. Confirm model + customer's ACTUAL down payment (repeat their number back).
-2. Quote EMI from [PRECOMPUTED EMI TABLE] for that down payment — ALWAYS state tenure (24mo or 36mo).
-3. Base calculation @ 9% reference; say actual rate depends on CIBIL (8.5%–12%).
+2. Tag \`[EMI:Model|downPayment|months]\` (optional 4th field annual rate percent). The SERVER calculates live reducing-balance EMI — you MUST NOT invent rupee EMI figures in speech before the tag. If you already heard a spoken EMI from a previous turn, you may repeat that exact figure.
+3. Base rate 9% unless customer named another; always mention CIBIL band 8.5%–12%.
 4. If customer asks "kitne month" / "dubara batao" — REPEAT the same EMI with tenure clearly, do NOT restart finance script.
 5. [TRANSFER:FINANCE] only for exact CIBIL-locked rate.
 FORBIDDEN: pushing Hero FinCorp alone; quoting EMI without tenure; ignoring customer's down payment amount.
@@ -1131,20 +1180,20 @@ Listen → Acknowledge → Explore → Respond. Never argue.
 • "Budget tight hai" → lead with EMI + exchange.
 
 ╔══ TRUTH RULES ══╗
-• Prices/EMIs/offers ONLY from KB. Default = ON-ROAD JAIPUR.
-• EMI quotes MUST specify tenure.
-• **ZERO ARITHMETIC RULE** — read EMI numbers VERBATIM from [PRECOMPUTED EMI TABLE]. Never estimate.
+• Prices/offers ONLY from KB. Default = ON-ROAD JAIPUR.
+• EMI quotes MUST specify tenure AND come from live server calculation (\`[EMI:Model|down|months]\`) — never guess a rupee figure.
 • **STAY ON THE MODEL THE CUSTOMER JUST NAMED.**
 • **NEVER say farewell as a reply to a real question.**
 • **NEVER invent the customer's own data.**
 
 ╔══ FINANCE / EMI ══╗
 PARTNERS (list all — do NOT recommend one): Hero FinCorp, HDFC Bank, IDBI Bank, Hinduja Leyland Finance, RBL Bank. Customer chooses at showroom.
-BASE RATE: 9% p.a. for reference EMI from [PRECOMPUTED EMI TABLE]. Actual rate depends on CIBIL (typically 8.5%–12%).
-DEFAULT TENURES: 12, 18, 24, 36 months. Always state tenure WITH EMI amount.
+LIVE CALCULATION: reducing-balance EMI. Tag \`[EMI:Model|down|months]\` or \`[EMI:Model|down|months|9]\`. The server computes the rupee amount and may speak it. Do not invent EMI math yourself.
+BASE RATE: 9% p.a. unless the customer named another rate. Always say actual rate depends on CIBIL (typically 8.5%–12%) and quote that band when the server provides it.
+DEFAULT TENURES: 12, 18, 24, 36 months (any 6–60 is allowed). Always state tenure WITH EMI amount.
 When customer gives down payment — use THEIR amount (repeat it back), not a default.
 NEVER say "Hero FinCorp best hai" — say "in options mein se choose kar sakte hain".
-PROACTIVE FINANCE: After on-road price → offer EMI with tenure in same breath.
+PROACTIVE FINANCE: After on-road price → offer EMI with tenure in same breath via the [EMI] tag.
 CIBIL / EXACT RATE / LOAN APPROVAL → \`[TRANSFER:FINANCE]\`.
 
 ╔══ TRANSFER PROTOCOL — TRIGGER AGGRESSIVELY ══╗
@@ -1158,63 +1207,26 @@ Output ONLY the tag, nothing else:
 A TRANSFER is a WIN. A farewell on a hot lead is a lost sale.
 
 ╔══ ACTION TAGS (never spoken — appended after your last sentence) ══╗
-EMI numbers still come ONLY from [PRECOMPUTED EMI TABLE]. Tags fire side effects:
+EMI is calculated LIVE on the server from on-road − down, tenure, and rate:
+• After discussing finance, \`[EMI:Model|down|months]\` (optional 4th field annual percent, e.g. 9). Do not invent the rupee EMI in the tag.
 • Customer wants a test ride / showroom visit → speak the invite, then \`[VISIT]\` (or \`[VISIT:ISO-datetime]\` if they named a time).
 • Customer asks to WhatsApp brochure / price list → \`[WHATSAPP:brochure]\`.
-• After quoting EMI from the table, optionally \`[EMI:Model|down|months]\` so CRM stores the quote. Do not invent EMI in the tag.
 • Stock/available question after you checked KB → optional \`[STOCK:Model]\`.
 Never put tags in the middle of a spoken sentence.
 
-KNOWLEDGE BASE (your ONLY source of truth for prices, stock, offers):
+KNOWLEDGE BASE (your ONLY source of truth for prices, stock, offers — EMI rupees come from the live [EMI] tag, not this block):
 ${knowledge}
 
 Customer's language: ${language}`;
 
-// ─── EMI table (unchanged from original) ────────────────────────────────────
-const EMI_FACTORS_9PA: Record<number, number> = {
-  12: 0.087451, 18: 0.059602, 24: 0.045685, 36: 0.031800,
-};
-function _emi(principal: number, months: number): number {
-  const factor = EMI_FACTORS_9PA[months];
-  if (factor == null) {
-    const r = 0.09 / 12;
-    return Math.round(principal * (r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1));
-  }
-  return Math.round(principal * factor);
-}
-function _fmtInr(n: number): string { return n.toLocaleString("en-IN"); }
-
-function buildEmiTable(): string {
-  const variants = pricedVariants();
-  const downs = [20000, 25000, 30000, 50000, 80000];
-  const tenures = [12, 18, 24, 36];
-  const out: string[] = [];
-  for (const v of variants) {
-    out.push(`${v.name} — on-road ₹${_fmtInr(v.onRoad)}`);
-    for (const d of downs) {
-      if (d >= v.onRoad) continue;
-      const loan = v.onRoad - d;
-      const emis = tenures.map((m) => `${m}mo=₹${_fmtInr(_emi(loan, m))}`).join("  ");
-      out.push(`  Down ₹${_fmtInr(d)} → loan ₹${_fmtInr(loan)} → EMI: ${emis}`);
-    }
-  }
-  return out.join("\n");
-}
-const _EMI_TABLE = buildEmiTable();
-
-// Catalog + EMI table share @workspace/db/heroCatalog (Jaipur on-road as of 16-May-2026).
+// Catalog is always-on. EMI rupees are calculated live in emiQuote.ts — do not
+// inject a precomputed table (wrong downs/tenures made Sakshi invent or stall).
 const DEFAULT_HERO_KNOWLEDGE = `${formatDefaultHeroKnowledge()}
 
-[PRECOMPUTED EMI TABLE — READ THESE NUMBERS DIRECTLY, NEVER COMPUTE]
-9% p.a. reference rate. ALWAYS quote with disclaimer:
-"ye reference EMI hai, actual rate aapke CIBIL score ke hisaab se 8.5%–12% vary kar sakta hai."
-Procedure when customer asks "EMI kitna":
-  1. Find the EXACT variant the customer named in the table below.
-  2. Find the EXACT down-payment row and tenure column.
-  3. Read the number. Quote it. NEVER add, subtract, multiply, or estimate yourself.
-  4. If customer's down or tenure doesn't match a row → quote closest row + say "approximate hisaab se".
-
-${_EMI_TABLE}`.trim();
+[LIVE EMI]
+Reducing-balance formula on (on-road − down payment). Default 9% p.a. Always state tenure.
+When the customer asks EMI: confirm model + their down payment, then output [EMI:Model|down|months].
+Disclaimer: actual rate depends on CIBIL (typically 8.5%–12%). Exact lock → [TRANSFER:FINANCE].`.trim();
 
 // ─── Call intent analysis ─────────────────────────────────────────────────────
 // IMPROVED: Added competitorMentioned, competitorReason, familyInfo, buyingTimeline.
@@ -1243,6 +1255,10 @@ export async function analyzeCallIntent(
   lostOfferFactor: string | null;
   visitPlanned: boolean;
   visitDate: string | null;
+  promises: string[];
+  locality: string | null;
+  previousVehicle: string | null;
+  exchangeVehicle: string | null;
 }> {
   const langInstruction = sessionLanguage.startsWith("hi")
     ? "Write the summary field in Hindi (Devanagari script)."
@@ -1290,6 +1306,10 @@ Analyze the transcript and return JSON with:
 - lostOfferFactor: which competitor offer influenced them (cash discount/EMI/exchange), else null
 - visitPlanned: true if customer agreed to visit the showroom or take a test ride, else false
 - visitDate: ISO 8601 datetime of the agreed showroom visit / test ride (e.g. "Saturday 11 baje" → that Saturday 11:00 IST). If they agreed but gave no time, use the next day 11:00 AM IST. Null if visitPlanned is false.
+- promises: array of commitments the AGENT made (e.g. "call Sunday", "WhatsApp EMI sheet"), else []
+- locality: neighbourhood / area / city the customer mentioned, else null
+- previousVehicle: older bike they used to own (not current), else null
+- exchangeVehicle: vehicle they want to exchange, else null
 
 Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20
 If lostDeal=true, intent should be "not_interested" or "future_date" with score ≤30 unless they left door open.`,
@@ -1323,6 +1343,10 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
       lostOfferFactor: parsed.lostOfferFactor ?? null,
       visitPlanned: Boolean(parsed.visitPlanned),
       visitDate: parsed.visitDate ?? null,
+      promises: Array.isArray(parsed.promises) ? parsed.promises.map(String) : [],
+      locality: parsed.locality ?? null,
+      previousVehicle: parsed.previousVehicle ?? null,
+      exchangeVehicle: parsed.exchangeVehicle ?? null,
     };
   } catch {
     logger.error("Failed to parse intent analysis JSON");
@@ -1334,6 +1358,7 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
       decisionMaker: null, lostDeal: false, lostToBrand: null, lostToDealer: null,
       lostReason: null, lostOfferFactor: null,
       visitPlanned: false, visitDate: null,
+      promises: [], locality: null, previousVehicle: null, exchangeVehicle: null,
     };
   }
 }
@@ -1368,7 +1393,7 @@ export function computeFollowupDate(
     return { date: addDays(now, 10), reason: "Customer buying in 15 days — check-in at 10 days" };
   }
   if (buyingTimeline === "month") {
-    return { date: addDays(now, 22), reason: "Customer buying next month — follow-up at 22 days" };
+    return { date: nextSalaryDay(), reason: "Salary-cycle — 1st of next month (after salary)" };
   }
   if (buyingTimeline === "festival") {
     const festDate = addDays(now, 35); // approximate festival-season window

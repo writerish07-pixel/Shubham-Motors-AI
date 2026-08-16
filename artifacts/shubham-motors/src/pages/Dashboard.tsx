@@ -58,6 +58,21 @@ export default function Dashboard() {
   const { data: activity } = useGetRecentActivity();
   const { data: funnel } = useGetLeadFunnel();
   const { data: callPerf } = useGetCallPerformance({ days: 7 });
+  const scorecardQ = useQuery({
+    queryKey: ["employee-scorecard"],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/analytics/employee-scorecard`);
+      if (!r.ok) throw new Error("failed");
+      return r.json() as Promise<{
+        visitsBooked: number; financeTransfers: number; followupsDone: number;
+        followupsOverdue: number; shadowQuality: number; competitorMentions: number;
+        openRevenue: number; avgRelationship: number; avgCsat: number;
+        silentGreetings: number; avgTurnMs: number;
+      }>;
+    },
+    refetchInterval: 30000,
+  });
+  const sc = scorecardQ.data;
 
   const { data: scheduler, isLoading: schedLoading } = useQuery({
     queryKey: ["scheduler-status"],
@@ -289,6 +304,23 @@ export default function Dashboard() {
         <StatCard label="Avg Lead Score" value={statsLoading ? "—" : (stats?.avgLeadScore ?? 0)} icon={<TrendingUp size={14} />} sub="Out of 100" />
         <StatCard label="WhatsApp Sent" value={statsLoading ? "—" : (stats?.whatsappSent ?? 0)} icon={<MessageSquare size={14} />} sub="Post-call summaries" />
         <StatCard label="Total Calls" value={statsLoading ? "—" : (stats?.totalCalls ?? 0)} icon={<PhoneCall size={14} />} sub="Inbound + outbound" />
+      </div>
+
+      <div className="bg-card border border-card-border rounded-lg p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold">Sakshi employee scorecard</h2>
+          <Link href="/competitor"><span className="text-xs text-primary hover:underline cursor-pointer">Competitor intel</span></Link>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <StatCard label="Visits booked" value={sc?.visitsBooked ?? "—"} icon={<Calendar size={14} />} sub="Showroom / test ride" />
+          <StatCard label="Finance handoffs" value={sc?.financeTransfers ?? "—"} icon={<Phone size={14} />} sub="Transferred to finance" />
+          <StatCard label="Follow-ups done" value={sc?.followupsDone ?? "—"} icon={<CheckCircle2 size={14} />} sub={`${sc?.followupsOverdue ?? 0} overdue`} />
+          <StatCard label="Call quality" value={sc?.shadowQuality ?? "—"} icon={<Star size={14} />} sub="Shadow overall" />
+          <StatCard label="Open revenue" value={sc ? `₹${Number(sc.openRevenue).toLocaleString("en-IN")}` : "—"} icon={<TrendingUp size={14} />} sub="Probability-weighted" />
+          <StatCard label="Relationship" value={sc?.avgRelationship ?? "—"} icon={<Users size={14} />} sub="Avg score" />
+          <StatCard label="CSAT" value={sc?.avgCsat ?? "—"} icon={<MessageSquare size={14} />} sub="1–5 after visit" />
+          <StatCard label="Silent pickups" value={sc?.silentGreetings ?? "—"} icon={<AlertCircle size={14} />} sub={sc?.avgTurnMs ? `${sc.avgTurnMs} ms avg turn` : "Greeting fail"} />
+        </div>
       </div>
 
       {/* Charts row */}

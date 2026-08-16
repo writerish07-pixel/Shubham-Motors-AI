@@ -1,5 +1,5 @@
 /**
- * Per-call cost estimate in INR — used to keep Sakshi under ₹2 / connected minute.
+ * Per-call cost estimate in INR — keep Sakshi under ₹4 / connected minute (was ₹2).
  *
  * Telephony dominates. STT/TTS (Sarvam) are cheap. gpt-4o is NOT — COST_MODE=strict
  * (gpt-4o-mini only) is required for the cap. Rates are env-overridable so the
@@ -59,7 +59,8 @@ export function loadCostRates(): CostRates {
 }
 
 export function budgetInrPerMin(): number {
-  return Number(process.env.COST_ALERT_INR_PER_MIN ?? 2);
+  const n = Number(process.env.COST_ALERT_INR_PER_MIN ?? 4);
+  return Number.isFinite(n) && n > 0 ? n : 4;
 }
 
 export function estimateCallCost(input: CallCostInput, rates: CostRates = loadCostRates()): CallCostBreakdown {

@@ -40,6 +40,7 @@ test("inferCustomerPersona: maps signals to sales strategy", () => {
   assert.equal(inferCustomerPersona({ ...base, dailyKm: 60 }), "mileage_sensitive");
   assert.equal(inferCustomerPersona({ ...base, budget: 180000 }), "status_sensitive");
   assert.equal(inferCustomerPersona({ ...base, segment: "scooter_125" }), "comfort_buyer");
+  assert.equal(inferCustomerPersona({ ...base, interestedModel: "Glamour X DSS ABS" }), "safety_buyer");
 });
 
 test("computePurchaseProbability: anchored on intent, adjusted by timeline", () => {
