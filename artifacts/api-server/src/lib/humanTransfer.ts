@@ -140,24 +140,35 @@ export type ConnectContact = {
 };
 
 /**
- * Numbers Exotel Connect should dial. Prefers the in-memory queue (peek, so
- * Exotel retries still work), else every active CRM sales contact, else env.
+ * Numbers Exotel Connect should dial — ONLY if Sakshi actually queued a handoff.
+ *
+ * Call 18 / live 17 Aug: Voicebot WS close always advanced to Connect. Falling
+ * back to every CRM salesperson meant EVERY dropped/silent bot call rang
+ * Priyanka on a dead line. No queue = do not dial.
  */
 export function resolveConnectNumbers(opts: {
   callSid: string;
   contacts: ConnectContact[];
   fallback?: string;
   strategy?: TransferStrategy;
+  /** Phones already persisted on calls.transferred_to (same-process queue miss). */
+  persistedPhones?: string[];
 }): string[] {
   const queued = peekHumanTransfer(opts.callSid);
   let phones = queued?.phones?.length ? queued.phones : [];
-  if (!phones.length) {
-    phones = opts.contacts
-      .filter((c) => c.isActive && c.type === "sales")
-      .map((c) => c.phone);
+  if (!phones.length && opts.persistedPhones?.length) {
+    phones = opts.persistedPhones;
   }
-  if (!phones.length && opts.fallback) phones = [opts.fallback];
+  void opts.contacts;
+  void opts.fallback;
   return numbersForConnect(phones, opts.strategy ?? transferStrategy());
+}
+
+/** Pull +91 mobiles out of transferred_to ("priyanka +919610165555"). */
+export function phonesFromTransferRecord(record: string | null | undefined): string[] {
+  const raw = String(record ?? "");
+  const found = raw.match(/(?:\+?91)?[6-9]\d{9}/g) ?? [];
+  return uniquePhones(found.map((p) => (p.length === 10 ? `+91${p}` : p)));
 }
 
 export function formatQueuedTransfer(legs: TransferLeg[]): string {
@@ -284,9 +295,9 @@ export function isAgentPromisingTransfer(text: string): boolean {
   );
 }
 
-/** Energy is a person talking over TTS, not just line echo. */
+/** Energy is a person talking over TTS, not Sakshi's own echo on the line. */
 export function bargeEnergyHits(energy: number, echoRms: number, floor: number): boolean {
-  if (energy >= 0.07) return true;
-  const adaptive = Math.max(floor, echoRms * 1.7);
+  if (energy >= 0.12) return true;
+  const adaptive = Math.max(floor, echoRms * 2.4);
   return energy > adaptive;
 }

@@ -95,8 +95,9 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
   }
 
   // Named model this call: sell it. Do not restart km / scooter-vs-bike discovery.
+  // Showroom-visit KPI: specific day + time, not a vague "shall I book?".
   if (model) {
-    return `${model} की ऑन-रोड बताऊँ, ई एम आई निकालूँ, या टेस्ट राइड बुक करूँ?`;
+    return `${model} की टेस्ट राइड कब ठीक रहेगी — आज शाम या कल सुबह?`;
   }
 
   if (!s.segment) return "पहले बताइए — स्कूटर चाहिए या बाइक?";
@@ -116,7 +117,7 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
     return "कौन सा मॉडल नाम से देख रहे हैं?";
   }
 
-  return `${model} की ऑन-रोड बताऊँ, ई एम आई निकालूँ, या टेस्ट राइड बुक करूँ?`;
+  return `${model} की टेस्ट राइड कब ठीक रहेगी — आज शाम या कल सुबह?`;
 }
 
 /**

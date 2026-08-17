@@ -8,7 +8,7 @@ import { resolveOutboundFollowupOutcome } from "../lib/scheduler";
 import { knowledgeTable } from "@workspace/db";
 import { logger } from "../lib/logger";
 import { findOrCreateLead } from "../lib/leadLookup";
-import { extractDialWhomNumber, resolveConnectNumbers, resolveTransferredToLabel } from "../lib/humanTransfer";
+import { extractDialWhomNumber, phonesFromTransferRecord, resolveConnectNumbers, resolveTransferredToLabel } from "../lib/humanTransfer";
 import { ingestExotelRecording } from "../lib/recordingIngest";
 import axios from "axios";
 import { sql } from "drizzle-orm";
@@ -44,17 +44,31 @@ router.all("/webhooks/exotel/connect-agent", async (req, res): Promise<void> => 
   } catch (err) {
     req.log?.warn({ err, callSid }, "connect-agent: contacts lookup failed — using queue/fallback");
   }
+  let persistedPhones: string[] = [];
+  if (callSid) {
+    try {
+      const [call] = await db.select().from(callsTable).where(eq(callsTable.exotelCallSid, callSid)).limit(1);
+      persistedPhones = phonesFromTransferRecord(call?.transferredTo);
+    } catch (err) {
+      req.log?.warn({ err, callSid }, "connect-agent: transferred_to lookup failed");
+    }
+  }
   const numbers = resolveConnectNumbers({
     callSid,
     contacts,
-    fallback: process.env.SALES_TRANSFER_NUMBER ?? "",
+    persistedPhones,
   });
+  const wantsXml = String(req.headers.accept ?? "").includes("xml") || String(params.format ?? "") === "xml";
   if (!numbers.length) {
-    res.type("application/xml").send(exoml(sayTag("माफ़ कीजिए, सेल्स एक्सपर्ट अभी उपलब्ध नहीं हैं। हम कॉल बैक करेंगे।")));
+    req.log?.info({ callSid }, "connect-agent: no queued transfer — not dialing sales");
+    if (wantsXml) {
+      res.type("application/xml").send(exoml(sayTag("एक पल रुकिए, मैं सुन रही हूँ।")));
+      return;
+    }
+    res.json({ fetch_after_attempt: false, destination: { numbers: [] } });
     return;
   }
   req.log?.info({ callSid, numbers }, "connect-agent destination numbers");
-  const wantsXml = String(req.headers.accept ?? "").includes("xml") || String(params.format ?? "") === "xml";
   if (wantsXml) {
     res.type("application/xml").send(exoml(dialNumbersXml(numbers)));
     return;

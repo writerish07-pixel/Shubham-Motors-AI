@@ -68,6 +68,9 @@ test("retrieveKnowledgeForUtterance keeps playbooks/offers and 1–2 families", 
   assert.ok(titles.includes("Splendor XTEC"));
   assert.equal(titles.includes("Xoom 125 ZX"), false);
   assert.ok(familiesMentioned("glamour cruise control").includes("Glamour X"));
+  assert.deepEqual(familiesMentioned("Super Splendor XTEC 2.0 Disc"), ["Super Splendor"]);
+  assert.ok(familiesMentioned("splendor plus dekhna hai").includes("Splendor"));
+  assert.equal(familiesMentioned("splendor plus dekhna hai").includes("Super Splendor"), false);
 });
 
 test("sanitizeKnowledgeItem rewrites leftover EMI-without-math playbook", () => {
@@ -154,7 +157,7 @@ test("self-learning auto-applies objections but not price corrections", () => {
   assert.equal(shouldAutoApplyLearning("missing_info", "ok", { KB_AUTO_LEARN: "0" }), false);
 });
 
-test("barge-in stays disarmed during greeting TTS wait", () => {
+test("barge-in stays disarmed for the whole greeting, including PCM playback", () => {
   const now = 1_000_000;
   assert.equal(
     bargeInArmed({ isSpeaking: true, speakingStartedAt: undefined, greetingProtectedUntil: now + 25_000 }, now),
@@ -162,13 +165,9 @@ test("barge-in stays disarmed during greeting TTS wait", () => {
   );
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: 0, greetingProtectedUntil: now + 1000 }, now), false);
   assert.equal(bargeInArmed({ isSpeaking: false, speakingStartedAt: now - 2000 }, now), false);
-});
-
-test("barge-in is armed once greeting PCM is playing", () => {
-  const now = 1_000_000;
   assert.equal(
     bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000, greetingProtectedUntil: now + 20_000 }, now),
-    true,
+    false,
   );
 });
 
@@ -177,16 +176,17 @@ test("mid-call barge-in is armed during TTS wait so the customer can interrupt",
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: undefined }, now), true);
 });
 
-test("barge-in grace window blocks abort; greeting PCM after grace does not", () => {
+test("barge-in grace window blocks abort; after grace mid-call is armed", () => {
   const now = 1_000_000;
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 40 }, now), false);
+  assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 200 }, now), false);
   assert.equal(bargeInArmed({ isSpeaking: true, speakingStartedAt: now - 2000 }, now), true);
 });
 
 test("barge-in threshold is reachable for phone speech and count decays instead of resetting", () => {
-  assert.ok(bargeInRmsThreshold() < 0.04);
-  assert.ok(bargeInRmsThreshold() > 0.015);
-  assert.equal(bargeInFramesNeeded(), 5);
+  assert.ok(bargeInRmsThreshold() >= 0.04);
+  assert.ok(bargeInRmsThreshold() < 0.08);
+  assert.equal(bargeInFramesNeeded(), 12);
   assert.equal(nextBargeInCount(0, 0.05, 0.04), 1);
   assert.equal(nextBargeInCount(7, 0.05, 0.04), 8);
   assert.equal(nextBargeInCount(7, 0.01, 0.04), 6);

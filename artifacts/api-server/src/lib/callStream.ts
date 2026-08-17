@@ -492,13 +492,9 @@ async function playGreetingAudio(ws: WebSocket, session: Session, greeting: stri
       return;
     }
     if (ws.readyState !== WebSocket.OPEN || session.isClosed) return;
-    if (session.speechCount >= MIN_SPEECH_CHUNKS || session.ttsAbort) {
-      logger.info({ callSid: session.callSid, speechCount: session.speechCount }, "Customer spoke during greeting TTS wait — skipping namaste playback");
-      session.ttsAbort = true;
-      return;
-    }
+    // Call 18: line noise during TTS wait set speechCount and skipped namaste,
+    // so the customer heard silence then got dumped to sales. Always play namaste.
     session.speakingStartedAt = Date.now();
-    session.greetingProtectedUntil = 0;
     await playPcm8k(ws, session.streamSid, pcm, session);
     if (!session.ttsAbort) session.greetingPlayed = true;
     logger.info({ callSid: session.callSid, samples: pcm.length, interrupted: Boolean(session.ttsAbort) }, "Greeting audio sent");

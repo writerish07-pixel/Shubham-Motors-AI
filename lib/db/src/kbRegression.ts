@@ -124,13 +124,16 @@ export function evaluateKbRegression(rows: KbSnapshotRow[]): RegressionCheck[] {
   const priceRow = live.find((r) => r.category === "price" && /on-road/i.test(r.title));
   const glamourOk = Boolean(priceRow?.content.includes("Glamour X DRS=104555"));
   const splendorOk = Boolean(priceRow?.content.includes(`Splendor XTEC=${ON_ROAD_JAIPUR["Splendor XTEC"]}`));
+  const superOk = Boolean(priceRow?.content.includes(`Super Splendor XTEC=${ON_ROAD_JAIPUR["Super Splendor XTEC"]}`));
+  const plus2 = Boolean(priceRow?.content.includes(`Splendor+ XTEC 2.0=${ON_ROAD_JAIPUR["Splendor+ XTEC 2.0"]}`));
+  const distinct = ON_ROAD_JAIPUR["Super Splendor XTEC"] !== ON_ROAD_JAIPUR["Splendor+ XTEC 2.0"];
   checks.push({
     id: "kb.on_road_prices",
     area: "kb",
-    ok: glamourOk && splendorOk,
-    detail: glamourOk && splendorOk
-      ? "On-road Jaipur list includes Glamour X DRS and Splendor XTEC"
-      : "On-road price list is missing canonical Jaipur figures",
+    ok: glamourOk && splendorOk && superOk && plus2 && distinct,
+    detail: glamourOk && splendorOk && superOk && plus2 && distinct
+      ? "On-road Jaipur list keeps Super Splendor XTEC distinct from Splendor+ XTEC 2.0"
+      : "On-road price list is missing canonical Jaipur figures or mixes Super vs Splendor+",
   });
 
   const fuel = live.find((r) => r.title === "fuel_price_jaipur");
@@ -179,6 +182,14 @@ export function evaluateAppRegression(input: {
       area: "app",
       ok: /Lal Kothi/i.test(kb) && /Glamour X DRS/i.test(kb),
       detail: /Lal Kothi/i.test(kb) ? "Default catalog has showroom + Glamour X" : "Default catalog missing showroom/models",
+    },
+    {
+      id: "app.super_vs_splendor",
+      area: "app",
+      ok: /DO NOT MIX — Super Splendor vs Splendor/i.test(kb) && /Super Splendor XTEC/.test(kb) && /Splendor\+ XTEC 2\.0/.test(kb),
+      detail: /DO NOT MIX/i.test(kb)
+        ? "Default catalog keeps Super Splendor distinct from Splendor+ XTEC 2.0"
+        : "Default catalog missing Super vs Splendor mix warning",
     },
   ];
 }

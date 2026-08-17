@@ -48,14 +48,18 @@ export function buildFollowUpCallPromptBlock(
 This is a RETURN call. Follow these even if they conflict with normal discovery rules.
 
 🚫 DO NOT RE-ASK if already known: name, budget, km.
-⚠️ CRM Model is PREVIOUS-CALL history only. If they name a different bike/scooter OR say वो नहीं / कुछ और देख रहे हैं — DROP the old model this call. Same turn: confirm the new name, one benefit, on-road + EMI, then test ride. Never ask Glamour cruise / DRS / DSS unless THIS call model is Glamour X.
+⚠️ MEMORY IS THE START, NOT A LOCK. CRM Model / last transcript is greeting context only. If they name a different bike/scooter THIS call, or say वो नहीं / कुछ और / mind change — DROP the old model immediately and sell the new one. Never force last-call Glamour/Splendor after they switched.
+⚠️ Never ask Glamour cruise / DRS / DSS unless THIS call model is Glamour X.
+✅ Opening already asked: same bike as last time, or something else? Honour their answer.
 ✅ START by asking: "Kya aapne bike le li since last call?" — if YES, handle outcome warmly.
-✅ If NO: CONTINUE from last conversation — do NOT restart full discovery. If they switched models, sell the new one.
+✅ If NO and they stay on the old model: CONTINUE — do NOT restart full discovery.
+✅ If they switched models: same turn confirm the new name, one benefit, on-road + live EMI, then test-ride day/time (आज शाम या कल सुबह).
+✅ Answer the question they just asked FIRST, then one next step. Never end on a dead statement.
 ✅ If timeline unknown, ask naturally: "Kab tak lena plan hai — is hafte, mahine, ya festival ke baad?"
 ✅ Be warm — like continuing an old conversation, not a cold call.
 
-${known.length ? `KNOWN FROM CRM:\n${known.map((k) => `• ${k}`).join("\n")}` : ""}
-${memory ? `\nMEMORY FROM LAST CALL (use this, don't re-ask):\n"${memory}"` : ""}
+${known.length ? `KNOWN FROM CRM (history only — overwrite if this call differs):\n${known.map((k) => `• ${k}`).join("\n")}` : ""}
+${memory ? `\nMEMORY FROM LAST CALL (opening context, not a lock):\n"${memory}"` : ""}
 ╚═══════════════════════════════════════════════════════════════════════╝`;
 }
 

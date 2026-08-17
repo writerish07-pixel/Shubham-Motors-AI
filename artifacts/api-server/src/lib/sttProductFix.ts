@@ -28,6 +28,7 @@ const PRODUCT_ALIASES: Array<[RegExp, string]> = [
   [/एचएफ\s*डीलक्स/g, "HF Deluxe"],
   [/एचएफडी/g, "HF Deluxe"],
   [/डीलक्स\s*प्रो/g, "HF Deluxe Pro"],
+  [/सुपर\s*स्प्लेंडर/g, "Super Splendor"],
   [/डेस्टिनी/g, "Destini"],
   [/ज़ूम|जूम/g, "Xoom"],
 ];
