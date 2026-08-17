@@ -68,6 +68,9 @@ test("retrieveKnowledgeForUtterance keeps playbooks/offers and 1–2 families", 
   assert.ok(titles.includes("Splendor XTEC"));
   assert.equal(titles.includes("Xoom 125 ZX"), false);
   assert.ok(familiesMentioned("glamour cruise control").includes("Glamour X"));
+  assert.deepEqual(familiesMentioned("Super Splendor XTEC 2.0 Disc"), ["Super Splendor"]);
+  assert.ok(familiesMentioned("splendor plus dekhna hai").includes("Splendor"));
+  assert.equal(familiesMentioned("splendor plus dekhna hai").includes("Super Splendor"), false);
 });
 
 test("sanitizeKnowledgeItem rewrites leftover EMI-without-math playbook", () => {

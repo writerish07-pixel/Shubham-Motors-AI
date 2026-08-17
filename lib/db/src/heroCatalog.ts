@@ -236,6 +236,12 @@ export function formatDefaultHeroKnowledge(): string {
   }
 
   lines.push("");
+  lines.push("[DO NOT MIX — Super Splendor vs Splendor]");
+  lines.push("Super Splendor XTEC = 125cc family BIKE, ~65 kmpl, on-road ₹98,169 (as of 16-May-2026). Variants: XTEC, XTEC DSS.");
+  lines.push("Splendor / Splendor+ XTEC 2.0 = 100cc commuter BIKE, ~80 kmpl, Splendor+ XTEC 2.0 on-road ₹97,973. Different engine, different bike.");
+  lines.push("If the customer says Super Splendor / Super Splendor XTEC / Super Splendor XTEC 2.0 Disc — they mean Super Splendor. NEVER quote Splendor+ XTEC 2.0 price or 80 kmpl for Super Splendor.");
+
+  lines.push("");
   lines.push("[CURRENTLY IN STOCK — high availability]");
   const stock = HERO_VARIANTS.filter((v) => v.inStock).map((v) => v.family);
   lines.push([...new Set(stock)].join(", "));

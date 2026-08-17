@@ -17,6 +17,9 @@ test("catalog has priced commuters and premium models without fake rupees", () =
   const withEmi = formatDefaultHeroKnowledgeWithLiveEmi();
   assert.match(withEmi, /\[LIVE EMI\]/);
   assert.doesNotMatch(withEmi, /PRECOMPUTED EMI/);
+  assert.match(withEmi, /DO NOT MIX — Super Splendor vs Splendor/);
+  assert.match(withEmi, /Super Splendor XTEC/);
+  assert.match(withEmi, /Splendor\+ XTEC 2\.0/);
 });
 
 test("knowledge seed covers every family plus showroom/offers", () => {

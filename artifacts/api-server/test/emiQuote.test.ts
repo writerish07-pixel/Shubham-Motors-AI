@@ -54,6 +54,12 @@ test("resolveModelOnRoad: aliases including STT-garbled Glamour", () => {
   assert.equal(garbled!.model, "Glamour X DRS");
 
   assert.equal(resolveModelOnRoad("koi bhi nahi"), null);
+
+  const superXtec = resolveModelOnRoad("Super Splendor XTEC 2.0 Disc");
+  assert.ok(superXtec);
+  assert.equal(superXtec!.model, "Super Splendor XTEC");
+  assert.equal(superXtec!.onRoad, ON_ROAD_JAIPUR["Super Splendor XTEC"]);
+  assert.notEqual(superXtec!.onRoad, ON_ROAD_JAIPUR["Splendor+ XTEC 2.0"]);
 });
 
 test("formatEmiQuote: spoken Hindi with tenure and CIBIL band — not Latin IVR", () => {

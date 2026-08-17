@@ -38,7 +38,8 @@ const STT_ALIASES: Array<[RegExp, string]> = [
   [/जूम/g, "Xoom"],
   [/\broom\s*125\b/gi, "Xoom 125"],
   [/रूम\s*125/g, "Xoom 125"],
-  // Splendor variants
+  // Super Splendor before Splendor — Hindi स्प्लेंडर must not eat सुपर स्प्लेंडर.
+  [/सुपर\s*स्प्लेंडर/g, "Super Splendor"],
   [/\bsplender\b/gi, "Splendor"],
   [/\bsplendar\b/gi, "Splendor"],
   [/स्प्लेंडर/g, "Splendor"],
@@ -277,10 +278,13 @@ function findModelEntry(text: string, knowledge: string): ModelEntry | null {
   if (!entries.length) return null;
 
   const lower = text.toLowerCase();
+  const wantsSuper = /super\s*splendor|सुपर\s*स्प्लेंडर/i.test(text);
 
   // Score each entry by how many distinctive tokens from its title appear in the text.
   let best: { entry: ModelEntry; score: number } | null = null;
   for (const e of entries) {
+    // Call 18: Super Splendor XTEC 2.0 Disc must not pick Splendor+ XTEC 2.0.
+    if (wantsSuper && /splendor/i.test(e.title) && !/super/i.test(e.title)) continue;
     const tokens = e.title.toLowerCase().replace(/^hero\s+/, "").split(/[\s+/]+/).filter(t => t.length >= 2);
     let score = 0;
     for (const t of tokens) {

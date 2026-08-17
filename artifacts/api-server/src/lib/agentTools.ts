@@ -233,16 +233,25 @@ export function isKnowledgeInEffect(
 export function familiesMentioned(text: string): string[] {
   const t = text.toLowerCase();
   const hits: string[] = [];
-  for (const family of FAMILIES) {
+  const sorted = [...FAMILIES].sort((a, b) => b.length - a.length);
+  for (const family of sorted) {
     const lower = family.toLowerCase();
+    // Super Splendor must not fire on bare "splendor"; Splendor must not fire inside Super Splendor.
+    if (lower === "super splendor") {
+      if (/super\s*splendor/.test(t)) hits.push(family);
+      continue;
+    }
     if (t.includes(lower)) {
       hits.push(family);
       continue;
     }
-    const tokens = lower.replace(/\+/g, " ").split(/\s+/).filter((x) => x.length >= 3);
+    const tokens = lower.replace(/\+/g, " ").split(/\s+/).filter((x) => x.length >= 3 && !/^\d+$/.test(x));
     if (tokens.some((tok) => t.includes(tok))) hits.push(family);
   }
-  return [...new Set(hits)].slice(0, 2);
+  const nested = hits.filter(
+    (f) => !hits.some((other) => other !== f && other.toLowerCase().includes(f.toLowerCase())),
+  );
+  return [...new Set(nested)].slice(0, 2);
 }
 
 /**

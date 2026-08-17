@@ -22,9 +22,11 @@ const MODEL_PATTERNS: Array<[RegExp, string, string, LiveSegment]> = [
   [/glamour\s*x?\s*dss/gi, "Glamour X DSS", "Glamour X", "125cc"],
   [/glamour\s*x?\s*drs/gi, "Glamour X DRS", "Glamour X", "125cc"],
   [/glamour|galemar|galaimer|glemor|ग्लैमर/gi, "Glamour X", "Glamour X", "125cc"],
-  [/super\s*splendor/gi, "Super Splendor", "Super Splendor", "125cc"],
-  [/splendor\s*xtec|splendor\s*plus|स्प्लेंडर/gi, "Splendor XTEC", "Splendor", "100cc"],
-  [/\bsplendor\b/gi, "Splendor XTEC", "Splendor", "100cc"],
+  // Super Splendor is a 125cc bike. Never let "splendor" / "xtec 2.0" inside it win Splendor+.
+  [/super[\s-]*splendor[\s-]*(?:एक्सटेक|xtec)|सुपर[\s-]*(?:splendor|स्प्लेंडर)[\s-]*(?:एक्सटेक|xtec)/gi, "Super Splendor XTEC", "Super Splendor", "125cc"],
+  [/super[\s-]*splendor|सुपर[\s-]*(?:splendor|स्प्लेंडर)/gi, "Super Splendor", "Super Splendor", "125cc"],
+  [/(?<!super\s)(?<!सुपर\s)(?:splendor\s*xtec|splendor\s*plus|स्प्लेंडर)/gi, "Splendor XTEC", "Splendor", "100cc"],
+  [/(?<!super\s)(?<!सुपर\s)\bsplendor\b/gi, "Splendor XTEC", "Splendor", "100cc"],
   [/hf\s*deluxe\s*pro|deluxe\s*pro|डीलक्स\s*प्रो/gi, "HF Deluxe Pro", "HF Deluxe", "100cc"],
   [/hf\s*deluxe|hf deluxe/gi, "HF Deluxe", "HF Deluxe", "100cc"],
   [/एच\s*एफ\s*डीलक्स|एच\s*[एसस]\s*डीलक्स|एचएफ\s*डीलक्स|एचएफडी/g, "HF Deluxe", "HF Deluxe", "100cc"],
@@ -94,6 +96,18 @@ export function segmentForModel(name: string | null | undefined): LiveSegment | 
   return null;
 }
 
+function spansOverlap(a: ModelHit, b: ModelHit): boolean {
+  return a.index < b.index + b.length && a.index + a.length > b.index;
+}
+
+/** Call 18: "Super Splendor XTEC" also matched Splendor XTEC (later end → last-hit won 100cc). */
+function dropNestedFamilyHits(hits: ModelHit[]): ModelHit[] {
+  return hits.filter((h) => {
+    if (h.family !== "Splendor") return true;
+    return !hits.some((o) => o.family === "Super Splendor" && spansOverlap(h, o));
+  });
+}
+
 function collectHits(text: string): ModelHit[] {
   const hits: ModelHit[] = [];
   for (const [re, name, family, segment] of MODEL_PATTERNS) {
@@ -103,8 +117,9 @@ function collectHits(text: string): ModelHit[] {
       hits.push({ index: m.index, length: m[0].length, name, family, segment });
     }
   }
-  hits.sort((a, b) => (a.index + a.length) - (b.index + b.length) || b.length - a.length);
-  return hits;
+  const usable = dropNestedFamilyHits(hits);
+  usable.sort((a, b) => (a.index + a.length) - (b.index + b.length) || b.length - a.length);
+  return usable;
 }
 
 /** Last model they are shopping — not a model they just rejected. */
