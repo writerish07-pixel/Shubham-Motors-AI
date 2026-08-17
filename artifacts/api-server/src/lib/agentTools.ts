@@ -51,27 +51,29 @@ export function ttsLanguageCode(_sessionLanguage?: string, env: NodeJS.ProcessEn
   return env.TTS_LANGUAGE ?? "hi-IN";
 }
 
-/** Echo-guard only — 400ms made the first half-second of every sentence uninterruptible. */
-export const BARGE_IN_GRACE_MS = 80;
+/**
+ * Echo-guard. 80ms let Sakshi's own namaste abort itself (call 18: barge_in=20,
+ * greeting never played, customer could not hear her). 400ms covers one echo hop.
+ */
+export const BARGE_IN_GRACE_MS = 400;
 export const SILENCE_RMS = 0.008;
 
-/** Mid-call interrupt threshold. 12× silence never fired; 5× still missed live call #9. */
+/** Mid-call interrupt threshold. 3× silence fired on her own TTS echo. */
 export function bargeInRmsThreshold(env: NodeJS.ProcessEnv = process.env, silenceRms = SILENCE_RMS): number {
-  const n = Number(env.VOICE_BARGE_RMS ?? silenceRms * 3);
-  return Number.isFinite(n) && n > 0 ? n : silenceRms * 3;
+  const n = Number(env.VOICE_BARGE_RMS ?? silenceRms * 6);
+  return Number.isFinite(n) && n > 0 ? n : silenceRms * 6;
 }
 
-/** Consecutive 20 ms frames needed. Default 5 = 100 ms. */
+/** Consecutive 20 ms frames needed. Default 12 = 240 ms of real speech. */
 export function bargeInFramesNeeded(env: NodeJS.ProcessEnv = process.env): number {
-  const n = Number(env.VOICE_BARGE_FRAMES ?? 5);
-  return Number.isFinite(n) ? Math.min(30, Math.max(3, Math.round(n))) : 5;
+  const n = Number(env.VOICE_BARGE_FRAMES ?? 12);
+  return Number.isFinite(n) ? Math.min(30, Math.max(3, Math.round(n))) : 12;
 }
 
 /**
- * Greeting: protect ONLY the TTS wait before any PCM has left (line noise used
- * to kill namaste → dead air). Once greeting audio is playing, barge-in is on —
- * same as a world-class voice agent (Retell/Vapi): the customer can cut the
- * intro. Mid-call, armed during LLM/TTS synth so a catalog dump can be stopped.
+ * Greeting: stay disarmed for the whole namaste (TTS wait AND playback).
+ * Call 18 skipped/cut namaste because barge-in armed the moment PCM started.
+ * Mid-call: armed during LLM/TTS wait so a catalog dump can be stopped, after grace.
  */
 export function bargeInArmed(
   state: {
@@ -83,8 +85,7 @@ export function bargeInArmed(
   graceMs = BARGE_IN_GRACE_MS,
 ): boolean {
   if (!state.isSpeaking) return false;
-  const pcmPlaying = Boolean(state.speakingStartedAt && state.speakingStartedAt > 0);
-  if (!pcmPlaying && state.greetingProtectedUntil && now < state.greetingProtectedUntil) return false;
+  if (state.greetingProtectedUntil && now < state.greetingProtectedUntil) return false;
   const started = state.speakingStartedAt ?? 0;
   if (!started) return true;
   if (now - started < graceMs) return false;

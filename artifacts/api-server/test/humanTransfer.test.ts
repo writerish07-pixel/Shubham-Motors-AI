@@ -10,6 +10,7 @@ import {
   matchContactByPhone,
   normalizeAgentPhone,
   peekHumanTransfer,
+  phonesFromTransferRecord,
   queueHumanTransfer,
   queueHumanTransferTeam,
   resetHumanTransferStateForTests,
@@ -72,7 +73,7 @@ test("team queue rings every salesperson and peek does not consume", () => {
   assert.equal(peekHumanTransfer("CA-TEAM")?.label, "Rahul, Amit, Rahul dup");
 });
 
-test("connect falls back to all active CRM sales contacts", () => {
+test("connect does not dial sales unless a transfer was queued", () => {
   resetHumanTransferStateForTests();
   const numbers = resolveConnectNumbers({
     callSid: "unknown",
@@ -85,18 +86,36 @@ test("connect falls back to all active CRM sales contacts", () => {
     fallback: "9111111111",
     strategy: "simultaneous",
   });
-  assert.deepEqual(numbers, ["+919000000001", "+919000000004"]);
+  assert.deepEqual(numbers, []);
 });
 
-test("round_robin returns one rotating salesperson", () => {
+test("connect uses persisted transferred_to phones when the in-memory queue is empty", () => {
   resetHumanTransferStateForTests();
-  const contacts = [
-    { type: "sales", isActive: true, phone: "9000000001", name: "A" },
-    { type: "sales", isActive: true, phone: "9000000002", name: "B" },
-  ];
-  const first = resolveConnectNumbers({ callSid: "rr1", contacts, strategy: "round_robin" });
-  const second = resolveConnectNumbers({ callSid: "rr2", contacts, strategy: "round_robin" });
-  const third = resolveConnectNumbers({ callSid: "rr3", contacts, strategy: "round_robin" });
+  const numbers = resolveConnectNumbers({
+    callSid: "CA-DB",
+    contacts: [],
+    persistedPhones: ["9610165555"],
+  });
+  assert.deepEqual(numbers, ["+919610165555"]);
+});
+
+test("round_robin returns one rotating salesperson from the queued team", () => {
+  resetHumanTransferStateForTests();
+  assert.equal(queueHumanTransferTeam("rr1", [
+    { phone: "9000000001", name: "A" },
+    { phone: "9000000002", name: "B" },
+  ]), true);
+  assert.equal(queueHumanTransferTeam("rr2", [
+    { phone: "9000000001", name: "A" },
+    { phone: "9000000002", name: "B" },
+  ]), true);
+  assert.equal(queueHumanTransferTeam("rr3", [
+    { phone: "9000000001", name: "A" },
+    { phone: "9000000002", name: "B" },
+  ]), true);
+  const first = resolveConnectNumbers({ callSid: "rr1", contacts: [], strategy: "round_robin" });
+  const second = resolveConnectNumbers({ callSid: "rr2", contacts: [], strategy: "round_robin" });
+  const third = resolveConnectNumbers({ callSid: "rr3", contacts: [], strategy: "round_robin" });
   assert.deepEqual(first, ["+919000000001"]);
   assert.deepEqual(second, ["+919000000002"]);
   assert.deepEqual(third, ["+919000000001"]);
@@ -123,9 +142,14 @@ test("DialWhomNumber matches CRM contact for transferred_to", () => {
   ]), "queued: Rahul, Amit");
 });
 
+test("phonesFromTransferRecord reads the CRM handoff mobile", () => {
+  assert.deepEqual(phonesFromTransferRecord("priyanka +919610165555"), ["+919610165555"]);
+  assert.deepEqual(phonesFromTransferRecord(null), []);
+});
+
 test("bargeEnergyHits: loud speech beats echo floor", () => {
-  assert.equal(bargeEnergyHits(0.08, 0.02, 0.024), true);
-  assert.equal(bargeEnergyHits(0.02, 0.02, 0.024), false);
+  assert.equal(bargeEnergyHits(0.13, 0.02, 0.048), true);
+  assert.equal(bargeEnergyHits(0.03, 0.02, 0.048), false);
 });
 
 test("tryDirectAnswer: Glamour cruise is spoken Hindi, not Latin IVR", () => {
