@@ -27,6 +27,11 @@ export const PLAYBOOKS: ReadonlyArray<{ title: string; content: string }> = [
     content:
       "Stall hai, interest nahi. Ek blocker poochho (budget / family / compare). Phir ek low-commitment next step: test ride ya WhatsApp price. 'Ji bilkul sochiye' mat bolo.",
   },
+  {
+    title: "Never give up",
+    content:
+      "Missed test ride: same evening call + WhatsApp rebook. Soft nahi chahiye = thinking, DND nahi. Dusre dealer sasta = value then [TRANSFER] Priyanka — discount mat gadhho. Honda/TVS le li = lost + 21-day service/second-vehicle door. Call mat karo = stop forever.",
+  },
   LIVE_EMI_PLAYBOOK,
 ];
 

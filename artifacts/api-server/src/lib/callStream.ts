@@ -48,6 +48,7 @@ import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
 import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed, bargeInFramesNeeded, bargeInRmsThreshold, nextBargeInCount, parseJsonStringList, SILENCE_RMS } from "./agentTools";
 import { executeAgentTools } from "./agentActions";
+import { isHardCallOptOut } from "./neverGiveUp";
 import { prepareTtsText } from "./ttsPrep";
 import {
   bargeEnergyHits,
@@ -773,7 +774,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
 
   // TRAI/DND: explicit opt-out — honor instantly and permanently. The agent's
   // not_interested fast-path says the goodbye; this flag stops all future dials.
-  if (isExplicitOptOut(correctedText) && session.leadId) {
+  if (isHardCallOptOut(correctedText) && session.leadId) {
     await db.update(leadsTable).set({ doNotCall: true, status: "not_interested" }).where(eq(leadsTable.id, session.leadId));
     logger.info({ callSid: session.callSid, leadId: session.leadId }, "Customer opted out — doNotCall set");
   }
@@ -1183,13 +1184,6 @@ function detectTopicShift(lastAgentText: string, customerText: string): boolean 
   const agentTopic = topicOf(lastAgentText.toLowerCase());
   const customerTopic = topicOf(customerText.toLowerCase());
   return customerTopic !== null && agentTopic !== null && customerTopic !== agentTopic;
-}
-
-// ── isExplicitOptOut ──────────────────────────────────────────────────────────
-// "Not interested" is a sales objection; "stop calling me" is a compliance
-// instruction. Only the latter sets doNotCall.
-function isExplicitOptOut(text: string): boolean {
-  return /(?:mat\s+(?:karo|karna|kijiye)\s*(?:call|phone)|call\s+mat\s+(?:karo|karna|kijiye)|band\s+karo\s+call|call\s+band\s+karo|hata\s*(?:lo|do)\s+number|number\s+hata\s*(?:lo|do)|do\s+not\s+call|don'?t\s+call|stop\s+calling|\bdnd\b|block\s+(?:karo|kar\s+do)|मत\s+करो\s+(?:कॉल|फोन)|कॉल\s+मत\s+करो|बंद\s+करो\s+कॉल|हटा\s+लो\s+नंबर)/i.test(text);
 }
 
 // ── runTransfer ──────────────────────────────────────────────────────────────

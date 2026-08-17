@@ -14,6 +14,13 @@ import {
   laerStallFollowUp,
   spinFollowUp,
 } from "./bdcSkills";
+import {
+  coDealerPriceFollowUp,
+  isCoDealerPriceFight,
+  isConfirmedPurchaseElsewhere,
+  isSoftRejection,
+  lostElsewhereFollowUp,
+} from "./neverGiveUp";
 
 export interface FollowUpContext {
   signals?: DiscoverySignals;
@@ -48,6 +55,16 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
   const model = liveModelForTurn(ctx.customerText ?? "", s.interestedModel);
   const family = modelFamily(model);
 
+  // Confirmed buy-elsewhere: stop pitching this bike. Keep a relationship door.
+  if (isConfirmedPurchaseElsewhere(ctx.customerText ?? "")) {
+    return lostElsewhereFollowUp();
+  }
+
+  // Co-dealer cash fight: value + Priyanka. Never invent a matching rupee figure.
+  if (isCoDealerPriceFight(ctx.customerText ?? "")) {
+    return coDealerPriceFollowUp();
+  }
+
   // Call 17: never ask Glamour DSS vs DRS unless THIS turn's model is Glamour.
   // Skip if they already asked a buying question — variant can wait, the close cannot.
   if (isGlamourFamily(model) && !isRejectingPreviousModel(ctx.customerText ?? "")) {
@@ -76,8 +93,11 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
     return "रोज़ कितने किलोमीटर चलते हैं — उसी हिसाब से मॉडल बताऊँगी?";
   }
 
-  // LAER: stall is an objection, not permission to end the call.
-  if (isStall(ctx.customerText ?? "") && !isLiveBuyingQuestion(ctx.customerText ?? "")) {
+  // LAER: stall or soft "नहीं चाहिए" is not permission to end the call.
+  if (
+    (isStall(ctx.customerText ?? "") || isSoftRejection(ctx.customerText ?? ""))
+    && !isLiveBuyingQuestion(ctx.customerText ?? "")
+  ) {
     return laerStallFollowUp(model || undefined);
   }
 
