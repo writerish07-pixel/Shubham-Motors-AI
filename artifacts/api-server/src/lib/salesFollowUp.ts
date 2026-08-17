@@ -7,6 +7,13 @@ import type { ConvStage, DiscoverySignals } from "./openai";
 import { buyingTimelineQuestion } from "./buyingTimeline";
 import { isAgentPromisingTransfer } from "./humanTransfer";
 import { isGlamourFamily, isRejectingPreviousModel, liveModelForTurn, modelFamily } from "./liveModel";
+import {
+  assumptiveVisitClose,
+  isLiveBuyingQuestion,
+  isStall,
+  laerStallFollowUp,
+  spinFollowUp,
+} from "./bdcSkills";
 
 export interface FollowUpContext {
   signals?: DiscoverySignals;
@@ -60,13 +67,18 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
   }
 
   if (/price|kitne|kimat|qeemat|कीमत|on.?road|rate/i.test(customer)) {
-    if (model) return `${model} की टेस्ट राइड कब ठीक रहेगी — आज या कल?`;
+    if (model) return assumptiveVisitClose(model);
     return "कौन सा वेरिएंट आपको सूट करेगा?";
   }
 
   if (/feature|mileage|spec|engine|warranty|माइलेज/i.test(customer)) {
     if (model) return `${model} की ऑन-रोड बताऊँ या टेस्ट राइड बुक करूँ?`;
     return "रोज़ कितने किलोमीटर चलते हैं — उसी हिसाब से मॉडल बताऊँगी?";
+  }
+
+  // LAER: stall is an objection, not permission to end the call.
+  if (isStall(ctx.customerText ?? "") && !isLiveBuyingQuestion(ctx.customerText ?? "")) {
+    return laerStallFollowUp(model || undefined);
   }
 
   if (family === "HF Deluxe") {
@@ -94,30 +106,12 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
     return "आपके लिए सबसे ज़रूरी क्या है — माइलेज, स्टाइल, या ई एम आई?";
   }
 
-  // Named model this call: sell it. Do not restart km / scooter-vs-bike discovery.
-  // Showroom-visit KPI: specific day + time, not a vague "shall I book?".
+  // Named model this call: SPIN Need-payoff = visit. Do not restart km discovery.
   if (model) {
-    return `${model} की टेस्ट राइड कब ठीक रहेगी — आज शाम या कल सुबह?`;
+    return assumptiveVisitClose(model);
   }
 
-  if (!s.segment) return "पहले बताइए — स्कूटर चाहिए या बाइक?";
-  if (!s.km) return "रोज़ लगभग कितने किलोमीटर चलना पड़ता है?";
-  if (s.segment?.startsWith("scooter") && s.familyUse === undefined) {
-    return "सिर्फ़ आप चलाएँगे या परिवार के साथ भी?";
-  }
-  if (!s.budget) return "कैश में लेंगे या ई एम आई पर?";
-  if (!model) {
-    if (s.segment === "125cc") {
-      return "एक सौ पच्चीस सीसी में स्टाइल ग्लैमर या स्पोर्टी एक्सट्रीम — क्या पसंद है?";
-    }
-    if (s.segment?.startsWith("scooter")) {
-      return "परिवार के लिए डेस्टिनी या स्पोर्टी ज़ूम — कौन सा ट्राई करें?";
-    }
-    if (s.segment === "100cc") return "माइलेज के लिए एच एफ डिलक्स या आराम के लिए स्प्लेंडर — कौन सा?";
-    return "कौन सा मॉडल नाम से देख रहे हैं?";
-  }
-
-  return `${model} की टेस्ट राइड कब ठीक रहेगी — आज शाम या कल सुबह?`;
+  return spinFollowUp(s, model || undefined);
 }
 
 /**

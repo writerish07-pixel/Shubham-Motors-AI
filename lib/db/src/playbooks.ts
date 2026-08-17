@@ -15,7 +15,7 @@ export const PLAYBOOKS: ReadonlyArray<{ title: string; content: string }> = [
   {
     title: "Discovery playbook",
     content:
-      "Pehle segment (scooter vs bike, CC), roz ka km, family/pillion, budget. Ek sawaal ek baar. Jo mil gaya woh dubara mat poochho. 2 signals ke baad recommend karo.",
+      "SPIN: Situation pehle memory se (dubara mat poochho). Problem = ek gap (scooter vs bike / km / family). Implication = petrol ya EMI unke number mein. Need-payoff = aaj shaam ya kal subah test ride. 2 signals ke baad recommend karo.",
   },
   {
     title: "Test-ride close",
