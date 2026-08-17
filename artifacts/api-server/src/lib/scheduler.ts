@@ -13,7 +13,7 @@
  */
 
 import cron from "node-cron";
-import { and, eq, gte, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lte, notInArray, or, sql } from "drizzle-orm";
 import { db, followupsTable, leadsTable, callsTable } from "@workspace/db";
 import { makeOutboundCall } from "./exotel";
 import { getWebhookBaseUrl } from "./publicUrl";
@@ -21,6 +21,11 @@ import { sendWhatsAppMessage } from "./whatsapp";
 import { logger } from "./logger";
 import { outboundDialingAllowed } from "./agentTools";
 import { evaluateOutboundGates } from "./agentActions";
+import {
+  MISSED_VISIT_REASON,
+  nextMissedVisitDialAt,
+  skipOutboundForLeadStatus,
+} from "./neverGiveUp";
 
 // ─── Outbound context map ─────────────────────────────────────────────────────
 // Keyed by phone number (10-digit). Set by the scheduler before dialling;
@@ -220,7 +225,7 @@ function computeNextRun(expr: string): string {
 }
 
 // ─── Blocked statuses (won't get a follow-up call) ───────────────────────────
-const SKIP_STATUSES = new Set(["lost", "converted", "not_interested", "wrong_number"]);
+// lost is allowed only for RELATIONSHIP_DOOR_REASON — see skipOutboundForLeadStatus.
 
 // ─── Main auto-dialer ─────────────────────────────────────────────────────────
 export async function runAutoDialer(): Promise<RunResult> {
@@ -242,6 +247,7 @@ export async function runAutoDialer(): Promise<RunResult> {
   // Booked-but-no-show killer: send day-of WhatsApp reminders for confirmed
   // showroom visits before working the call queue.
   await sendVisitReminders().catch((err) => logger.error({ err }, "Visit reminders failed"));
+  await enqueueMissedVisitFollowups().catch((err) => logger.error({ err }, "Missed-visit chase failed"));
 
   const result: RunResult = {
     attempted: 0, succeeded: 0, failed: 0, skipped: 0, whatsappFallback: 0, details: [],
@@ -321,8 +327,8 @@ export async function runAutoDialer(): Promise<RunResult> {
         continue;
       }
 
-      // NEW: Skip 'not_interested' and 'wrong_number' in addition to 'lost'/'converted'
-      if (followup.leadStatus && SKIP_STATUSES.has(followup.leadStatus)) {
+      // Lost leads may still get the 21-day relationship-door call. DND is gated above.
+      if (skipOutboundForLeadStatus(followup.leadStatus, followup.reason)) {
         result.skipped++;
         result.details.push({ followupId: followup.followupId, leadName: followup.leadName, phone: followup.leadPhone, success: false, reason: `Lead status is ${followup.leadStatus}, skipping` });
         await db.update(followupsTable).set({ status: "cancelled" }).where(eq(followupsTable.id, followup.followupId));
@@ -506,6 +512,74 @@ export function startScheduler(): void {
 
 export function stopScheduler(): void {
   if (cronTask) { cronTask.stop(); cronTask = null; logger.info("Auto-dialer scheduler stopped"); }
+}
+
+/** Same-evening chase: visit time passed, they did not convert — queue a call + WhatsApp. */
+export async function enqueueMissedVisitFollowups(): Promise<number> {
+  const now = new Date();
+  const grace = new Date(now.getTime() - 90 * 60_000);
+  const oldest = new Date(now.getTime() - 48 * 3600_000);
+
+  const leads = await db
+    .select({
+      id: leadsTable.id,
+      name: leadsTable.name,
+      phone: leadsTable.phone,
+      interestedModel: leadsTable.interestedModel,
+      visitScheduledAt: leadsTable.visitScheduledAt,
+    })
+    .from(leadsTable)
+    .where(and(
+      isNotNull(leadsTable.visitScheduledAt),
+      lte(leadsTable.visitScheduledAt, grace),
+      gte(leadsTable.visitScheduledAt, oldest),
+      eq(leadsTable.doNotCall, false),
+      notInArray(leadsTable.status, ["converted", "lost", "wrong_number", "not_interested"]),
+    ))
+    .limit(40);
+
+  let n = 0;
+  for (const lead of leads) {
+    if (!lead.visitScheduledAt || !lead.phone) continue;
+    const when = nextMissedVisitDialAt(lead.visitScheduledAt, now, hourIST());
+    if (!when) continue;
+
+    const [existing] = await db
+      .select({ id: followupsTable.id })
+      .from(followupsTable)
+      .where(and(
+        eq(followupsTable.leadId, lead.id),
+        eq(followupsTable.reason, MISSED_VISIT_REASON),
+        inArray(followupsTable.status, ["pending", "dialing"]),
+      ))
+      .limit(1);
+    if (existing) continue;
+
+    await db.insert(followupsTable).values({
+      leadId: lead.id,
+      scheduledAt: when,
+      reason: MISSED_VISIT_REASON,
+      intentLabel: "interested",
+      status: "pending",
+      outboundContext: {
+        name: lead.name,
+        interestedModel: lead.interestedModel,
+        followupReason: MISSED_VISIT_REASON,
+        lastCallSummary: "Booked test ride but did not arrive",
+      },
+    } as any);
+
+    const model = lead.interestedModel ? ` *${lead.interestedModel}* की` : "";
+    const msg =
+      `नमस्ते ${lead.name || ""} जी! 🙏\n\n` +
+      `आपकी${model} test ride का स्लॉट रह गया था — कोई बात नहीं।\n` +
+      `आज शाम या कल सुबह नया समय बता दीजिए, गाड़ी निकाल के रख दूँगी।\n` +
+      `Shubham Motors, लाल कोठी, टोंक रोड, जयपुर`;
+    await sendWhatsAppMessage(lead.phone, msg).catch(() => {});
+    n++;
+  }
+  if (n) logger.info({ n }, "Missed-visit same-evening follow-ups queued");
+  return n;
 }
 
 // ── Visit reminders ───────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@
 import type { DiscoverySignals } from "./openai";
 import { FINANCE_PARTNERS_LIST } from "./emiQuote";
 import { logger } from "./logger";
+import { isHardCallOptOut, isSoftRejection } from "./neverGiveUp";
 
 interface Intent {
   phrases: string[];
@@ -28,12 +29,11 @@ const INTENTS: Record<string, Intent> = {
   },
   not_interested: {
     phrases: [
-      "nahi chahiye", "interest nahi", "mat karo call", "band karo call",
-      "hata lo number", "nahi lena", "no thanks", "zaroorat nahi",
-      "नहीं चाहिए", "इंटरेस्ट नहीं", "मत करो कॉल", "बंद करो", "नहीं लेना",
-      "जरूरत नहीं", "हटा लो नंबर",
+      "mat karo call", "band karo call", "hata lo number", "call mat karo",
+      "do not call", "don't call", "stop calling",
+      "मत करो कॉल", "कॉल मत करो", "बंद करो कॉल", "हटा लो नंबर",
     ],
-    words: [],
+    words: ["dnd"],
     response: "ठीक है — ज़रूरत हो तो कॉल कीजिएगा। धन्यवाद।",
   },
   callback: {
@@ -128,6 +128,16 @@ export function detectIntentWithMeta(
   if (clean.length < 2) return null;
   const wordCount = clean.split(/\s+/).length;
   if (wordCount > 12) return null;
+
+  // DND is compliance. Soft "नहीं चाहिए" is a stall — do not say goodbye.
+  if (isHardCallOptOut(text)) {
+    const response = typeof INTENTS.not_interested.response === "string"
+      ? INTENTS.not_interested.response
+      : "ठीक है — ज़रूरत हो तो कॉल कीजिएगा। धन्यवाद।";
+    logger.info({ intent: "not_interested", customerText: text.slice(0, 60) }, "Intent fast-path hit");
+    return { name: "not_interested", response };
+  }
+  if (isSoftRejection(text)) return null;
 
   if (isFinanceFollowUp(text, ctx.signals)) return null;
 

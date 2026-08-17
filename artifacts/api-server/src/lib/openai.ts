@@ -49,6 +49,7 @@ import {
   shouldAutoApplyLearning,
   type KnowledgeSliceItem,
 } from "./agentTools";
+import { coerceLostDeal, persistAsThinkingIfSoftNo, softenSoftNoScore } from "./neverGiveUp";
 
 // ─── Model IDs ───────────────────────────────────────────────────────────────
 const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
@@ -1193,8 +1194,10 @@ By turn 5 you MUST have proposed at least ONE concrete next step.
 
 ╔══ OBJECTION HANDLING (LAER framework) ══╗
 Listen → Acknowledge → Explore → Respond. Never argue.
-• "Sasti dusre dealer se mil rahi" → explain Hero service network + resale value → if they push → \`[TRANSFER]\`.
-• "Soch ke batata hoon" / "dekhte hain" / "baad mein dekhenge" = a POLITE NO or stall, NOT interest. Treat it as an objection: ask ONE gentle question to find the real blocker (budget? family approval? comparing brands?), then offer ONE concrete low-commitment next step (test ride / WhatsApp price list). Never reply "ji bilkul, zaroor sochiye" and move on — that ends the sale.
+• "Sasti dusre dealer se mil rahi" → explain Hero service network + resale value → if they push → \`[TRANSFER]\`. Never invent a cash match.
+• "Soch ke batata hoon" / "dekhte hain" / "nahi chahiye" / "बात नहीं करनी" stall = objection, NOT DND. Ask ONE blocker then test ride / WhatsApp. Never goodbye.
+• Already bought Honda/TVS/another dealer → congratulate, ask what they took, leave service/second-vehicle door. Do not keep selling this bike.
+• "Call mat karo" / DND → stop. Soft नहीं चाहिए is still a live lead.
 • Competitor mention → NEVER insult. Highlight Hero mileage/resale/service-network calmly.
 • "Budget tight hai" → lead with EMI + exchange.
 
@@ -1249,11 +1252,14 @@ You sell like the best two-wheeler BDC in India — not a FAQ bot. Every turn mu
 2. NAMED MODEL = STOP DISCOVERY. Once they name HF Deluxe / Splendor / Destini / Xoom / Pleasure / Glamour / Xtreme — do not ask scooter-vs-bike or daily km. Sell that bike.
 3. ANSWER → BENEFIT → CLOSE. Price, feature, or objection gets one short answer, then one close: on-road, live EMI, or "आज शाम या कल सुबह टेस्ट राइड?"
 4. ASSUMPTIVE TEST RIDE by turn 3 once a model is known. Alternative close: Saturday morning vs evening.
-5. STALL ("सोच के बताता हूँ") → one blocker (budget / family / comparing) + one low-commitment next step (WhatsApp sheet or test ride). Never "जी बिल्कुल सोचिए".
+5. STALL ("सोच के बताता हूँ" / "नहीं चाहिए") → one blocker (budget / family / comparing) + one low-commitment next step (WhatsApp sheet or test ride). Never "जी बिल्कुल सोचिए". Never goodbye.
 6. NEVER RE-PITCH THE CRM MODEL after they said something else. Previous-call Glamour is history, not this call's product.
 7. MEMORY STARTS THE CALL, IT DOES NOT LOCK IT. If they change their mind this turn, overwrite immediately.
 8. SHOWROOM VISITS: once a model is named, offer a concrete day+time (आज शाम / कल सुबह / शनिवार). That is the conversion KPI.
 9. SUPER SPLENDOR is never Splendor+ XTEC 2.0.
+10. CO-DEALER CHEAPER → Hero service/resale/finance value, then [TRANSFER] to Priyanka. Never invent a matching discount rupee.
+11. ALREADY BOUGHT ELSEWHERE → congratulate, ask brand/offer, leave the door for service or second vehicle. Do not keep pitching Super Splendor. Do NOT treat as DND.
+12. "CALL MAT KARO" / DND → stop immediately. Soft नहीं चाहिए is NOT DND.
 ╚════════════════════════════════════════════════════╝
 
 ╔══ YOU ARE THE SHOWROOM TELECALLER (read this last, every turn) ══╗
@@ -1333,6 +1339,7 @@ If customer gave a specific day/time, set followupDate to that datetime. If only
 
 Analyze the transcript and return JSON with:
 - intent: "hot_buy" | "interested" | "thinking" | "future_date" | "not_interested" | "wrong_number" | "needs_info"
+  not_interested is ONLY hard DND / "call mat karo" / never-call. Soft "नहीं चाहिए" / "सोचूंगा" / later is "thinking".
 - score: 0-100 buying intent score
 - summary: 1-2 sentence call outcome summary (in the correct language as instructed above)
 - followupDate: ISO 8601 datetime if customer mentioned when to call back OR when they plan to buy (e.g. "next Saturday 11am", "1st of next month"), else null
@@ -1345,7 +1352,7 @@ Analyze the transcript and return JSON with:
 - competitorReason: why customer considered competitor (price/mileage/design/waiting), else null
 - buyingTimeline: "immediate" | "15days" | "month" | "festival" | "loan_closure" | "next_year" | null
 - decisionMaker: "self" | "family" | "joint" | null — who makes the purchase decision
-- lostDeal: true if customer already bought elsewhere OR explicitly chose another brand/dealer this call, else false
+- lostDeal: true ONLY if the customer confirmed they already bought or booked elsewhere. Cheap at another dealer / co-dealer price fight is NOT lostDeal.
 - lostToBrand: brand they bought/will buy (Honda/TVS/Bajaj/etc.), else null
 - lostToDealer: dealer name or city if mentioned, else null
 - lostReason: main reason they didn't choose Hero (price/service/waiting/offer), else null
@@ -1366,7 +1373,7 @@ FORBIDDEN: "interested in a scooter, specifically Glamour X / Super Splendor" �
 If they discussed both, write: started with family 125 scooter (Destini/Xoom), then shifted to 125cc bikes (Glamour X DSS / Super Splendor).
 
 Score guide: hot_buy=85-100, interested=60-80, thinking=40-60, future_date=50-70, needs_info=30-50, not_interested=0-20
-If lostDeal=true, intent should be "not_interested" or "future_date" with score ≤30 unless they left door open.`,
+If lostDeal=true (already bought elsewhere), intent is thinking/future_date with score ≤30 — NOT not_interested unless they also said never call. Co-dealer cheaper is thinking, not lostDeal.`,
       },
       { role: "user", content: `Transcript:\n${transcript}` },
     ],
@@ -1377,9 +1384,12 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
   try {
     const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
     const preferredModel = parsed.preferredModel ?? null;
+    const lostDeal = coerceLostDeal(transcript, Boolean(parsed.lostDeal));
+    const originalIntent = parsed.intent ?? "needs_info";
+    const intent = persistAsThinkingIfSoftNo(originalIntent, transcript, lostDeal);
     return {
-      intent: parsed.intent ?? "needs_info",
-      score: parsed.score ?? 30,
+      intent,
+      score: softenSoftNoScore(intent, originalIntent, parsed.score ?? 30),
       summary: sanitizeIntentSummary(parsed.summary ?? "Call completed", preferredModel),
       followupDate: parsed.followupDate ?? null,
       followupReason: parsed.followupReason ?? null,
@@ -1391,7 +1401,7 @@ If lostDeal=true, intent should be "not_interested" or "future_date" with score 
       competitorReason: parsed.competitorReason ?? null,
       buyingTimeline: parsed.buyingTimeline ?? null,
       decisionMaker: ["self", "family", "joint"].includes(parsed.decisionMaker) ? parsed.decisionMaker : null,
-      lostDeal: Boolean(parsed.lostDeal),
+      lostDeal,
       lostToBrand: parsed.lostToBrand ?? null,
       lostToDealer: parsed.lostToDealer ?? null,
       lostReason: parsed.lostReason ?? null,

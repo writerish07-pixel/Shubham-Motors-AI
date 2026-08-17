@@ -4,6 +4,7 @@
  */
 
 import type { LeadProfile } from "./openai";
+import { isMissedVisitReason, isRelationshipDoorReason } from "./neverGiveUp";
 
 export function isFollowUpCall(priorCompletedCalls: number, isOutbound: boolean): boolean {
   return priorCompletedCalls >= 1 || isOutbound;
@@ -16,6 +17,13 @@ export function buildPurchaseVerificationGreeting(
   followupReason?: string | null,
 ): string {
   const name = leadName !== "Sir" ? `${leadName} जी` : "जी";
+  if (isMissedVisitReason(followupReason)) {
+    const modelBit = interestedModel ? `${interestedModel} की ` : "";
+    return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। आपकी ${modelBit}टेस्ट राइड का स्लॉट रह गया था — कोई बात नहीं। आज शाम चार बजे निकाल दूँ, या कल सुबह ग्यारह?`;
+  }
+  if (isRelationshipDoorReason(followupReason)) {
+    return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। पिछली बार आपने और कहीं से ले ली थी — सर्विस, एक्सेसरीज़, या अगली गाड़ी लगे तो हम यहीं हैं। दो मिनट हैं क्या?`;
+  }
   if (interestedModel) {
     return `नमस्ते ${name}! मैं साक्षी बोल रही हूँ, शुभम मोटर्स से। पिछली बार ${interestedModel} की बात हुई थी — वो ले ली, अभी उसी पर सोच रहे हैं, या कुछ और देख रहे हैं?`;
   }
