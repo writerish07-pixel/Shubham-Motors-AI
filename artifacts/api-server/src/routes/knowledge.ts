@@ -10,6 +10,8 @@ import {
   DeleteKnowledgeItemParams,
 } from "@workspace/api-zod";
 import { analyzeCallIntent, learnFromTranscript, invalidateKnowledgeCache } from "../lib/openai";
+import { inferAudioMime, isUnsupportedAudioError, WHISPER_HINT, WHISPER_LANGUAGE, whisperFilename } from "../lib/audioUpload";
+import { logger } from "../lib/logger";
 import { syncCanonicalKnowledgeOnce } from "../lib/canonicalKb";
 import { sanitizeKnowledgeItem } from "../lib/agentTools";
 import {
@@ -262,17 +264,17 @@ router.get("/knowledge", async (req, res): Promise<void> => {
 });
 
 // ─── Historical call recording upload → Whisper STT → self-learning queue ─────
-// Accepts MP3/WAV/M4A/OGG up to 25 MB. Transcribes via OpenAI Whisper, then
-// feeds into the same learnFromTranscript pipeline as live calls. Resulting
-// insights go into the review queue (isActive=false, requiresReview=true),
-// tagged with source="upload:<filename>" for provenance.
+// Accepts MP3/WAV/M4A/OGG (and Windows octet-stream with those extensions) up to 25 MB.
+// Telecaller recordings use a skill-extract prompt (not a Sakshi-audit) and always
+// land in the amber Review queue. Count inserted/queued — never a requires_review delta.
 router.post("/knowledge/upload/recording", uploadAudio.single("file"), async (req, res): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   if (!req.file) { res.status(400).json({ error: "audio file required" }); return; }
-  const mime = (req.file.mimetype || "").toLowerCase();
-  const ALLOWED = ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave", "audio/mp4", "audio/m4a", "audio/x-m4a", "audio/ogg", "audio/webm"];
-  if (!ALLOWED.some((a) => mime.startsWith(a))) {
-    res.status(400).json({ error: `unsupported audio type "${mime}" — please upload MP3, WAV, M4A, OGG, or WebM` });
+  const mime = inferAudioMime(req.file.originalname, req.file.mimetype);
+  if (!mime) {
+    res.status(400).json({
+      error: `unsupported audio type "${req.file.mimetype || "unknown"}" — please upload MP3, WAV, M4A, OGG, or WebM`,
+    });
     return;
   }
   try {
@@ -283,34 +285,57 @@ router.post("/knowledge/upload/recording", uploadAudio.single("file"), async (re
       baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
     });
 
-    const file = await toFile(req.file.buffer, req.file.originalname, { type: mime });
+    const filename = whisperFilename(req.file.originalname, mime);
+    const file = await toFile(req.file.buffer, filename, { type: mime });
     const tx = await openai.audio.transcriptions.create({
       file,
       model: "whisper-1",
+      language: WHISPER_LANGUAGE,
+      prompt: WHISPER_HINT,
     });
     const transcript = (tx.text ?? "").trim();
     if (transcript.length < 20) {
-      res.status(400).json({ error: "transcript too short — recording may be silent or corrupt" });
+      res.status(400).json({
+        error: "Recording was too quiet or Whisper heard almost nothing. Try a clearer MP3 or M4A.",
+        transcriptChars: transcript.length,
+      });
       return;
     }
 
-    const analysis = await analyzeCallIntent(transcript);
+    let summary = "Telecaller recording";
+    try {
+      const analysis = await analyzeCallIntent(transcript);
+      summary = analysis.summary ?? summary;
+    } catch (err) {
+      logger.warn({ err, filename }, "analyzeCallIntent failed on upload; still extracting skills");
+    }
+
     const source = `upload:${req.file.originalname}`;
-    const beforeCount = (await db.select({ id: knowledgeTable.id }).from(knowledgeTable)
-      .where(eq(knowledgeTable.requiresReview, true))).length;
-    await learnFromTranscript(transcript, analysis.summary ?? "Historical recording", source);
-    const afterCount = (await db.select({ id: knowledgeTable.id }).from(knowledgeTable)
-      .where(eq(knowledgeTable.requiresReview, true))).length;
+    const learned = await learnFromTranscript(transcript, summary, {
+      source,
+      mode: "telecaller_recording",
+      forceReview: true,
+    });
 
     res.json({
       ok: true,
       filename: req.file.originalname,
       transcriptChars: transcript.length,
-      summary: analysis.summary,
-      itemsQueuedForReview: afterCount - beforeCount,
+      summary,
+      itemsQueuedForReview: learned.queued,
+      itemsInserted: learned.inserted,
+      itemsExtracted: learned.extracted,
+      itemsAutoApplied: learned.autoApplied,
+      itemsSkipped: learned.skipped,
     });
   } catch (err) {
-    res.status(500).json({ error: String((err as Error).message) });
+    const message = String((err as Error).message);
+    const whisperFail = isUnsupportedAudioError(message);
+    res.status(whisperFail ? 400 : 500).json({
+      error: whisperFail
+        ? "OpenAI could not read this file. Convert to MP3 or M4A and try again."
+        : message,
+    });
   }
 });
 

@@ -50,6 +50,20 @@ import {
   type KnowledgeSliceItem,
 } from "./agentTools";
 import { coerceLostDeal, persistAsThinkingIfSoftNo, softenSoftNoScore } from "./neverGiveUp";
+import {
+  EMPTY_LEARN_RESULT,
+  LEARN_VALID_CATEGORIES,
+  POST_CALL_AUDIT_PROMPT,
+  TELECALLER_RECORDING_PROMPT,
+  buildTelecallerFallbackItem,
+  parseLearnOpts,
+  shouldInsertTelecallerFallback,
+  type ExtractedLearnItem,
+  type LearnFromTranscriptOpts,
+  type LearnFromTranscriptResult,
+} from "./learningExtract";
+
+export type { LearnFromTranscriptOpts, LearnFromTranscriptResult };
 
 // ─── Model IDs ───────────────────────────────────────────────────────────────
 const MODEL_MINI = process.env.OPENAI_MODEL_MINI ?? "gpt-4o-mini";
@@ -1489,12 +1503,18 @@ export function computeFollowupDate(
   return null; // not_interested / wrong_number / needs_info with no timeline
 }
 
-// ─── Self-learning (unchanged from original) ─────────────────────────────────
+// ─── Self-learning ───────────────────────────────────────────────────────────
 export async function learnFromTranscript(
   transcript: string,
   outcome: string,
-  source?: string,
-): Promise<void> {
+  sourceOrOpts?: string | LearnFromTranscriptOpts,
+): Promise<LearnFromTranscriptResult> {
+  const opts = parseLearnOpts(sourceOrOpts);
+  const source = opts.source;
+  const mode = opts.mode ?? "post_call_audit";
+  const forceReview = opts.forceReview ?? mode === "telecaller_recording";
+  const result: LearnFromTranscriptResult = { ...EMPTY_LEARN_RESULT };
+
   try {
     const existing = await db.select({ title: knowledgeTable.title }).from(knowledgeTable);
     const existingTitles = new Set(existing.map((r) => r.title.toLowerCase().trim()));
@@ -1504,43 +1524,39 @@ export async function learnFromTranscript(
       messages: [
         {
           role: "system",
-          content: `You audit Hero MotoCorp dealership sales calls. Extract ONLY high-signal items the sales team must know — NOT vague impressions.
-
-Return JSON: { "items": [{
-  "type": "agent_mistake" | "price_correction" | "new_objection" | "missing_info",
-  "category": "faq" | "policy" | "objection" | "models" | "price" | "general",
-  "title": "<short, specific, distinctive — max 80 chars>",
-  "content": "<actionable fact + the correct response the agent should give next time>",
-  "evidence": "<exact verbatim quote from transcript proving this>"
-}] }
-
-STRICT RULES:
-• "agent_mistake": agent gave wrong info AND customer corrected, OR agent refused a valid question.
-• "price_correction": agent's price was disputed or contradicted in-call.
-• "new_objection": a NEW objection phrasing the agent struggled with. NOT generic.
-• "missing_info": customer asked a specific question agent couldn't answer.
-• Skip impressions like "customer interested in X" — no training value.
-• If nothing meets the bar, return {"items": []}. Empty is GOOD — quality over quantity.`,
+          content: mode === "telecaller_recording" ? TELECALLER_RECORDING_PROMPT : POST_CALL_AUDIT_PROMPT,
         },
         { role: "user", content: `Transcript:\n${transcript}\n\nCall outcome: ${outcome}` },
       ],
       response_format: { type: "json_object" },
-      temperature: 0.2,
+      temperature: mode === "telecaller_recording" ? 0.3 : 0.2,
     });
 
     const parsed = JSON.parse(response.choices[0]?.message?.content ?? "{}");
-    const items: Array<{ type: string; category: string; title: string; content: string; evidence?: string }> = parsed.items ?? [];
-    const validCats = new Set(["faq", "policy", "objection", "models", "price", "general"]);
-    let inserted = 0;
+    const items: ExtractedLearnItem[] = Array.isArray(parsed.items) ? parsed.items : [];
+    result.extracted = items.length;
+
+    if (mode === "telecaller_recording" && shouldInsertTelecallerFallback(items.length, transcript)) {
+      items.push(buildTelecallerFallbackItem(source ?? "upload", transcript));
+    }
 
     for (const item of items) {
-      if (!item.title || !item.content) continue;
+      if (!item.title || !item.content) {
+        result.skipped++;
+        continue;
+      }
       const tNorm = item.title.toLowerCase().trim();
-      if (existingTitles.has(tNorm)) continue;
-      const category = validCats.has(item.category) ? item.category : "general";
+      if (existingTitles.has(tNorm)) {
+        result.skipped++;
+        continue;
+      }
+      const category = LEARN_VALID_CATEGORIES.has(item.category) ? item.category : "general";
       const vet = vetLearnedItem({ type: item.type, content: item.content, title: item.title });
-      if (vet.skip) continue;
-      const auto = vet.autoApply;
+      if (vet.skip) {
+        result.skipped++;
+        continue;
+      }
+      const auto = forceReview ? false : vet.autoApply;
       await db.insert(knowledgeTable).values({
         title: item.title.slice(0, 120),
         category,
@@ -1551,14 +1567,17 @@ STRICT RULES:
         requiresReview: !auto,
       });
       existingTitles.add(tNorm);
-      inserted++;
+      result.inserted++;
+      if (auto) result.autoApplied++;
+      else result.queued++;
     }
 
-    if (inserted > 0) {
-      logger.info({ inserted, extracted: items.length, source }, "Self-learning → queued / auto-applied");
+    if (result.inserted > 0) {
+      logger.info({ ...result, source, mode }, "Self-learning → queued / auto-applied");
       invalidateKnowledgeCache();
     }
   } catch (err) {
-    logger.error({ err }, "Error in self-learning from transcript");
+    logger.error({ err, source, mode }, "Error in self-learning from transcript");
   }
+  return result;
 }
