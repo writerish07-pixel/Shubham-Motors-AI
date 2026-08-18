@@ -183,6 +183,11 @@ export function formatAnsweredTransfer(name: string, phone: string): string {
   return [n || "Sales", p].filter(Boolean).join(" ");
 }
 
+/** Only close Voicebot when a real salesperson number was queued. Empty close = one-ring hangup. */
+export function shouldCloseVoicebotForTransfer(queued: boolean, salesCount: number): boolean {
+  return queued && salesCount > 0;
+}
+
 export function matchContactByPhone<T extends { name: string; phone: string }>(
   dialWhom: string,
   contacts: T[],

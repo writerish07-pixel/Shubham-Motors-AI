@@ -128,7 +128,7 @@ function getHost(req: Request): string {
 
 // ── INBOUND / OUTBOUND CONNECT webhook ───────────────────────────────────────
 // Exotel POSTs (or GETs) here when the call connects.
-// Must return ExoML XML so Exotel knows what to play/record.
+// Must return ExoML XML FAST — a slow DB here drops the call after one ring.
 router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
   const params = exoParams(req);
   const { CallSid, From, To, Direction } = params;
@@ -140,18 +140,39 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     return;
   }
 
+  const httpsHost = getHost(req);
+  const wssUrl = httpsHost.replace(/^https?:\/\//, "wss://") + "/call/stream";
+  const direction = Direction === "outbound" ? "outbound" : "inbound";
+  const streamXml =
+    `<Stream url="${escapeXml(wssUrl)}">` +
+      `<Parameter name="from" value="${escapeXml(From ?? "")}"/>` +
+      `<Parameter name="to" value="${escapeXml(To ?? "")}"/>` +
+      `<Parameter name="call_sid" value="${escapeXml(CallSid)}"/>` +
+      `<Parameter name="direction" value="${escapeXml(direction)}"/>` +
+    `</Stream>`;
+
+  req.log.info({ CallSid, wssUrl }, "Returning <Stream> ExoML — Voicebot WS will take over");
+  res.set("Content-Type", "text/xml").send(exoml(streamXml));
+
+  void persistInboundCall(params).catch((err) => {
+    req.log.error({ err, CallSid }, "Inbound call persist failed — Voicebot still running");
+  });
+});
+
+async function persistInboundCall(params: Record<string, string>): Promise<void> {
+  const CallSid = params.CallSid ?? "";
+  const From = params.From ?? "";
+  const Direction = params.Direction ?? "";
   const lead = From
     ? await findOrCreateLead(From, { name: From.replace(/\D/g, "").slice(-10), source: "inbound_call" })
     : null;
 
-  // Create or update call log
   let callRecordId: number | null = null;
   const existing = conversations.get(CallSid);
   if (existing) {
     callRecordId = existing.callRecordId;
   } else {
     const direction = Direction === "outbound" ? "outbound" : "inbound";
-    // Check if there's already a call record from triggerOutbound
     const [existingCall] = await db.select().from(callsTable)
       .where(eq(callsTable.exotelCallSid, CallSid));
     if (existingCall) {
@@ -168,7 +189,6 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     }
   }
 
-  // Init conversation state (still useful for /recording fallback path)
   const leadName = lead?.name ?? "आप";
   conversations.set(CallSid, {
     leadId: lead?.id ?? 0,
@@ -179,26 +199,7 @@ router.all("/webhooks/exotel/inbound", async (req, res): Promise<void> => {
     transcript: [],
     turn: 0,
   });
-
-  // Build the WebSocket URL Exotel should stream audio to/from.
-  // Prefer the published HTTPS domain (REPLIT_DOMAINS) — Exotel must reach a public
-  // TLS endpoint. We convert https → wss and point at our Voicebot handler.
-  const httpsHost = getHost(req);
-  const wssUrl = httpsHost.replace(/^https?:\/\//, "wss://") + "/call/stream";
-
-  // <Stream> ExoML — hands the live media stream to our Sarvam pipeline.
-  // The custom parameters land on the `start` event so the WS knows who is calling.
-  const streamXml =
-    `<Stream url="${escapeXml(wssUrl)}">` +
-      `<Parameter name="from" value="${escapeXml(From ?? "")}"/>` +
-      `<Parameter name="call_sid" value="${escapeXml(CallSid)}"/>` +
-      `<Parameter name="lead_name" value="${escapeXml(leadName)}"/>` +
-      `<Parameter name="direction" value="${escapeXml(Direction === "outbound" ? "outbound" : "inbound")}"/>` +
-    `</Stream>`;
-
-  req.log.info({ CallSid, wssUrl }, "Returning <Stream> ExoML — Voicebot WS will take over");
-  res.set("Content-Type", "text/xml").send(exoml(streamXml));
-});
+}
 
 // ── RECORDING webhook — customer has spoken, we process and respond ──────────
 router.all("/webhooks/exotel/recording", async (req, res): Promise<void> => {

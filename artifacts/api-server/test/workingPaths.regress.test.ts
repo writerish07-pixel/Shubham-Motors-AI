@@ -19,6 +19,7 @@ import {
   queueHumanTransferTeam,
   resetHumanTransferStateForTests,
   resolveConnectNumbers,
+  shouldCloseVoicebotForTransfer,
 } from "../src/lib/humanTransfer";
 import {
   applyLiveModelSwitch,
@@ -47,6 +48,11 @@ test("regress: Connect does not dial sales unless a transfer was queued", () => 
     }),
     [],
   );
+});
+
+test("regress: empty transfer must not close Voicebot (one-ring hangup)", () => {
+  assert.equal(shouldCloseVoicebotForTransfer(false, 0), false);
+  assert.equal(shouldCloseVoicebotForTransfer(true, 1), true);
 });
 
 test("regress: queued एजेंट handoff still dials the sales team", () => {
