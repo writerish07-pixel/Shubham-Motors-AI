@@ -32,6 +32,21 @@ export const PLAYBOOKS: ReadonlyArray<{ title: string; content: string }> = [
     content:
       "Missed test ride: same evening call + WhatsApp rebook. Soft nahi chahiye = thinking, DND nahi. Dusre dealer sasta = value then [TRANSFER] Priyanka — discount mat gadhho. Honda/TVS le li = lost + 21-day service/second-vehicle door. Call mat karo = stop forever.",
   },
+  {
+    title: "Price before test ride",
+    content:
+      "Agar customer bole 'abhi test ride nahi, pehle price' to test-ride stock line mat bolo. Pehle har variant ki on-road. Visit question ek baar; mana kiya to cash vs EMI. Same 'aaj shaam ya kal subah' repeat mat karo.",
+  },
+  {
+    title: "Xtreme 125R variants",
+    content:
+      "Xtreme 125R teen on-road: IBS ₹1,08,088, ABS ₹1,13,247, Dual ABS ₹1,26,275. Ek number mat bolo phir dusre se 'correct' mat karo. Poochho kaunsa variant.",
+  },
+  {
+    title: "Cash discount to Priyanka",
+    content:
+      "Exact cash discount / dusra dealer ₹4000 de raha hai → [TRANSFER] Priyanka. Sakshi discount rupee invent nahi karti. Exchange bonus ₹10k–20k after evaluation hi bol sakti hai.",
+  },
   LIVE_EMI_PLAYBOOK,
 ];
 
@@ -60,6 +75,24 @@ WHERE category = 'playbook'
     OR content ILIKE '%Kabhi calculate mat karo%'
   )
 RETURNING id
+`.trim();
+
+export const QUARANTINE_UNSAFE_LEARNING_SQL = `
+UPDATE knowledge
+SET is_active = false,
+    requires_review = true,
+    updated_at = NOW()
+WHERE is_active = true
+  AND COALESCE(source, '') NOT IN ('sakshi-playbook', 'hero-catalog-2026-08')
+  AND (
+    content ILIKE '%cash discounts available%'
+    OR content ILIKE '%provide clear information on cash discount%'
+    OR (
+      content ILIKE '%[price_correction]%'
+      AND content ILIKE '%1,08,088%'
+      AND content ILIKE '%1,13,247%'
+    )
+  )
 `.trim();
 
 export const DEDUPE_LIVE_EMI_SQL = `

@@ -210,3 +210,14 @@ test("cruise on Glamour still works; HF Deluxe still has no cruise", () => {
   assert.ok(deluxe);
   assert.doesNotMatch(deluxe!, /डी एस एस में क्रूज़/);
 });
+
+test("call 23: Xtreme price lists IBS, ABS, and Dual — never one number", () => {
+  const spoken = tryDirectAnswer("मुझे प्राइस जाननी है", "", "शिवाय जी", {
+    signals: { interestedModel: "Xtreme 125R" },
+  });
+  assert.ok(spoken);
+  assert.match(spoken!, /1,08,088/);
+  assert.match(spoken!, /1,13,247/);
+  assert.match(spoken!, /1,26,275/);
+  assert.match(spoken!, /कौन सा/);
+});

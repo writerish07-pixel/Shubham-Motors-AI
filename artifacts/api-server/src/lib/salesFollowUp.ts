@@ -9,18 +9,23 @@ import { isAgentPromisingTransfer } from "./humanTransfer";
 import { isGlamourFamily, isRejectingPreviousModel, liveModelForTurn, modelFamily } from "./liveModel";
 import {
   assumptiveVisitClose,
+  agentAskedVisit,
+  isAcceptingVisit,
   isLiveBuyingQuestion,
+  isRefusingVisit,
   isStall,
   laerStallFollowUp,
   spinFollowUp,
 } from "./bdcSkills";
 import {
   coDealerPriceFollowUp,
+  isAskingExactDiscount,
   isCoDealerPriceFight,
   isConfirmedPurchaseElsewhere,
   isSoftRejection,
   lostElsewhereFollowUp,
 } from "./neverGiveUp";
+import { pricedVariantsInFamily } from "@workspace/db/heroCatalog";
 
 export interface FollowUpContext {
   signals?: DiscoverySignals;
@@ -28,6 +33,7 @@ export interface FollowUpContext {
   turn?: number;
   customerText?: string;
   leadName?: string;
+  lastAgentText?: string;
 }
 
 /** True if the reply already invites a customer response. */
@@ -52,22 +58,26 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
   const s = ctx.signals ?? {};
   const stage = ctx.convStage ?? "connect";
   const customer = (ctx.customerText ?? "").toLowerCase();
-  const model = liveModelForTurn(ctx.customerText ?? "", s.interestedModel);
+  const rawCustomer = ctx.customerText ?? "";
+  const model = liveModelForTurn(rawCustomer, s.interestedModel);
   const family = modelFamily(model);
+  const visitRefused = isRefusingVisit(rawCustomer)
+    || (agentAskedVisit(ctx.lastAgentText ?? "") && !isAcceptingVisit(rawCustomer));
+  const variantCount = model ? pricedVariantsInFamily(model).length : 0;
 
   // Confirmed buy-elsewhere: stop pitching this bike. Keep a relationship door.
-  if (isConfirmedPurchaseElsewhere(ctx.customerText ?? "")) {
+  if (isConfirmedPurchaseElsewhere(rawCustomer)) {
     return lostElsewhereFollowUp();
   }
 
-  // Co-dealer cash fight: value + Priyanka. Never invent a matching rupee figure.
-  if (isCoDealerPriceFight(ctx.customerText ?? "")) {
+  // Co-dealer / exact cash discount: Priyanka. Never invent a matching rupee figure.
+  if (isCoDealerPriceFight(rawCustomer) || isAskingExactDiscount(rawCustomer)) {
     return coDealerPriceFollowUp();
   }
 
   // Call 17: never ask Glamour DSS vs DRS unless THIS turn's model is Glamour.
   // Skip if they already asked a buying question — variant can wait, the close cannot.
-  if (isGlamourFamily(model) && !isRejectingPreviousModel(ctx.customerText ?? "")) {
+  if (isGlamourFamily(model) && !isRejectingPreviousModel(rawCustomer)) {
     if (!/dss|drs/i.test(customer) && !/price|kitne|kimat|qeemat|कीमत|on.?road|emi|finance|टेस्ट राइड|test ride/i.test(customer)) {
       return "आप डी आर एस देख रहे हैं या क्रूज़ कंट्रोल वाला डी एस एस?";
     }
@@ -83,9 +93,22 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
     return "कितना डाउन पेमेंट सोच रहे हैं — मैं चौबीस और छत्तीस महीने की ई एम आई बता दूँ?";
   }
 
-  if (/price|kitne|kimat|qeemat|कीमत|on.?road|rate/i.test(customer)) {
+  if (/price|kitne|kimat|qeemat|कीमत|प्राइस|on.?road|rate/i.test(customer)) {
+    if (family === "Xtreme 125R") {
+      return "आई बी एस, ए बी एस, या डुअल ए बी एस — कौन सा वेरिएंट देख रहे हो?";
+    }
+    if (variantCount > 1) {
+      return "कौन सा वेरिएंट देख रहे हो — ऑन-रोड अलग-अलग है?";
+    }
+    if (visitRefused) {
+      return "कैश लेंगे या ई एम आई देखें?";
+    }
     if (model) return assumptiveVisitClose(model);
     return "कौन सा वेरिएंट आपको सूट करेगा?";
+  }
+
+  if (/compare|कंपेयर|फर्क|pulsar|पल्सर|honda|tvs|bajaj/i.test(customer) && !isConfirmedPurchaseElsewhere(rawCustomer)) {
+    return "माइलेज, सर्विस नेटवर्क, या ई एम आई — आपके लिए क्या ज़रूरी है?";
   }
 
   if (/feature|mileage|spec|engine|warranty|माइलेज/i.test(customer)) {
@@ -95,8 +118,8 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
 
   // LAER: stall or soft "नहीं चाहिए" is not permission to end the call.
   if (
-    (isStall(ctx.customerText ?? "") || isSoftRejection(ctx.customerText ?? ""))
-    && !isLiveBuyingQuestion(ctx.customerText ?? "")
+    (isStall(rawCustomer) || isSoftRejection(rawCustomer))
+    && !isLiveBuyingQuestion(rawCustomer)
   ) {
     return laerStallFollowUp(model || undefined);
   }
@@ -105,7 +128,13 @@ export function pickContextualFollowUp(ctx: FollowUpContext): string {
     if (!/pro|drs/i.test(customer)) {
       return "एच एफ डिलक्स डी आर एस या प्रो — कौन सा देख रहे हैं? ऑन-रोड बता दूँ?";
     }
-    return "एच एफ डिलक्स की टेस्ट राइड कब आएँगे — आज शाम या कल सुबह?";
+    return visitRefused
+      ? "कैश लेंगे या ई एम आई देखें?"
+      : "एच एफ डिलक्स की टेस्ट राइड कब आएँगे — आज शाम या कल सुबह?";
+  }
+
+  if (visitRefused) {
+    return "कैश लेंगे या ई एम आई देखें?";
   }
 
   if (stage === "booking" || stage === "ready") {

@@ -122,10 +122,38 @@ export function applySessionLanguage(current: string, detected: string, utteranc
 /** Price/EMI corrections stay in the GM review queue; objections/missing-info can go live. */
 export function shouldAutoApplyLearning(type: string, content: string, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env.KB_AUTO_LEARN === "0") return false;
-  const risky = /₹|rs\.?\s*\d|on-road|on road|price|emi\b|किस्त|कीमत/i.test(content);
+  const risky = /₹|rs\.?\s*\d|on-road|on road|price|emi\b|किस्त|कीमत|discount|डिस्काउंट|cash/i.test(content);
   if (risky) return false;
   if (type === "price_correction" || type === "agent_mistake") return false;
   return type === "new_objection" || type === "missing_info" || type === "faq";
+}
+
+/** Call 23: GPT "learned" ABS as the one true Xtreme price and auto-applied "tell them cash discounts". */
+export function vetLearnedItem(item: { type: string; content: string; title?: string }): {
+  content: string;
+  autoApply: boolean;
+  skip: boolean;
+} {
+  let content = String(item.content ?? "").trim();
+  if (!content) return { content, autoApply: false, skip: true };
+
+  if (/cash discounts available|provide clear information on cash discount/i.test(content)) {
+    content =
+      "Exact cash discount is unknown. Speak Hero service / exchange / finance, then [TRANSFER] to Priyanka. Never invent a matching rupee.";
+    return { content, autoApply: true, skip: false };
+  }
+
+  const nums = [...content.matchAll(/₹\s*([\d,]+)|(\d{5,6})/g)]
+    .map((m) => parseInt((m[1] || m[2] || "").replace(/,/g, ""), 10))
+    .filter((n) => n >= 50000 && n <= 400000);
+  const unique = [...new Set(nums)];
+  if (item.type === "price_correction" && unique.length >= 2) {
+    content =
+      "Those rupees are different VARIANTS of the same family (e.g. Xtreme 125R IBS ₹1,08,088 vs ABS ₹1,13,247 vs Dual ABS ₹1,26,275). Speak every on-road variant in one sentence. Never 'correct' one to the other.";
+    return { content, autoApply: true, skip: false };
+  }
+
+  return { content, autoApply: shouldAutoApplyLearning(item.type, content), skip: false };
 }
 
 export function getReplacementMode(env: NodeJS.ProcessEnv = process.env): ReplacementMode {

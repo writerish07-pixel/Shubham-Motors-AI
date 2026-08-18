@@ -48,7 +48,7 @@ import { buyingTimelineQuestion } from "./buyingTimeline";
 import { CallCostCounters } from "./costMeter";
 import { isBackchannel, parseAndStripTags, type AgentTag, applySessionLanguage, ttsLanguageCode, bargeInArmed, bargeInFramesNeeded, bargeInRmsThreshold, nextBargeInCount, parseJsonStringList, SILENCE_RMS } from "./agentTools";
 import { executeAgentTools } from "./agentActions";
-import { isHardCallOptOut } from "./neverGiveUp";
+import { isAskingExactDiscount, isCoDealerPriceFight, isHardCallOptOut } from "./neverGiveUp";
 import { prepareTtsText } from "./ttsPrep";
 import {
   bargeEnergyHits,
@@ -772,6 +772,17 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
     return;
   }
 
+  // Exact cash match / co-dealer discount — Priyanka, never invent a rupee figure.
+  if ((isAskingExactDiscount(correctedText) || isCoDealerPriceFight(correctedText)) && session.leadId) {
+    session.history.push({ role: "user", content: customerText });
+    if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
+    const tag = "[TRANSFER] customer wants cash discount / co-dealer match";
+    session.history.push({ role: "assistant", content: tag });
+    session.transcript.push(`Agent[tag]: ${tag}`);
+    await runTransfer(ws, session, tag);
+    return;
+  }
+
   // TRAI/DND: explicit opt-out — honor instantly and permanently. The agent's
   // not_interested fast-path says the goodbye; this flag stops all future dials.
   if (isHardCallOptOut(correctedText) && session.leadId) {
@@ -806,6 +817,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
           turn: session.turn,
           customerText: correctedText,
           leadName: session.leadName,
+          lastAgentText: [...session.history].reverse().find((t) => t.role === "assistant")?.content,
         });
     session.history.push({ role: "user", content: customerText });
     if (session.history.length > 12) session.history.splice(0, session.history.length - 12);
@@ -958,6 +970,7 @@ async function runPipeline(ws: WebSocket, session: Session, chunks: Buffer[]): P
       turn: session.turn,
       customerText: correctedText,
       leadName: session.leadName,
+      lastAgentText: [...session.history].reverse().find((t) => t.role === "assistant")?.content,
     });
     if (follow && follow !== spokenDraft) {
       await streamTtsToWs(ws, session.streamSid, follow, session.language, session);
@@ -1051,6 +1064,7 @@ function scheduleProactiveNudge(ws: WebSocket, session: Session, delayMs: number
       convStage: session.convStage,
       turn: session.turn,
       leadName: session.leadName,
+      lastAgentText: [...session.history].reverse().find((t) => t.role === "assistant")?.content,
     });
 
     session.proactiveCount++;

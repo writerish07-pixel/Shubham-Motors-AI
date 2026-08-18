@@ -6,6 +6,7 @@ import type { DiscoverySignals } from "./openai";
 import { FINANCE_PARTNERS_LIST } from "./emiQuote";
 import { logger } from "./logger";
 import { isHardCallOptOut, isSoftRejection } from "./neverGiveUp";
+import { isLiveBuyingQuestion, isRefusingVisit } from "./bdcSkills";
 
 interface Intent {
   phrases: string[];
@@ -138,6 +139,9 @@ export function detectIntentWithMeta(
     return { name: "not_interested", response };
   }
   if (isSoftRejection(text)) return null;
+  if (isRefusingVisit(text) || (isLiveBuyingQuestion(text) && /price|कीमत|प्राइस|kitne|kimat|discount|डिस्काउंट/i.test(text))) {
+    return null;
+  }
 
   if (isFinanceFollowUp(text, ctx.signals)) return null;
 

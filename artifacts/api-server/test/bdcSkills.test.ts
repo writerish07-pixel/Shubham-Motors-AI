@@ -41,8 +41,8 @@ test("answer the live question first: price is not a stall loop", () => {
     signals: { interestedModel: "Super Splendor XTEC" },
     customerText: "Super Splendor की कीमत क्या है",
   });
-  assert.match(q, /टेस्ट राइड|आज|कल/);
   assert.doesNotMatch(q, /बजट, घर वाले/);
+  assert.match(q, /वेरिएंट|टेस्ट राइड|आज|कल/);
 });
 
 test("assumptive and alternative close name a day or channel", () => {

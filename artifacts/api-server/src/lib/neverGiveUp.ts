@@ -47,7 +47,15 @@ export function isSoftRejection(text: string): boolean {
 
 export function isCoDealerPriceFight(text: string): boolean {
   if (isConfirmedPurchaseElsewhere(text)) return false;
-  return /(?:dusre|दूसरे|other|koi aur)\s*(?:dealer|डीलर)|co[- ]?dealer|बापू नगर|sasti.*dealer|dealer.*sasti|kam de rahe|कम दे रहे/i.test(
+  return /(?:dusre|दूसरे|दूसरा|other|koi aur)\s*(?:dealer|डीलर)|co[- ]?dealer|बापू नगर|sasti.*dealer|dealer.*sasti|kam de rahe|कम दे रहे/i.test(
+    text,
+  );
+}
+
+/** Exact rupee cash match — Sakshi cannot invent this; Priyanka must take the line. */
+export function isAskingExactDiscount(text: string): boolean {
+  if (isHardCallOptOut(text)) return false;
+  return /(?:बेस्ट\s*)?(?:डिस्काउंट|discount)\s*(?:क्या|कितना|दे\s*सकते|दो)|best discount|exact discount|कैश\s*(?:में\s*)?(?:डिस्काउंट|discount)|cash discount|कितना\s*(?:डिस्काउंट|discount)|₹\s*\d[\d,]*\s*(?:का\s*)?(?:डिस्काउंट|discount)/i.test(
     text,
   );
 }

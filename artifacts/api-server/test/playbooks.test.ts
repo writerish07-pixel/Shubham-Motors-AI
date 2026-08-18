@@ -11,6 +11,8 @@ test("playbooks ship Live EMI, not the old without-math card", () => {
   const titles = PLAYBOOKS.map((p) => p.title);
   assert.ok(titles.includes("Live EMI"));
   assert.ok(titles.includes("Never give up"));
+  assert.ok(titles.includes("Xtreme 125R variants"));
+  assert.ok(titles.includes("Cash discount to Priyanka"));
   assert.ok(!titles.some((t) => /without math/i.test(t)));
   for (const p of PLAYBOOKS) {
     assert.ok(!isStaleEmiPlaybook(p.title, p.content), `${p.title} still looks stale`);

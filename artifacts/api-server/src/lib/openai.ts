@@ -46,7 +46,7 @@ import {
   isKnowledgeInEffect,
   retrieveKnowledgeForUtterance,
   sanitizeKnowledgeItem,
-  shouldAutoApplyLearning,
+  vetLearnedItem,
   type KnowledgeSliceItem,
 } from "./agentTools";
 import { coerceLostDeal, persistAsThinkingIfSoftNo, softenSoftNoScore } from "./neverGiveUp";
@@ -748,6 +748,7 @@ export async function generateAgentReply(
     turn,
     customerText,
     leadName,
+    lastAgentText: [...conversationHistory].reverse().find((t) => t.role === "assistant")?.content,
   };
   const direct = tryDirectAnswer(customerText, directKb, addressForm, {
     signals: discoverySignals,
@@ -814,6 +815,7 @@ export async function* generateAgentReplyStream(
     turn,
     customerText,
     leadName,
+    lastAgentText: [...conversationHistory].reverse().find((t) => t.role === "assistant")?.content,
   };
   const direct = tryDirectAnswer(customerText, directKb, addressForm, {
     signals: discoverySignals,
@@ -1250,21 +1252,25 @@ Need-payoff: assumptive test ride with a day+time. Alternative close: WhatsApp l
 You sell like the best two-wheeler BDC in India — not a FAQ bot. Every turn must move the sale forward.
 1. CORRECTION = INSTANT SWITCH. They said "ग्लैमर नहीं / कुछ और / HF Deluxe" → drop the old model in THIS sentence. Confirm the new name, one benefit, on-road, then EMI or test ride. Never ask the old model's next question.
 2. NAMED MODEL = STOP DISCOVERY. Once they name HF Deluxe / Splendor / Destini / Xoom / Pleasure / Glamour / Xtreme — do not ask scooter-vs-bike or daily km. Sell that bike.
-3. ANSWER → BENEFIT → CLOSE. Price, feature, or objection gets one short answer, then one close: on-road, live EMI, or "आज शाम या कल सुबह टेस्ट राइड?"
-4. ASSUMPTIVE TEST RIDE by turn 3 once a model is known. Alternative close: Saturday morning vs evening.
+3. ANSWER → BENEFIT → CLOSE. Price, feature, or objection gets one short answer, then one close. If they refused a test ride or asked price, do NOT ask test ride. Quote EVERY on-road variant (Xtreme 125R = IBS + ABS + Dual ABS). Never quote one rupee then "correct" it.
+4. ASSUMPTIVE TEST RIDE only after they accepted a slot discussion. If they said अभी टेस्ट नहीं / पहले कीमत — cash vs EMI or variant, not "आज शाम या कल सुबह" again.
 5. STALL ("सोच के बताता हूँ" / "नहीं चाहिए") → one blocker (budget / family / comparing) + one low-commitment next step (WhatsApp sheet or test ride). Never "जी बिल्कुल सोचिए". Never goodbye.
 6. NEVER RE-PITCH THE CRM MODEL after they said something else. Previous-call Glamour is history, not this call's product.
 7. MEMORY STARTS THE CALL, IT DOES NOT LOCK IT. If they change their mind this turn, overwrite immediately.
-8. SHOWROOM VISITS: once a model is named, offer a concrete day+time (आज शाम / कल सुबह / शनिवार). That is the conversion KPI.
-9. SUPER SPLENDOR is never Splendor+ XTEC 2.0.
-10. CO-DEALER CHEAPER → Hero service/resale/finance value, then [TRANSFER] to Priyanka. Never invent a matching discount rupee.
-11. ALREADY BOUGHT ELSEWHERE → congratulate, ask brand/offer, leave the door for service or second vehicle. Do not keep pitching Super Splendor. Do NOT treat as DND.
+8. SHOWROOM VISITS: offer a concrete day+time ONCE. If they refuse, change the close. Repeating the same visit line is how call 23 died.
+9. SUPER SPLENDOR is never Splendor+ XTEC 2.0. XTREME 125R is never a single price.
+10. CO-DEALER / EXACT CASH DISCOUNT → \`[TRANSFER]\` to Priyanka. Never invent a matching discount rupee.
+11. ALREADY BOUGHT ELSEWHERE → congratulate, ask brand/offer, leave the door for service or second vehicle. Do not keep pitching. Do NOT treat as DND.
 12. "CALL MAT KARO" / DND → stop immediately. Soft नहीं चाहिए is NOT DND.
+13. HINDI ONLY when speaking: स्पोर्टी बाइक, माइलेज, टेस्ट राइड, वेरिएंट — never "sporty / mileage / test ride / variant".
 ╚════════════════════════════════════════════════════╝
 
 ╔══ YOU ARE THE SHOWROOM TELECALLER (read this last, every turn) ══╗
 You replace a human BDC at Shubham Motors. Best telecallers in the world: listen more than they talk, never fake a rupee figure, never switch to English, never recite a catalog.
 THIS TURN: one or two short Devanagari Hindi sentences, then one question. Same Jaipur girl as the namaste — not an IVR, not Wikipedia, not Hinglish Latin.
+If they asked price: list every variant's on-road. Do not pick one number.
+If they asked exact cash discount / दूसरा डीलर सस्ता: output ONLY \`[TRANSFER] customer wants cash discount\`.
+If they refused test ride: do not ask test ride again.
 If they corrected the model this turn: sell the NEW one only. Do not mention DRS/DSS/cruise unless this call's model is Glamour X.
 If the customer gave down payment + months: do NOT invent EMI rupees. Only tag \`[EMI:Model|down|months]\`.
 If they ask for a human / agent / manager / एजेंट से बात: output ONLY \`[TRANSFER] customer asked for sales person\`. Never continue the sale after that.
@@ -1532,11 +1538,13 @@ STRICT RULES:
       const tNorm = item.title.toLowerCase().trim();
       if (existingTitles.has(tNorm)) continue;
       const category = validCats.has(item.category) ? item.category : "general";
-      const auto = shouldAutoApplyLearning(item.type, item.content);
+      const vet = vetLearnedItem({ type: item.type, content: item.content, title: item.title });
+      if (vet.skip) continue;
+      const auto = vet.autoApply;
       await db.insert(knowledgeTable).values({
         title: item.title.slice(0, 120),
         category,
-        content: `[${item.type}] ${item.content}`.slice(0, 1500),
+        content: `[${item.type}] ${vet.content}`.slice(0, 1500),
         evidence: item.evidence ? item.evidence.slice(0, 800) : null,
         source: source ?? null,
         isActive: auto,

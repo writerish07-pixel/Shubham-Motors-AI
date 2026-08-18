@@ -6,6 +6,7 @@ import {
   coDealerPriceFollowUp,
   isCoDealerPriceFight,
   isConfirmedPurchaseElsewhere,
+  isAskingExactDiscount,
   isHardCallOptOut,
   isMissedVisitReason,
   isRelationshipDoorReason,
@@ -108,4 +109,25 @@ test("voice fast-path: DND still goodbyes; नहीं चाहिए does not
   assert.equal(dnd?.name, "not_interested");
   const soft = detectIntentWithMeta("नहीं चाहिए", 3);
   assert.equal(soft, null);
+});
+
+test("call 23: refusing a test ride to ask price is not the test-ride stock line", () => {
+  const heard = "अभी टेस्ट ड्राइव नहीं, मुझे प्राइस जाननी थी";
+  assert.equal(detectIntentWithMeta(heard, 3), null);
+  const q = pickContextualFollowUp({
+    signals: { interestedModel: "Xtreme 125R" },
+    customerText: heard,
+    lastAgentText: "Xtreme 125R की टेस्ट राइड कब ठीक रहेगी — आज शाम या कल सुबह?",
+  });
+  assert.doesNotMatch(q, /टेस्ट राइड कब|आज शाम या कल सुबह/);
+});
+
+test("call 23: दूसरा डीलर ₹4000 is a Priyanka transfer, not a fake match", () => {
+  assert.equal(isCoDealerPriceFight("दूसरा डीलर मुझे ₹4000 का डिस्काउंट दे रहा है"), true);
+  assert.equal(isAskingExactDiscount("बेस्ट डिस्काउंट कितना दे सकते हो"), true);
+  const q = pickContextualFollowUp({
+    signals: { interestedModel: "Xtreme 125R" },
+    customerText: "दूसरा डीलर मुझे ₹4000 का डिस्काउंट दे रहा है",
+  });
+  assert.equal(q, coDealerPriceFollowUp());
 });
