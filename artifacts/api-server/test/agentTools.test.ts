@@ -14,6 +14,7 @@ import {
   sanitizeKnowledgeItem,
   scoreCallShadow,
   shouldAutoApplyLearning,
+  vetLearnedItem,
   ttsLanguageCode,
   applySessionLanguage,
   whatsappTemplatesOnly,
@@ -155,6 +156,25 @@ test("self-learning auto-applies objections but not price corrections", () => {
   assert.equal(shouldAutoApplyLearning("price_correction", "On-road is actually 95377"), false);
   assert.equal(shouldAutoApplyLearning("new_objection", "They said EMI of ₹4000 is high"), false);
   assert.equal(shouldAutoApplyLearning("missing_info", "ok", { KB_AUTO_LEARN: "0" }), false);
+  assert.equal(shouldAutoApplyLearning("missing_info", "Agent should provide clear information on cash discounts available."), false);
+});
+
+test("vetLearnedItem rewrites variant mix-ups and cash-discount hallucinations", () => {
+  const cash = vetLearnedItem({
+    type: "missing_info",
+    content: "Agent should provide clear information on cash discounts available.",
+  });
+  assert.equal(cash.skip, false);
+  assert.equal(cash.autoApply, true);
+  assert.match(cash.content, /TRANSFER/);
+  assert.doesNotMatch(cash.content, /available/);
+
+  const price = vetLearnedItem({
+    type: "price_correction",
+    content: "The correct on-road price for Xtreme 125R is ₹1,13,247, not ₹1,08,088.",
+  });
+  assert.match(price.content, /VARIANTS|वेरिएंट/i);
+  assert.equal(price.autoApply, true);
 });
 
 test("barge-in stays disarmed for the whole greeting, including PCM playback", () => {

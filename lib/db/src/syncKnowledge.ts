@@ -9,6 +9,7 @@ import {
   LIVE_EMI_PLAYBOOK,
   PLAYBOOK_SOURCE,
   PLAYBOOKS,
+  QUARANTINE_UNSAFE_LEARNING_SQL,
   REWRITE_STALE_EMI_SQL,
 } from "./playbooks";
 import {
@@ -46,6 +47,7 @@ export async function syncPlaybooks(pool: pg.Pool): Promise<{ rewritten: number;
     PLAYBOOK_SOURCE,
   ]);
   await pool.query(DEDUPE_LIVE_EMI_SQL, [LIVE_EMI_PLAYBOOK.title]);
+  await pool.query(QUARANTINE_UNSAFE_LEARNING_SQL);
 
   let upserted = 0;
   for (const p of PLAYBOOKS) {

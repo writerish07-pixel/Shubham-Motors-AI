@@ -100,9 +100,22 @@ export default function Knowledge() {
     fd.append("file", file);
     try {
       const r = await fetch("/api/knowledge/upload/recording", { method: "POST", headers: adminHeaders(), body: fd });
-      const j = await r.json();
-      if (r.ok) { toast.success(`Transcribed — ${j.itemsQueuedForReview ?? 0} new learnings queued`); invalidate(); }
-      else toast.error(j.error ?? "Upload failed");
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toast.error(j.error ?? "Upload failed");
+        return;
+      }
+      invalidate();
+      const inserted = j.itemsInserted ?? 0;
+      const queued = j.itemsQueuedForReview ?? 0;
+      const skipped = j.itemsSkipped ?? 0;
+      if (inserted > 0) {
+        toast.success(`Learned ${inserted} — ${queued} in Review queue. Open the amber cards and Approve.`);
+      } else if (skipped > 0) {
+        toast.warning("Heard the call — those lines are already in Review. No duplicates added.");
+      } else {
+        toast.warning(`Heard the call (${j.transcriptChars ?? 0} chars) but extracted 0 skills. Try a clearer MP3 or M4A.`);
+      }
     } catch { toast.error("Upload failed"); }
     finally { setUploading(false); }
   }
@@ -202,13 +215,13 @@ export default function Knowledge() {
         <div>
           <h1 className="text-xl font-bold">Knowledge Base</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Models, prices, offers, FAQs. Upload offer PDFs/Excel/images in Settings. After each call Sakshi learns — objections can go live; price changes wait in the review queue below.
+            Models, prices, offers, FAQs. Upload Call (MP3/M4A) puts telecaller skills in the amber Review queue — Approve them to train Sakshi. Live-call learning still runs after every phone call.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <input ref={audioInputRef} type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm" hidden onChange={handleAudioUpload} />
+          <input ref={audioInputRef} type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm,.aac,.mp4" hidden onChange={handleAudioUpload} />
           <input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={handleImport} />
-          <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={() => audioInputRef.current?.click()} disabled={uploading}>
+          <Button size="sm" variant="outline" className="gap-1.5 text-xs" title="MP3 or M4A. Learnings appear in the amber Review queue — they are not live until you Approve." onClick={() => audioInputRef.current?.click()} disabled={uploading}>
             <FileAudio size={13} />{uploading ? "Transcribing..." : "Upload Call"}
           </Button>
           <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={handleExport}>
@@ -255,7 +268,7 @@ export default function Knowledge() {
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 space-y-3">
           <div className="flex items-center gap-2">
             <Sparkles size={14} className="text-amber-400" />
-            <h2 className="text-sm font-semibold text-amber-300">Sakshi learned {pending.length} new thing{pending.length === 1 ? "" : "s"} from recent calls — review</h2>
+            <h2 className="text-sm font-semibold text-amber-300">Sakshi learned {pending.length} new thing{pending.length === 1 ? "" : "s"} from calls / uploads — review</h2>
           </div>
           <div className="space-y-2">
             {pending.map((p) => (

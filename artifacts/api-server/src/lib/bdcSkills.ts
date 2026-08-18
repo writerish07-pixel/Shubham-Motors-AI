@@ -12,9 +12,25 @@ export function isStall(text: string): boolean {
 
 /** Price / EMI / feature / test-ride — answer this before any discovery loop. */
 export function isLiveBuyingQuestion(text: string): boolean {
-  return /price|kitne|kimat|qeemat|कीमत|on.?road|rate|emi|finance|feature|mileage|spec|engine|warranty|माइलेज|टेस्ट राइड|test ride|डाउन|down\s*payment/i.test(
+  return /price|kitne|kimat|qeemat|कीमत|प्राइस|on.?road|rate|emi|finance|feature|mileage|spec|engine|warranty|माइलेज|टेस्ट राइड|test ride|डाउन|down\s*payment/i.test(
     text,
   );
+}
+
+/** Call 23: "अभी टेस्ट ड्राइव नहीं, प्राइस जाननी थी" is a price ask, not a booking. */
+export function isRefusingVisit(text: string): boolean {
+  return /(?:test\s*(?:ride|drive)|टेस्ट\s*(?:राइड|ड्राइव)).{0,20}(?:नहीं|nahi|नही)|अभी\s*(?:टेस्ट|test)|पहले\s*(?:प्राइस|कीमत|price)|(?:प्राइस|कीमत)\s*(?:जाननी|बताओ|बताइए)/i.test(
+    text,
+  );
+}
+
+export function isAcceptingVisit(text: string): boolean {
+  return /(?:आज|कल|शाम|सुबह|शनिवार|aaunga|aaungi|आऊँगा|आउंगा|आएँगे|book\s*kar|बुक\s*कर)/i.test(text)
+    && !isRefusingVisit(text);
+}
+
+export function agentAskedVisit(text: string): boolean {
+  return /टेस्ट राइड|test ride|आज शाम या कल सुबह|कौन सा दिन आएँगे|वीकेंड कब/i.test(text);
 }
 
 export function assumptiveVisitClose(model?: string): string {

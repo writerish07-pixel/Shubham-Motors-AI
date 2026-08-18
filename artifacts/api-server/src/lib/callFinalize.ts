@@ -12,6 +12,12 @@ import { sendCallSummaryWhatsApp, sendBrochureWhatsApp, sendWhatsAppMessage } fr
 import { resolveModelOnRoad, computeEmi } from "./emiQuote";
 import { computeLeadIntelligence } from "./relationshipIntel";
 import { logger } from "./logger";
+import {
+  coerceLostDeal,
+  persistAsThinkingIfSoftNo,
+  relationshipDoorFollowUp,
+  softenSoftNoScore,
+} from "./neverGiveUp";
 
 type CallAnalysis = Awaited<ReturnType<typeof analyzeCallIntent>>;
 
@@ -77,6 +83,12 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
   }
   const festival = await getActiveFestivalOffer();
 
+  const lostDeal = coerceLostDeal(transcript, analysis.lostDeal);
+  const originalIntent = analysis.intent;
+  const intent = persistAsThinkingIfSoftNo(originalIntent, transcript, lostDeal);
+  const score = softenSoftNoScore(intent, originalIntent, analysis.score);
+  analysis = { ...analysis, intent, score, lostDeal };
+
   // Confirmed showroom visit / test ride → persist for the day-of reminder loop.
   const visitDate = analysis.visitPlanned ? parseLlmFollowupDate(analysis.visitDate) : null;
   const mergedTimeline =
@@ -128,7 +140,6 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
   }
 
   const terminalIntent = analysis.intent === "not_interested" || analysis.intent === "wrong_number";
-  const terminalForFollowup = terminalIntent || Boolean(analysis.lostDeal);
   const newStatus = analysis.lostDeal
     ? "lost"
     : terminalIntent
@@ -235,11 +246,35 @@ export async function finalizeCompletedCall(params: FinalizeCallParams): Promise
 
   // Follow-up scheduling must not block the WhatsApp sends below.
   try {
-  if (terminalForFollowup) {
+  if (terminalIntent) {
     await db
       .update(followupsTable)
       .set({ status: "cancelled" })
       .where(and(eq(followupsTable.leadId, leadId), eq(followupsTable.status, "pending")));
+  } else if (analysis.lostDeal) {
+    await db
+      .update(followupsTable)
+      .set({ status: "cancelled" })
+      .where(and(eq(followupsTable.leadId, leadId), eq(followupsTable.status, "pending")));
+    const door = relationshipDoorFollowUp();
+    await db.insert(followupsTable).values({
+      leadId,
+      scheduledAt: door.scheduledAt,
+      reason: door.reason,
+      intentLabel: "thinking",
+      callId: callDbId,
+      status: "pending",
+      outboundContext: {
+        name: existingLead.name,
+        interestedModel: analysis.preferredModel ?? existingLead.interestedModel ?? null,
+        lastCallSummary: analysis.summary,
+        followupReason: door.reason,
+      },
+    } as any);
+    await db
+      .update(leadsTable)
+      .set({ nextFollowupAt: door.scheduledAt })
+      .where(eq(leadsTable.id, leadId));
   } else {
     const followupSchedule = resolveFollowupSchedule({
       intent: analysis.intent,

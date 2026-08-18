@@ -24,6 +24,9 @@ import {
   isFeatureAvailabilityQuestion,
 } from "./sttProductFix";
 import { detectNamedModel, isGlamourFamily, isRejectingPreviousModel, liveModelForTurn } from "./liveModel";
+import { spokenFamilyOnRoad } from "@workspace/db/heroCatalog";
+import { isAskingExactDiscount } from "./neverGiveUp";
+import { isRefusingVisit } from "./bdcSkills";
 
 export type ModelTier = "mini" | "premium";
 
@@ -103,7 +106,7 @@ const PREMIUM_KEYWORDS_RE = new RegExp(
   "i"
 );
 
-const PRICE_QUERY_RE = /(?:price|कीमत|दाम|kitne ka|kitne ki|kya rate|on[- ]?road|ex[- ]?showroom|कितने|kitna|kitne)/i;
+const PRICE_QUERY_RE = /(?:price|कीमत|प्राइस|दाम|kitne ka|kitne ki|kya rate|on[- ]?road|ex[- ]?showroom|कितने|kitna|kitne)/i;
 const VARIANT_QUERY_RE = /(?:variant|variants|कौन सी|kaunsi|kaun si|model|वेरिएंट|version)/i;
 const FEATURE_QUERY_RE = /(?:feature|features|specs|mileage|माइलेज|engine|cc|warranty|वारंटी|cruise|क्रूज|centro|संट्रो|control|कंट्रोल)/i;
 const HOURS_QUERY_RE = /(?:timing|kab khulta|kab khulte|open|close|hours|शोरूम कब)/i;
@@ -174,6 +177,16 @@ export function tryDirectAnswer(
 
   const liveModel = liveModelForTurn(text, signals?.interestedModel);
   const glamourCtx = isGlamourFamily(liveModel) || (mentionsGlamour(text) && !isRejectingPreviousModel(text));
+
+  // Call 23: price with a named family must list every on-road variant — never one number.
+  if (PRICE_QUERY_RE.test(text) && !isAskingExactDiscount(text)) {
+    const spoken = spokenFamilyOnRoad(liveModel || signals?.interestedModel || text);
+    if (spoken) return spoken;
+  }
+  if (isRefusingVisit(text) && PRICE_QUERY_RE.test(text)) {
+    const spoken = spokenFamilyOnRoad(liveModel || signals?.interestedModel || text);
+    if (spoken) return spoken;
+  }
 
   if (isCruiseControlQuestion(text) || (glamourCtx && isFeatureAvailabilityQuestion(text) && /control|cruis|centro|संट्रो|क्रूज/i.test(text))) {
     if (!glamourCtx) {

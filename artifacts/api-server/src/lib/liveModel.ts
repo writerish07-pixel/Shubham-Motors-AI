@@ -31,8 +31,9 @@ const MODEL_PATTERNS: Array<[RegExp, string, string, LiveSegment]> = [
   [/hf\s*deluxe|hf deluxe/gi, "HF Deluxe", "HF Deluxe", "100cc"],
   [/एच\s*एफ\s*डीलक्स|एच\s*[एसस]\s*डीलक्स|एचएफ\s*डीलक्स|एचएफडी/g, "HF Deluxe", "HF Deluxe", "100cc"],
   [/passion/gi, "Passion Plus", "Passion Plus", "100cc"],
-  [/xtreme\s*160/gi, "Xtreme 160R", "Xtreme 160R", "160cc+"],
-  [/xtreme\s*125/gi, "Xtreme 125R", "Xtreme 125R", "125cc"],
+  [/xtreme\s*160|एक्सट्रीम\s*160/gi, "Xtreme 160R", "Xtreme 160R", "160cc+"],
+  [/xtreme\s*125|एक्सट्रीम\s*125/gi, "Xtreme 125R", "Xtreme 125R", "125cc"],
+  [/एक्सट्रीम/gi, "Xtreme 125R", "Xtreme 125R", "125cc"],
   [/xpulse/gi, "Xpulse 200 4V", "Xpulse", "160cc+"],
   [/karizma/gi, "Karizma XMR", "Karizma", "160cc+"],
   [/destini\s*125|डेस्टिनी\s*125/gi, "Destini 125", "Destini 125", "scooter_125"],
@@ -69,8 +70,8 @@ export function modelFamily(name: string | null | undefined): string {
   if (/splendor/.test(n)) return "Splendor";
   if (/hf\s*deluxe|deluxe/.test(n)) return "HF Deluxe";
   if (/passion/.test(n)) return "Passion Plus";
-  if (/xtreme\s*160/.test(n)) return "Xtreme 160R";
-  if (/xtreme\s*125/.test(n)) return "Xtreme 125R";
+  if (/xtreme\s*160|एक्सट्रीम\s*160/.test(n)) return "Xtreme 160R";
+  if (/xtreme\s*125|एक्सट्रीम/.test(n)) return "Xtreme 125R";
   if (/xpulse/.test(n)) return "Xpulse";
   if (/destini\s*125/.test(n)) return "Destini 125";
   if (/destini/.test(n)) return "Destini 110";

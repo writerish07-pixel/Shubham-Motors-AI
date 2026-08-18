@@ -108,14 +108,54 @@ export const MODEL_ALIASES: Array<[RegExp, string]> = [
   [/pleasure/i, "Pleasure+ VX"],
   [/hf\s*deluxe|deluxe/i, "HF Deluxe DRS"],
   [/passion/i, "Passion Plus"],
-  [/xtreme\s*160/i, "Xtreme 160R 2V SD"],
-  [/xtreme\s*125/i, "Xtreme 125R IBS"],
+  [/xtreme\s*160|एक्सट्रीम\s*160/i, "Xtreme 160R 2V SD"],
+  [/xtreme\s*125r?\s*abs\s*dc|xtreme\s*125r?\s*dual/i, "Xtreme 125R ABS DC"],
+  [/xtreme\s*125r?\s*abs/i, "Xtreme 125R ABS"],
+  [/xtreme\s*125|एक्सट्रीम\s*125|एक्सट्रीम/i, "Xtreme 125R IBS"],
 ];
 
 export function pricedVariants(): Array<{ name: string; onRoad: number }> {
   return HERO_VARIANTS
     .filter((v): v is HeroVariant & { onRoadJaipur: number } => v.onRoadJaipur != null)
     .map((v) => ({ name: v.name, onRoad: v.onRoadJaipur }));
+}
+
+export function pricedVariantsInFamily(familyOrModel: string): Array<HeroVariant & { onRoadJaipur: number }> {
+  const hay = familyOrModel.toLowerCase();
+  if (!hay.trim()) return [];
+  const fam =
+    HERO_VARIANTS.find((v) => v.family.toLowerCase() === hay || v.name.toLowerCase() === hay)?.family
+    ?? HERO_VARIANTS.find((v) => hay.includes(v.family.toLowerCase()))?.family
+    ?? HERO_VARIANTS.find((v) => hay.includes(v.name.toLowerCase()))?.family;
+  if (!fam) return [];
+  return HERO_VARIANTS.filter((v): v is HeroVariant & { onRoadJaipur: number } =>
+    v.family === fam && v.onRoadJaipur != null
+  );
+}
+
+function spokenTrimLabel(name: string): string {
+  if (/abs\s*dc|dual/i.test(name)) return "डुअल ए बी एस";
+  if (/\babs\b/i.test(name)) return "ए बी एस";
+  if (/\bibs\b/i.test(name)) return "आई बी एस";
+  const tail = name.replace(/^Hero\s+/i, "").split(" ").slice(-2).join(" ");
+  return tail || name;
+}
+
+/** Call 23: never quote one Xtreme number then "correct" it to another variant. */
+export function spokenFamilyOnRoad(familyOrModel: string): string | null {
+  const vs = pricedVariantsInFamily(familyOrModel);
+  if (vs.length === 0) return null;
+  if (vs.length === 1) {
+    return `${vs[0].name} जयपुर ऑन-रोड ₹${inr(vs[0].onRoadJaipur)}। कैश लेंगे या ई एम आई देखें?`;
+  }
+  const parts = vs.map((v) => `${spokenTrimLabel(v.name)} ₹${inr(v.onRoadJaipur)}`);
+  return `${vs[0].family} में ${vs.length} वेरिएंट — ${parts.join(", ")}। कौन सा देख रहे हो?`;
+}
+
+export function catalogOnRoadAmounts(): Set<number> {
+  return new Set(
+    HERO_VARIANTS.map((v) => v.onRoadJaipur).filter((n): n is number => n != null),
+  );
 }
 
 function inr(n: number): string {
@@ -240,6 +280,7 @@ export function formatDefaultHeroKnowledge(): string {
   lines.push("Super Splendor XTEC = 125cc family BIKE, ~65 kmpl, on-road ₹98,169 (as of 16-May-2026). Variants: XTEC, XTEC DSS.");
   lines.push("Splendor / Splendor+ XTEC 2.0 = 100cc commuter BIKE, ~80 kmpl, Splendor+ XTEC 2.0 on-road ₹97,973. Different engine, different bike.");
   lines.push("If the customer says Super Splendor / Super Splendor XTEC / Super Splendor XTEC 2.0 Disc — they mean Super Splendor. NEVER quote Splendor+ XTEC 2.0 price or 80 kmpl for Super Splendor.");
+  lines.push("Xtreme 125R is THREE on-road prices, not one: IBS ₹1,08,088, ABS ₹1,13,247, ABS DC ₹1,26,275. Never quote one then 'correct' it to another. Ask which variant.");
 
   lines.push("");
   lines.push("[CURRENTLY IN STOCK — high availability]");
