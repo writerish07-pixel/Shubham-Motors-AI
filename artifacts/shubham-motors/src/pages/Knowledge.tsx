@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Plus, Edit2, Trash2, Check, X, BookOpen, Sparkles, Upload, Download, FileAudio } from "lucide-react";
+import { Plus, Edit2, Trash2, Check, X, BookOpen, Sparkles, Upload, Download, FileAudio, CheckCheck } from "lucide-react";
 import {
   useListKnowledgeItems, getListKnowledgeItemsQueryKey,
   useUpdateKnowledgeItem, useDeleteKnowledgeItem
@@ -71,6 +71,8 @@ export default function Knowledge() {
   });
   const pending = pendingQ.data ?? [];
 
+  const [approvingAll, setApprovingAll] = useState(false);
+
   async function approvePending(id: number) {
     if (!requireToken()) return;
     const r = await fetch(`/api/knowledge/${id}/approve`, { method: "POST", headers: adminHeaders() });
@@ -82,42 +84,97 @@ export default function Knowledge() {
     const r = await fetch(`/api/knowledge/${id}/reject`, { method: "POST", headers: adminHeaders() });
     if (r.ok) { toast.success("Rejected"); invalidate(); } else toast.error("Failed");
   }
+  async function approveAllPending() {
+    if (!requireToken()) return;
+    if (pending.length === 0) return;
+    if (!confirm(`Approve all ${pending.length} learnings? Sakshi will use them on the next live call.`)) return;
+    setApprovingAll(true);
+    try {
+      const r = await fetch("/api/knowledge/pending/approve-all", { method: "POST", headers: adminHeaders() });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) { toast.success(`Approved ${j.approved ?? pending.length} — added to Sakshi`); invalidate(); }
+      else toast.error(j.error ?? "Approve all failed");
+    } catch { toast.error("Approve all failed"); }
+    finally { setApprovingAll(false); }
+  }
+  async function rejectAllPending() {
+    if (!requireToken()) return;
+    if (pending.length === 0) return;
+    if (!confirm(`Discard all ${pending.length} pending learnings? This cannot be undone.`)) return;
+    const r = await fetch("/api/knowledge/pending/reject-all", { method: "POST", headers: adminHeaders() });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { toast.success(`Discarded ${j.rejected ?? pending.length}`); invalidate(); }
+    else toast.error(j.error ?? "Reject all failed");
+  }
 
   // ─── Historical recording upload ───────────────────────────────────────────
   const audioInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number; name: string } | null>(null);
   const [importing, setImporting] = useState(false);
 
   async function handleAudioUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const picked = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (!file) return;
+    if (picked.length === 0) return;
     if (!requireToken()) return;
-    if (file.size > 25 * 1024 * 1024) { toast.error("File too large (max 25 MB)"); return; }
+
+    const MAX_FILES = 40;
+    const MAX_BYTES = 25 * 1024 * 1024;
+    if (picked.length > 0 && picked.every((f) => /\.zip$/i.test(f.name))) {
+      toast.error("Unzip that folder on your computer first, then select all the MP3s together (Ctrl+A).");
+      return;
+    }
+
+    const tooBig = picked.filter((f) => f.size > MAX_BYTES);
+    for (const f of tooBig) toast.warning(`${f.name} skipped — over 25 MB`);
+    let files = picked.filter((f) => f.size <= MAX_BYTES && !/\.zip$/i.test(f.name));
+    if (files.length > MAX_FILES) {
+      toast.warning(`First ${MAX_FILES} files this round. Upload the rest after this batch finishes.`);
+      files = files.slice(0, MAX_FILES);
+    }
+    if (files.length === 0) {
+      toast.error("No audio files selected. Pick MP3 or M4A files (not a ZIP).");
+      return;
+    }
+
     setUploading(true);
-    const fd = new FormData();
-    fd.append("file", file);
+    let inserted = 0;
+    let queued = 0;
+    let filesOk = 0;
+    let filesFailed = 0;
     try {
-      const r = await fetch("/api/knowledge/upload/recording", { method: "POST", headers: adminHeaders(), body: fd });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        toast.error(j.error ?? "Upload failed");
-        return;
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i]!;
+        setUploadProgress({ done: i + 1, total: files.length, name: file.name });
+        const fd = new FormData();
+        fd.append("file", file);
+        try {
+          const r = await fetch("/api/knowledge/upload/recording", { method: "POST", headers: adminHeaders(), body: fd });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) { filesFailed++; continue; }
+          filesOk++;
+          inserted += Number(j.itemsInserted ?? 0);
+          queued += Number(j.itemsQueuedForReview ?? 0);
+        } catch {
+          filesFailed++;
+        }
       }
       invalidate();
-      const inserted = j.itemsInserted ?? 0;
-      const queued = j.itemsQueuedForReview ?? 0;
-      const skipped = j.itemsSkipped ?? 0;
-      if (inserted > 0) {
-        toast.success(`Learned ${inserted} — ${queued} in Review queue. Open the amber cards and Approve.`);
-      } else if (skipped > 0) {
-        toast.warning("Heard the call — those lines are already in Review. No duplicates added.");
+      if (filesOk === 0) {
+        toast.error(`Could not read any of the ${files.length} recordings. Try MP3 or M4A.`);
+      } else if (filesFailed > 0) {
+        toast.warning(`Heard ${filesOk}/${files.length} calls — learned ${inserted} (${queued} in Review). ${filesFailed} file(s) failed.`);
+      } else if (inserted === 0) {
+        toast.warning(`Heard ${filesOk} call${filesOk === 1 ? "" : "s"} but extracted 0 new skills (already in Review, or too quiet).`);
       } else {
-        toast.warning(`Heard the call (${j.transcriptChars ?? 0} chars) but extracted 0 skills. Try a clearer MP3 or M4A.`);
+        toast.success(`Heard ${filesOk} call${filesOk === 1 ? "" : "s"} — learned ${inserted}. ${queued} in Review. Use Approve all when ready.`);
       }
-    } catch { toast.error("Upload failed"); }
-    finally { setUploading(false); }
+    } finally {
+      setUploading(false);
+      setUploadProgress(null);
+    }
   }
 
   async function handleExport() {
@@ -215,14 +272,14 @@ export default function Knowledge() {
         <div>
           <h1 className="text-xl font-bold">Knowledge Base</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Models, prices, offers, FAQs. Upload Call (MP3/M4A) puts telecaller skills in the amber Review queue — Approve them to train Sakshi. Live-call learning still runs after every phone call.
+            Models, prices, offers, FAQs. Upload Calls: select many MP3/M4A at once. They land in the amber Review queue — Approve all to train Sakshi. Live-call learning still runs after every phone call.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <input ref={audioInputRef} type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm,.aac,.mp4" hidden onChange={handleAudioUpload} />
+          <input ref={audioInputRef} type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm,.aac,.mp4" multiple hidden onChange={handleAudioUpload} />
           <input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={handleImport} />
-          <Button size="sm" variant="outline" className="gap-1.5 text-xs" title="MP3 or M4A. Learnings appear in the amber Review queue — they are not live until you Approve." onClick={() => audioInputRef.current?.click()} disabled={uploading}>
-            <FileAudio size={13} />{uploading ? "Transcribing..." : "Upload Call"}
+          <Button size="sm" variant="outline" className="gap-1.5 text-xs" title="Select many MP3 or M4A files at once (Ctrl+A in the folder). Unzip first if they are in a ZIP." onClick={() => audioInputRef.current?.click()} disabled={uploading}>
+            <FileAudio size={13} />{uploading && uploadProgress ? `Transcribing ${uploadProgress.done}/${uploadProgress.total}` : uploading ? "Transcribing..." : "Upload Calls"}
           </Button>
           <Button size="sm" variant="outline" className="gap-1.5 text-xs" onClick={handleExport}>
             <Download size={13} />Export
@@ -263,12 +320,28 @@ export default function Knowledge() {
         </div>
       </div>
 
+      {uploadProgress && (
+        <div className="bg-card border border-card-border rounded-lg px-4 py-2 text-xs text-muted-foreground">
+          Transcribing {uploadProgress.done} of {uploadProgress.total}: {uploadProgress.name}
+        </div>
+      )}
+
       {/* Self-learning review queue */}
       {pending.length > 0 && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <Sparkles size={14} className="text-amber-400" />
-            <h2 className="text-sm font-semibold text-amber-300">Sakshi learned {pending.length} new thing{pending.length === 1 ? "" : "s"} from calls / uploads — review</h2>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 min-w-0">
+              <Sparkles size={14} className="text-amber-400 shrink-0" />
+              <h2 className="text-sm font-semibold text-amber-300">Sakshi learned {pending.length} new thing{pending.length === 1 ? "" : "s"} from calls / uploads — review</h2>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button size="sm" className="h-7 gap-1 text-[11px] bg-green-600 hover:bg-green-600/90" onClick={approveAllPending} disabled={approvingAll} data-testid="approve-all">
+                <CheckCheck size={12} />{approvingAll ? "Approving..." : "Approve all"}
+              </Button>
+              <Button size="sm" variant="outline" className="h-7 text-[11px] border-destructive/40 text-destructive hover:bg-destructive/10" onClick={rejectAllPending} data-testid="reject-all">
+                Reject all
+              </Button>
+            </div>
           </div>
           <div className="space-y-2">
             {pending.map((p) => (

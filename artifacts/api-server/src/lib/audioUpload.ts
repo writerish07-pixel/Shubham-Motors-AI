@@ -70,3 +70,32 @@ export function whisperFilename(original: string, mime: string): string {
 export function isUnsupportedAudioError(message: string): boolean {
   return /invalid|unsupported|could not|format|codec|audio file/i.test(message);
 }
+
+export const MAX_RECORDING_BYTES = 25 * 1024 * 1024;
+export const MAX_BULK_RECORDINGS = 40;
+
+export type NamedSize = { name: string; size: number };
+
+/** Split a multi-select (or folder dump) into files we will transcribe vs skip. */
+export function partitionRecordingFiles<T extends NamedSize>(files: T[]): {
+  accepted: T[];
+  skippedLarge: string[];
+  zipRejected: boolean;
+  truncated: number;
+} {
+  const zipRejected = files.length > 0 && files.every((f) => /\.zip$/i.test(f.name));
+  if (zipRejected) {
+    return { accepted: [], skippedLarge: [], zipRejected: true, truncated: 0 };
+  }
+  const skippedLarge: string[] = [];
+  const sized = files.filter((f) => {
+    if (/\.zip$/i.test(f.name)) return false;
+    if (f.size > MAX_RECORDING_BYTES) {
+      skippedLarge.push(f.name);
+      return false;
+    }
+    return true;
+  });
+  const truncated = Math.max(0, sized.length - MAX_BULK_RECORDINGS);
+  return { accepted: sized.slice(0, MAX_BULK_RECORDINGS), skippedLarge, zipRejected: false, truncated };
+}

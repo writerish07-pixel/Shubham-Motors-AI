@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import multer from "multer";
 import XLSX from "xlsx";
 import { db, knowledgeTable } from "@workspace/db";
@@ -415,13 +415,30 @@ router.get("/knowledge/pending", async (req, res): Promise<void> => {
   res.json(items);
 });
 
+router.post("/knowledge/pending/approve-all", async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const rows = await db.update(knowledgeTable)
+    .set({ requiresReview: false, isActive: true })
+    .where(eq(knowledgeTable.requiresReview, true))
+    .returning({ id: knowledgeTable.id });
+  invalidateKnowledgeCache();
+  res.json({ ok: true, approved: rows.length });
+});
+
+router.post("/knowledge/pending/reject-all", async (req, res): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const deleted = await db.delete(knowledgeTable)
+    .where(eq(knowledgeTable.requiresReview, true))
+    .returning({ id: knowledgeTable.id });
+  res.json({ ok: true, rejected: deleted.length });
+});
+
 // Approve only constrains to requiresReview=true so this endpoint can't be used
 // to flip arbitrary KB rows back to active.
 router.post("/knowledge/:id/approve", async (req, res): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   const id = parseInt(String(req.params.id), 10);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "invalid id" }); return; }
-  const { and } = await import("drizzle-orm");
   const [item] = await db.update(knowledgeTable)
     .set({ requiresReview: false, isActive: true })
     .where(and(eq(knowledgeTable.id, id), eq(knowledgeTable.requiresReview, true)))
@@ -437,7 +454,6 @@ router.post("/knowledge/:id/reject", async (req, res): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   const id = parseInt(String(req.params.id), 10);
   if (!Number.isFinite(id)) { res.status(400).json({ error: "invalid id" }); return; }
-  const { and } = await import("drizzle-orm");
   const deleted = await db.delete(knowledgeTable)
     .where(and(eq(knowledgeTable.id, id), eq(knowledgeTable.requiresReview, true)))
     .returning({ id: knowledgeTable.id });
