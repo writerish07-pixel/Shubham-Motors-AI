@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { inferAudioMime, isUnsupportedAudioError, whisperFilename } from "../src/lib/audioUpload";
+import { inferAudioMime, isUnsupportedAudioError, whisperFilename, partitionRecordingFiles, MAX_BULK_RECORDINGS, MAX_RECORDING_BYTES } from "../src/lib/audioUpload";
 import {
   TELECALLER_RECORDING_PROMPT,
   buildTelecallerFallbackItem,
+  formatBulkRecordingUploadToast,
   formatRecordingUploadToast,
   parseLearnOpts,
   shouldInsertTelecallerFallback,
@@ -77,5 +78,45 @@ test("upload toast reports inserted/queued, not a fake 0-success", () => {
   assert.match(
     formatRecordingUploadToast({ itemsInserted: 0, itemsQueuedForReview: 0, transcriptChars: 900 }).message,
     /0 skills/,
+  );
+});
+
+test("partitionRecordingFiles accepts a folder of mp3s and rejects a zip", () => {
+  const zip = partitionRecordingFiles([{ name: "New folder.zip", size: 80_000_000 }]);
+  assert.equal(zip.zipRejected, true);
+  assert.equal(zip.accepted.length, 0);
+
+  const mixed = partitionRecordingFiles([
+    { name: "a.mp3", size: 1_000_000 },
+    { name: "b.m4a", size: 2_000_000 },
+    { name: "huge.mp3", size: MAX_RECORDING_BYTES + 1 },
+    { name: "notes.zip", size: 100 },
+  ]);
+  assert.equal(mixed.zipRejected, false);
+  assert.deepEqual(mixed.accepted.map((f) => f.name), ["a.mp3", "b.m4a"]);
+  assert.deepEqual(mixed.skippedLarge, ["huge.mp3"]);
+
+  const many = Array.from({ length: MAX_BULK_RECORDINGS + 5 }, (_, i) => ({ name: `c${i}.mp3`, size: 1000 }));
+  const capped = partitionRecordingFiles(many);
+  assert.equal(capped.accepted.length, MAX_BULK_RECORDINGS);
+  assert.equal(capped.truncated, 5);
+});
+
+test("bulk upload toast summarises many files", () => {
+  assert.equal(
+    formatBulkRecordingUploadToast({ filesOk: 12, filesFailed: 0, filesTotal: 12, itemsInserted: 30, itemsQueuedForReview: 30 }).kind,
+    "success",
+  );
+  assert.match(
+    formatBulkRecordingUploadToast({ filesOk: 12, filesFailed: 0, filesTotal: 12, itemsInserted: 30, itemsQueuedForReview: 30 }).message,
+    /Approve all/,
+  );
+  assert.equal(
+    formatBulkRecordingUploadToast({ filesOk: 0, filesFailed: 3, filesTotal: 3, itemsInserted: 0, itemsQueuedForReview: 0 }).kind,
+    "error",
+  );
+  assert.equal(
+    formatBulkRecordingUploadToast({ filesOk: 10, filesFailed: 2, filesTotal: 12, itemsInserted: 8, itemsQueuedForReview: 8 }).kind,
+    "warning",
   );
 });

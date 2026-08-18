@@ -131,3 +131,35 @@ export function formatRecordingUploadToast(j: {
     message: `Heard the call (${j.transcriptChars ?? 0} chars) but extracted 0 skills. Try a clearer MP3 or M4A.`,
   };
 }
+
+export function formatBulkRecordingUploadToast(j: {
+  filesOk: number;
+  filesFailed: number;
+  filesTotal: number;
+  itemsInserted: number;
+  itemsQueuedForReview: number;
+}): { kind: "success" | "warning" | "error"; message: string } {
+  const { filesOk, filesFailed, filesTotal, itemsInserted, itemsQueuedForReview } = j;
+  if (filesTotal === 0) {
+    return { kind: "error", message: "No audio files selected. Pick MP3 or M4A files (not a ZIP)." };
+  }
+  if (filesOk === 0) {
+    return { kind: "error", message: `Could not read any of the ${filesTotal} recordings. Try MP3 or M4A.` };
+  }
+  if (filesFailed > 0) {
+    return {
+      kind: "warning",
+      message: `Heard ${filesOk}/${filesTotal} calls — learned ${itemsInserted} (${itemsQueuedForReview} in Review). ${filesFailed} file(s) failed.`,
+    };
+  }
+  if (itemsInserted === 0) {
+    return {
+      kind: "warning",
+      message: `Heard ${filesOk} call${filesOk === 1 ? "" : "s"} but extracted 0 new skills (already in Review, or too quiet).`,
+    };
+  }
+  return {
+    kind: "success",
+    message: `Heard ${filesOk} call${filesOk === 1 ? "" : "s"} — learned ${itemsInserted}. ${itemsQueuedForReview} in Review. Use Approve all when ready.`,
+  };
+}
