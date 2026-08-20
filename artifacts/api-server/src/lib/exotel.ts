@@ -14,37 +14,62 @@ function creds() {
   };
 }
 
+export function customerE164(phone: string): string {
+  const digits = phone.replace(/\D/g, "").slice(-10);
+  return digits.length === 10 ? `+91${digits}` : phone.replace(/\s/g, "");
+}
+
+export function streamWssUrl(webhookBaseUrl: string): string {
+  const host = webhookBaseUrl.replace(/\/$/, "");
+  return `${host.replace(/^https?:\/\//, "wss://")}/call/stream`;
+}
+
 /**
- * Place an outbound call via Exotel Connect API.
+ * Customer-first Voicebot outbound (NOT connect-two-humans).
  *
- * Exotel parameter meanings:
- *   From       = ExoPhone (your virtual landline shown as caller ID)
- *   To         = Customer's phone number (who you want to call)
- *   CallerId   = ExoPhone (caller ID shown to customer)
- *   Url        = Webhook URL that returns ExoML when the call connects
- *   StatusCallback = Webhook URL called when call status changes
+ * Connect-two-numbers (`From=ExoPhone`, `To=customer`) rings the ExoPhone /
+ * hunt group first. If that leg is a mobile, you hear one ring then the whole
+ * call dies before Sakshi ever talks.
+ *
+ * Voice-AI / connect-to-flow: ring the CUSTOMER first, CallerId = ExoPhone,
+ * attach Stream + inbound ExoML when they answer.
  */
+export function buildOutboundCallParams(opts: {
+  customerPhone: string;
+  virtualNumber: string;
+  webhookBaseUrl: string;
+}): URLSearchParams {
+  const customer = customerE164(opts.customerPhone);
+  const base = opts.webhookBaseUrl.replace(/\/$/, "");
+  return new URLSearchParams({
+    From: customer,
+    CallerId: opts.virtualNumber,
+    Url: `${base}/api/webhooks/exotel/inbound`,
+    StatusCallback: `${base}/api/webhooks/exotel/status`,
+    StreamUrl: streamWssUrl(base),
+    StreamType: "bidirectional",
+    Record: "true",
+    TimeOut: "30",
+  });
+}
+
+/** Place an outbound call via Exotel Connect — customer first, then Voicebot. */
 export async function makeOutboundCall(
   toNumber: string,
   webhookBaseUrl: string
 ): Promise<string | null> {
   const { sid, apiKey, apiToken, virtualNumber, base } = creds();
-
-  // Normalise to 10-digit mobile number (no leading 0 for mobile)
   const digits = toNumber.replace(/\D/g, "").slice(-10);
-  const inboundUrl = `${webhookBaseUrl}/api/webhooks/exotel/inbound`;
-  const statusUrl = `${webhookBaseUrl}/api/webhooks/exotel/status`;
-
-  logger.info({ sid, From: virtualNumber, To: digits, inboundUrl }, "Placing outbound call");
-
-  const params = new URLSearchParams({
-    From: virtualNumber,
-    To: digits,
-    CallerId: virtualNumber,
-    Url: inboundUrl,
-    StatusCallback: statusUrl,
-    Record: "true",
+  const params = buildOutboundCallParams({
+    customerPhone: toNumber,
+    virtualNumber,
+    webhookBaseUrl,
   });
+
+  logger.info(
+    { sid, From: params.get("From"), CallerId: virtualNumber, StreamUrl: params.get("StreamUrl") },
+    "Placing outbound call (customer-first Voicebot)",
+  );
 
   try {
     const response = await withRetry(

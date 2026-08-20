@@ -57,6 +57,7 @@ import {
   isCustomerAskingForHuman,
   isAgentPromisingTransfer,
   queueHumanTransferTeam,
+  shouldCloseVoicebotForTransfer,
   type TransferLeg,
 } from "./humanTransfer";
 
@@ -166,12 +167,18 @@ export function setupVoicebotWS(httpServer: Server): void {
             break;
           case "start":
             logger.info({ raw: JSON.stringify(msg).slice(0, 1000) }, "Raw start event");
-            try {
-              session = await handleStart(ws, msg);
-            } catch (err) {
-              logger.error({ err }, "handleStart threw — playing emergency greeting");
-              session = emergencySession(msg);
-              void playGreetingAudio(ws, session, FALLBACK_GREETING).catch(() => {});
+            {
+              const start = (msg.start ?? {}) as Record<string, unknown>;
+              const sid = String(start.streamSid ?? start.stream_sid ?? msg.streamSid ?? msg.stream_sid ?? "");
+              const audioGate = { started: false };
+              if (sid) void pumpKeepalive(ws, sid, audioGate);
+              try {
+                session = await handleStart(ws, msg, audioGate);
+              } catch (err) {
+                logger.error({ err }, "handleStart threw — playing emergency greeting");
+                session = emergencySession(msg);
+                void playGreetingAudio(ws, session, FALLBACK_GREETING, audioGate).catch(() => {});
+              }
             }
             break;
           case "media":
@@ -203,16 +210,32 @@ export function setupVoicebotWS(httpServer: Server): void {
   logger.info("Voicebot WebSocket server ready at /call/stream");
 }
 
+/** Near-silence so Exotel does not hang up while we wait on DB/TTS (SilenceAction=hangup). */
+async function pumpKeepalive(ws: WebSocket, streamSid: string, audioGate: { started: boolean }): Promise<void> {
+  const tick = new Int16Array(160);
+  tick[0] = 16;
+  const payload = s16ToPcm16Le(tick).toString("base64");
+  for (let i = 0; i < 400; i++) {
+    if (audioGate.started || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ event: "media", stream_sid: streamSid, streamSid, media: { payload } }));
+    } catch {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
 // ── handleStart ───────────────────────────────────────────────────────────────
-async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise<Session> {
+async function handleStart(ws: WebSocket, msg: Record<string, unknown>, audioGate?: { started: boolean }): Promise<Session> {
   const start = (msg.start ?? {}) as Record<string, unknown>;
   const callSid = String(start.callSid ?? start.call_sid ?? msg.callSid ?? msg.call_sid ?? "");
   const streamSid = String(start.streamSid ?? start.stream_sid ?? msg.streamSid ?? msg.stream_sid ?? "");
   const customParams = (start.customParameters ?? start.custom_parameters ?? {}) as Record<string, string>;
   const fromPhone = String(customParams.from ?? customParams.From ?? (start.from as string) ?? "");
-  // Detect outbound: Exotel passes direction in customParameters
   const direction = String(customParams.direction ?? customParams.Direction ?? "inbound").toLowerCase();
-  const isOutbound = direction === "outbound";
+  const outboundCtxEarly = fromPhone ? getOutboundContext(fromPhone.replace(/\D/g, "").slice(-10)) : null;
+  const isOutbound = direction === "outbound" || Boolean(outboundCtxEarly);
 
   logger.info({ callSid, streamSid, isOutbound }, "Call stream started");
 
@@ -257,7 +280,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
   // FIX #6: Read outbound context if this is an auto-dialer call.
   // Scheduler sets this in getOutboundContext(phone) before placing the call.
   const outboundCtx = isOutbound && fromPhone
-    ? getOutboundContext(fromPhone.replace(/\D/g, "").slice(-10))
+    ? (outboundCtxEarly ?? getOutboundContext(fromPhone.replace(/\D/g, "").slice(-10)))
     : null;
 
   let priorCompletedCalls = 0;
@@ -413,7 +436,7 @@ async function handleStart(ws: WebSocket, msg: Record<string, unknown>): Promise
   // Wait ~10s after greeting before a proactive follow-up (was 6s — felt pushy).
   scheduleProactiveNudge(ws, session, 10000);
 
-  void playGreetingAudio(ws, session, greeting)
+  void playGreetingAudio(ws, session, greeting, audioGate)
     .then(() => {
       if (session.isClosed || session.transferStarted) return;
       if (session.speechCount >= MIN_SPEECH_CHUNKS) {
@@ -473,7 +496,7 @@ function emergencySession(msg: Record<string, unknown>): Session {
   };
 }
 
-async function playGreetingAudio(ws: WebSocket, session: Session, greeting: string): Promise<void> {
+async function playGreetingAudio(ws: WebSocket, session: Session, greeting: string, audioGate?: { started: boolean }): Promise<void> {
   session.greetingProtectedUntil = Date.now() + GREETING_PROTECT_MS;
   session.isSpeaking = true;
   session.ttsAbort = false;
@@ -496,6 +519,7 @@ async function playGreetingAudio(ws: WebSocket, session: Session, greeting: stri
     // Call 18: line noise during TTS wait set speechCount and skipped namaste,
     // so the customer heard silence then got dumped to sales. Always play namaste.
     session.speakingStartedAt = Date.now();
+    if (audioGate) audioGate.started = true;
     await playPcm8k(ws, session.streamSid, pcm, session);
     if (!session.ttsAbort) session.greetingPlayed = true;
     logger.info({ callSid: session.callSid, samples: pcm.length, interrupted: Boolean(session.ttsAbort) }, "Greeting audio sent");
@@ -1248,6 +1272,15 @@ async function runTransfer(ws: WebSocket, session: Session, agentText: string): 
     } catch (err) {
       logger.warn({ err, callSid: session.callSid }, "Failed to persist transferredTo on handoff");
     }
+  }
+
+  if (!shouldCloseVoicebotForTransfer(queued, legs.length)) {
+    session.transferStarted = false;
+    logger.error({ callSid: session.callSid, tag, queued, salesCount: legs.length }, "Transfer had no sales number — keeping Voicebot on the line");
+    const stay = "सेल्स लाइन अभी नहीं मिल रही। मैं यहीं हूँ — बताइए, और क्या जानना है?";
+    session.transcript.push(`Agent: ${stay}`);
+    await streamTtsToWs(ws, session.streamSid, stay, session.language, session);
+    return;
   }
 
   await db.update(leadsTable).set({ status: "hot", score: 85 }).where(eq(leadsTable.id, session.leadId));
